@@ -301,7 +301,9 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     s << "#formtitle .dot{position:absolute;top:10px;width:9px;height:9px;border-radius:5px}";
     // Components on the canvas get the SAME default styling as in the built
     // app, from the shared mapping — otherwise the preview lies.
-    s << openepl::ui::control_styles();
+    // SCOPED to the canvas: these rules include `div{position:absolute}`, which
+    // would otherwise collapse every panel in the IDE onto one point.
+    s << openepl::ui::control_styles("#canvas");
     s << "#canvas{position:relative;overflow:hidden;border-bottom-left-radius:8px;"
          "border-bottom-right-radius:8px}";
     // selection chrome
@@ -788,6 +790,44 @@ bool property_needs_quotes(const std::string& type_name, const std::string& prop
     return true;
 }
 
+/// Begin dragging `id`, grabbing at screen point (mx,my).
+///
+/// The grab offset comes from the MODEL, not from the element: select()
+/// rebuilds the canvas, so the element is destroyed before we could ask where
+/// it was, and its stale offset made every drag jump to the top-left corner.
+void begin_drag(const std::string& id, int mx, int my) {
+    Rml::Element* canvas = by_id("canvas");
+    const Component* comp = g.model.find(id);
+    if (!canvas || !comp) return;
+    const auto origin = canvas->GetAbsoluteOffset();
+    g.drag_dx = mx - ((int)origin.x + prop_int(*comp, "left", 0));
+    g.drag_dy = my - ((int)origin.y + prop_int(*comp, "top", 0));
+    g.dragging = true;
+    select(id);
+}
+
+/// Continue a drag to screen point (mx,my).
+void drag_to(int mx, int my) {
+    if (!g.dragging || g.selected.empty()) return;
+    Component* c = g.model.find(g.selected);
+    Rml::Element* canvas = by_id("canvas");
+    if (!c || !canvas) return;
+    const auto origin = canvas->GetAbsoluteOffset();
+    int x = mx - g.drag_dx - (int)origin.x;
+    int y = my - g.drag_dy - (int)origin.y;
+    const int fw = prop_int(g.model.form, "width", 420);
+    const int fh = prop_int(g.model.form, "height", 260);
+    const int w = prop_int(*c, "width", 120), h = prop_int(*c, "height", 32);
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > fw - w) x = fw - w;
+    if (y > fh - h) y = fh - h;
+    c->set_property("left", std::to_string(snap(x)));
+    c->set_property("top", std::to_string(snap(y)));
+    mark_dirty();
+    rebuild_canvas();
+}
+
 void save() {
     std::string err;
     if (!save_model(g.model, g.pending_subs, property_needs_quotes, err)) {
@@ -985,13 +1025,13 @@ struct Listener : Rml::EventListener {
             // a caption) deliver mousedown on the CHILD, which carries no id —
             // so walk up to the component. Without this, whether a component
             // could be dragged depended on which part you grabbed.
+            // Composite components (a checkbox is a container holding a box and
+            // a caption) deliver mousedown on the CHILD, which carries no id —
+            // so walk up to the component. Without this, whether a component
+            // could be dragged depended on which part you grabbed.
             for (Rml::Element* e = el; e; e = e->GetParentNode()) {
                 if (!e->HasAttribute("oe-id")) continue;
-                select(e->GetAttribute<Rml::String>("oe-id", ""));
-                g.dragging = true;
-                const auto off = e->GetAbsoluteOffset();
-                g.drag_dx = mx - (int)off.x;
-                g.drag_dy = my - (int)off.y;
+                begin_drag(e->GetAttribute<Rml::String>("oe-id", ""), mx, my);
                 break;
             }
             return;
@@ -1050,26 +1090,7 @@ struct Listener : Rml::EventListener {
                 return;
             }
 
-            if (g.dragging && !g.selected.empty()) {
-                Component* c = g.model.find(g.selected);
-                Rml::Element* canvas = by_id("canvas");
-                if (!c || !canvas) return;
-                const auto origin = canvas->GetAbsoluteOffset();
-                int x = mx - g.drag_dx - (int)origin.x;
-                int y = my - g.drag_dy - (int)origin.y;
-                // Clamp inside the form and snap to the grid the canvas draws.
-                const int fw = prop_int(g.model.form, "width", 420);
-                const int fh = prop_int(g.model.form, "height", 260);
-                const int w = prop_int(*c, "width", 120), h = prop_int(*c, "height", 32);
-                if (x < 0) x = 0;
-                if (y < 0) y = 0;
-                if (x > fw - w) x = fw - w;
-                if (y > fh - h) y = fh - h;
-                c->set_property("left", std::to_string(snap(x)));
-                c->set_property("top", std::to_string(snap(y)));
-                mark_dirty();
-                rebuild_canvas();
-            }
+            if (g.dragging) drag_to(mx, my);
             return;
         }
 
@@ -1133,6 +1154,22 @@ void run_script(const char* script) {
                         }
                         mark_dirty();
                         refresh_all();
+                    }
+                }
+            } else if (verb == "drag") {
+                // drag:<id>@<x0>,<y0>-><x1>,<y1> in CANVAS coordinates; exercises
+                // exactly the path the mouse takes.
+                const size_t at = arg.find('@'), arrow = arg.find("->");
+                if (at != std::string::npos && arrow != std::string::npos) {
+                    const std::string id = arg.substr(0, at);
+                    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+                    std::sscanf(arg.c_str() + at + 1, "%d,%d", &x0, &y0);
+                    std::sscanf(arg.c_str() + arrow + 2, "%d,%d", &x1, &y1);
+                    if (Rml::Element* canvas = by_id("canvas")) {
+                        const auto o = canvas->GetAbsoluteOffset();
+                        begin_drag(id, (int)o.x + x0, (int)o.y + y0);
+                        drag_to((int)o.x + x1, (int)o.y + y1);
+                        g.dragging = false;
                     }
                 }
             } else if (verb == "save") save();

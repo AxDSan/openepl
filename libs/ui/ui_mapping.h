@@ -112,24 +112,29 @@ inline std::string rcss_value(const char* property, const char* value) {
 /// Shared by the runtime seed AND the designer canvas — with two copies, a
 /// control would look different in the designer than in the built app, which is
 /// the WYSIWYG drift D9 exists to prevent.
-inline const char* control_styles() {
+inline std::string control_styles(const std::string& scope = "") {
+    // `scope` prefixes every selector so these rules can be confined to a
+    // subtree. The app document contains only the form, so it uses no scope;
+    // the DESIGNER must scope them to its canvas, or `div{position:absolute}`
+    // lands on the whole IDE and every panel collapses onto the same point.
+    const std::string p = scope.empty() ? std::string() : scope + " ";
     return
-        "div { display: block; position: absolute; }"
-        "button { display: block; position: absolute; text-align: center; padding-top: 8px; }"
-        "input.text { display: block; position: absolute; background-color: #ffffff;"
-        " border: 1px #d0d7de; border-radius: 4px; padding: 4px 6px 0 6px; color: #1f2328; }"
-        "input.text:focus { border: 1px #1e60d5; }"
-        "div.oe-checkbox { background-color: #00000000; }"
-        "div.oe-checkbox input { display: inline-block; width: 16px; height: 16px;"
-        " background-color: #ffffff; border: 1px #8c959f; border-radius: 3px;"
-        " vertical-align: -3px; }"
-        "div.oe-checkbox input:checked { background-color: #1e60d5; border: 1px #1e60d5; }"
-        "div.oe-checkbox span.oe-caption { display: inline-block; padding-left: 8px; }"
-        "div.oe-groupbox { border: 1px #d0d7de; border-radius: 6px; padding: 8px; }"
-        "progress { display: block; position: absolute; background-color: #e1e4e8;"
-        " border-radius: 8px; }"
-        "progress fill { background-color: #1e60d5; border-radius: 8px; }"
-        "img { display: block; position: absolute; }";
+        p + "div { display: block; position: absolute; }" +
+        p + "button { display: block; position: absolute; text-align: center; padding-top: 8px; }" +
+        p + "input.text { display: block; position: absolute; background-color: #ffffff;"
+            " border: 1px #d0d7de; border-radius: 4px; padding: 4px 6px 0 6px; color: #1f2328; }" +
+        p + "input.text:focus { border: 1px #1e60d5; }" +
+        p + "div.oe-checkbox { background-color: #00000000; }" +
+        p + "div.oe-checkbox input { display: inline-block; position: relative; width: 16px;"
+            " height: 16px; background-color: #ffffff; border: 1px #8c959f; border-radius: 3px;"
+            " vertical-align: -3px; }" +
+        p + "div.oe-checkbox input:checked { background-color: #1e60d5; border: 1px #1e60d5; }" +
+        p + "div.oe-checkbox span.oe-caption { display: inline-block; padding-left: 8px; }" +
+        p + "div.oe-groupbox { border: 1px #d0d7de; border-radius: 6px; padding: 8px; }" +
+        p + "progress { display: block; position: absolute; background-color: #e1e4e8;"
+            " border-radius: 8px; }" +
+        p + "progress fill { background-color: #1e60d5; border-radius: 8px; }" +
+        p + "img { display: block; position: absolute; }";
 }
 
 /// The seed document every OpenEPL form is built into.

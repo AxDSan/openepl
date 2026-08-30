@@ -636,3 +636,73 @@ fn designer_output_always_compiles() {
         "the designer saved a file the compiler rejects"
     );
 }
+
+/// Dragging must move a component to where the cursor put it — for EVERY
+/// component, including composites.
+///
+/// This has broken twice: once because mousedown lands on a child element that
+/// carries no id (so checkboxes could not be dragged at all), and once because
+/// `select()` rebuilds the canvas, destroying the element whose offset was then
+/// read — making every drag jump to the top-left corner. Eyeballing the window
+/// caught both late; this catches them immediately.
+#[test]
+fn dragging_moves_components_precisely() {
+    let repo = repo();
+    let designer = repo.join("designer/openepl-designer");
+    if !designer.exists() {
+        eprintln!("designer not built; skipping");
+        return;
+    }
+    let project = std::env::temp_dir().join("openepl_drag.oir");
+    std::fs::copy(repo.join("examples/controls.oir"), &project).expect("seed");
+
+    // grp starts at (20,120). Grab 10px inside it and drop at (150,60), so it
+    // must land at (140,50) — cursor position minus the grab offset.
+    let out = Command::new(&designer)
+        .arg(&project)
+        .arg(repo.join("target/debug/openepl"))
+        .env("OPENEPL_DESIGNER_SCRIPT", "drag:grp@30,130->150,60;save")
+        .output()
+        .expect("run designer");
+    assert!(out.status.success());
+
+    let src = std::fs::read_to_string(&project).expect("read");
+    let grp = src
+        .split("groupbox grp")
+        .nth(1)
+        .expect("groupbox in saved file")
+        .to_string();
+    assert!(
+        grp.contains("left = 140"),
+        "drag lost the grab offset:\n{grp}"
+    );
+    assert!(
+        grp.contains("top = 50"),
+        "drag lost the grab offset:\n{grp}"
+    );
+
+    // A composite component must drag too: the checkbox's box and caption are
+    // children with no id of their own. It starts at (20,84); grabbing 5px in
+    // and dropping at (100,200) gives (95,195), which snaps to the 10px grid.
+    let out = Command::new(&designer)
+        .arg(&project)
+        .arg(repo.join("target/debug/openepl"))
+        .env("OPENEPL_DESIGNER_SCRIPT", "drag:agree@25,89->100,200;save")
+        .output()
+        .expect("run designer");
+    assert!(out.status.success());
+    let src = std::fs::read_to_string(&project).expect("read");
+    let cb = src
+        .split("checkbox agree")
+        .nth(1)
+        .expect("checkbox")
+        .to_string();
+    assert!(
+        cb.contains("left = 100"),
+        "composite component did not drag:\n{cb}"
+    );
+    assert!(
+        cb.contains("top = 200"),
+        "composite drag lost its y offset:\n{cb}"
+    );
+}
