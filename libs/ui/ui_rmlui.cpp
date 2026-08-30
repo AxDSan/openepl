@@ -32,6 +32,7 @@ struct UiState {
     Rml::Context* context = nullptr;
     std::unordered_map<uint64_t, bool> interactive;   /* handle -> wants hover states */
     std::unordered_map<uint64_t, uint64_t> parent_of;  /* handle -> parent handle */
+    std::unordered_map<uint64_t, std::string> type_of;  /* handle -> component type */
     Rml::ElementDocument* document = nullptr;
     std::vector<Rml::Element*> widgets;   // index+1 == OpenEPL_Widget handle
     std::string get_scratch;
@@ -155,6 +156,12 @@ OpenEPL_Widget oe_ui_create(OpenEPL_Widget parent, const char* type_name) {
     if (!p) return 0;
     Rml::ElementPtr child = g.document->CreateElement(openepl::ui::tag_for(type_name));
     if (!child) return 0;
+    // Some substrate elements need an attribute at creation (an <input> needs
+    // its type before it will behave as a text box or a checkbox).
+    const char* attr_value = nullptr;
+    if (const char* attr = openepl::ui::creation_attribute(type_name, &attr_value)) {
+        child->SetAttribute(attr, Rml::String(attr_value));
+    }
     Rml::Element* raw = p->AppendChild(std::move(child));
     if (!raw) return 0;
     OpenEPL_Widget h = publish(raw);
@@ -162,6 +169,13 @@ OpenEPL_Widget oe_ui_create(OpenEPL_Widget parent, const char* type_name) {
      * to the mouse reads as broken regardless of whether its event fires. */
     if (std::strcmp(type_name, "button") == 0) g.interactive[h] = true;
     g.parent_of[h] = parent ? parent : 1;
+    g.type_of[h] = type_name;
+    if (std::strcmp(type_name, "groupbox") == 0) raw->SetAttribute("class", Rml::String("oe-groupbox"));
+    if (std::strcmp(type_name, "checkbox") == 0) raw->SetAttribute("class", Rml::String("oe-checkbox"));
+    if (const char* markup = openepl::ui::inner_markup(type_name)) raw->SetInnerRML(markup);
+    // RmlUi's <progress> defaults to max=1, which makes any percentage look
+    // full; OpenEPL's `value` is a percentage.
+    if (std::strcmp(type_name, "progressbar") == 0) raw->SetAttribute("max", Rml::String("100"));
     return h;
 }
 
@@ -169,7 +183,39 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
     Rml::Element* e = resolve(w);
     if (!e || !property || !value) return 1;
 
-    if (openepl::ui::is_text_property(property)) {
+    const std::string type = g.type_of.count(w) ? g.type_of[w] : std::string("form");
+
+    // Attribute-backed properties (an editbox's value, a checkbox's checked
+    // state, an image's source) are not RCSS styling.
+    if (const char* attr = openepl::ui::attribute_for(type.c_str(), property)) {
+        // Composite components route to the child that actually carries it.
+        Rml::Element* target = e;
+        if (openepl::ui::is_composite(type.c_str()) && std::strcmp(property, "checked") == 0) {
+            if (Rml::Element* box = e->GetElementById("")) target = box;
+            for (int i = 0; i < e->GetNumChildren(); i++) {
+                if (e->GetChild(i)->GetTagName() == "input") { target = e->GetChild(i); break; }
+            }
+        }
+        e = target;
+        if (std::strcmp(property, "checked") == 0) {
+            const bool on = std::strcmp(value, "true") == 0 || std::strcmp(value, "1") == 0;
+            if (on) e->SetAttribute(attr, Rml::String("checked"));
+            else e->RemoveAttribute(attr);
+        } else {
+            e->SetAttribute(attr, Rml::String(value));
+        }
+        return 0;
+    }
+
+    if (openepl::ui::is_text_property(property) && openepl::ui::text_is_content(type.c_str())) {
+        if (openepl::ui::is_composite(type.c_str())) {
+            for (int i = 0; i < e->GetNumChildren(); i++) {
+                if (e->GetChild(i)->GetTagName() == "span") {
+                    e->GetChild(i)->SetInnerRML(value);
+                    return 0;
+                }
+            }
+        }
         e->SetInnerRML(value);
         /* Keep the accessible name in step: a screen reader must announce the
          * current text, not whatever it was at construction. */
@@ -196,8 +242,15 @@ const char* oe_ui_get(OpenEPL_Widget w, const char* property) {
     Rml::Element* e = resolve(w);
     if (!e || !property) return nullptr;
 
+    const std::string type = g.type_of.count(w) ? g.type_of[w] : std::string("form");
+
     Rml::String value;
-    if (openepl::ui::is_text_property(property)) {
+    if (const char* attr = openepl::ui::attribute_for(type.c_str(), property)) {
+        // Attribute-backed properties must be READ from the attribute too, or
+        // an editbox reports its markup instead of what the user typed.
+        value = e->GetAttribute<Rml::String>(attr, "");
+    } else if (openepl::ui::is_text_property(property) &&
+               openepl::ui::text_is_content(type.c_str())) {
         value = e->GetInnerRML();
     } else {
         const Rml::Property* p = e->GetProperty(openepl::ui::rcss_name(property));
@@ -362,6 +415,8 @@ void oe_ui_shutdown(void) {
     g_stylers.clear();
     g.interactive.clear();
     g.widgets.clear();
+    g.type_of.clear();
+    g.parent_of.clear();
     g.initialised = false;
 }
 

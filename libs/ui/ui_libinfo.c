@@ -38,12 +38,66 @@ static const OpenEPL_PropertyDesc LABEL_PROPS[] = {
     { "color", OE_SDT_TEXT, "#ffffff" },
 };
 
+/* --- editbox ---------------------------------------------------------- */
+static const OpenEPL_PropertyDesc EDIT_PROPS[] = {
+    { "text",   OE_SDT_TEXT, "" },
+    { "left",   OE_SDT_INT,  "0" },
+    { "top",    OE_SDT_INT,  "0" },
+    { "width",  OE_SDT_INT,  "160" },
+    { "height", OE_SDT_INT,  "26" },
+    { "color",  OE_SDT_TEXT, "#1f2328" },
+};
+static const OpenEPL_EventDesc EDIT_EVENTS[] = { { "change" } };
+
+/* --- checkbox --------------------------------------------------------- */
+static const OpenEPL_PropertyDesc CHECK_PROPS[] = {
+    { "text",    OE_SDT_TEXT, "Check me" },
+    { "checked", OE_SDT_BOOL, "false" },
+    { "left",    OE_SDT_INT,  "0" },
+    { "top",     OE_SDT_INT,  "0" },
+    { "color",   OE_SDT_TEXT, "#1f2328" },
+};
+static const OpenEPL_EventDesc CHECK_EVENTS[] = { { "change" } };
+
+/* --- groupbox --------------------------------------------------------- */
+static const OpenEPL_PropertyDesc GROUP_PROPS[] = {
+    { "text",         OE_SDT_TEXT, "Group" },
+    { "left",         OE_SDT_INT,  "0" },
+    { "top",          OE_SDT_INT,  "0" },
+    { "width",        OE_SDT_INT,  "200" },
+    { "height",       OE_SDT_INT,  "120" },
+    { "border_color", OE_SDT_TEXT, "#d0d7de" },
+};
+
+/* --- image ------------------------------------------------------------ */
+static const OpenEPL_PropertyDesc IMAGE_PROPS[] = {
+    { "source", OE_SDT_TEXT, "" },
+    { "left",   OE_SDT_INT,  "0" },
+    { "top",    OE_SDT_INT,  "0" },
+    { "width",  OE_SDT_INT,  "120" },
+    { "height", OE_SDT_INT,  "120" },
+};
+
+/* --- progressbar ------------------------------------------------------ */
+static const OpenEPL_PropertyDesc PROG_PROPS[] = {
+    { "value",  OE_SDT_INT, "50" },
+    { "left",   OE_SDT_INT, "0" },
+    { "top",    OE_SDT_INT, "0" },
+    { "width",  OE_SDT_INT, "200" },
+    { "height", OE_SDT_INT, "16" },
+};
+
 #define N(a) (int32_t)(sizeof(a) / sizeof((a)[0]))
 
 static const OpenEPL_ComponentDesc UI_COMPONENTS[] = {
     { "form",   OE_ROLE_WINDOW, N(FORM_PROPS),   FORM_PROPS,   N(FORM_EVENTS),   FORM_EVENTS },
     { "button", OE_ROLE_BUTTON, N(BUTTON_PROPS), BUTTON_PROPS, N(BUTTON_EVENTS), BUTTON_EVENTS },
     { "label",  OE_ROLE_LABEL,  N(LABEL_PROPS),  LABEL_PROPS,  0,                0 },
+    { "editbox", OE_ROLE_TEXTBOX, N(EDIT_PROPS),  EDIT_PROPS,   N(EDIT_EVENTS),   EDIT_EVENTS },
+    { "checkbox", OE_ROLE_CHECKBOX, N(CHECK_PROPS), CHECK_PROPS, N(CHECK_EVENTS), CHECK_EVENTS },
+    { "groupbox", OE_ROLE_GROUP,  N(GROUP_PROPS),  GROUP_PROPS,  0,               0 },
+    { "image",   OE_ROLE_UNKNOWN, N(IMAGE_PROPS),  IMAGE_PROPS,  0,               0 },
+    { "progressbar", OE_ROLE_UNKNOWN, N(PROG_PROPS), PROG_PROPS, 0,               0 },
 };
 
 static const OpenEPL_LibInfo UI_INFO = {

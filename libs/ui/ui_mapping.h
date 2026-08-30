@@ -23,9 +23,51 @@ namespace openepl::ui {
 /// ours; this is the only place it meets the substrate's.
 inline const char* tag_for(const char* type_name) {
     if (std::strcmp(type_name, "button") == 0) return "button";
-    if (std::strcmp(type_name, "label") == 0) return "div";
-    if (std::strcmp(type_name, "form") == 0) return "div";
-    return "div";
+    if (std::strcmp(type_name, "editbox") == 0) return "input";
+    // A checkbox is a container holding the box and its caption.
+    if (std::strcmp(type_name, "checkbox") == 0) return "div";
+    if (std::strcmp(type_name, "image") == 0) return "img";
+    if (std::strcmp(type_name, "progressbar") == 0) return "progress";
+    return "div";   // label, groupbox, form
+}
+
+/// Some components need an attribute at creation for the substrate element to
+/// behave correctly (an `<input>` needs its type). Returns nullptr when none.
+inline const char* creation_attribute(const char* type_name, const char** value) {
+    if (std::strcmp(type_name, "editbox") == 0) { *value = "text"; return "type"; }
+    return nullptr;
+}
+
+/// Components built from more than one substrate element. Returns the inner
+/// markup to install on creation, or nullptr for simple components.
+inline const char* inner_markup(const char* type_name) {
+    if (std::strcmp(type_name, "checkbox") == 0)
+        return "<input type='checkbox' class='oe-box'/><span class='oe-caption'></span>";
+    return nullptr;
+}
+
+/// Whether `checked` / `text` must be routed to a child element.
+inline bool is_composite(const char* type_name) {
+    return std::strcmp(type_name, "checkbox") == 0;
+}
+
+/// Properties carried as element ATTRIBUTES rather than RCSS styling.
+/// Returns the attribute name, or nullptr if the property is styling.
+inline const char* attribute_for(const char* type_name, const char* property) {
+    if (std::strcmp(property, "text") == 0 && std::strcmp(type_name, "editbox") == 0)
+        return "value";
+    if (std::strcmp(property, "checked") == 0) return "checked";
+    if (std::strcmp(property, "max") == 0) return "max";
+    if (std::strcmp(property, "source") == 0) return "src";
+    if (std::strcmp(property, "value") == 0 && std::strcmp(type_name, "progressbar") == 0)
+        return "value";
+    return nullptr;
+}
+
+/// Whether a component renders its `text` property as element content.
+inline bool text_is_content(const char* type_name) {
+    return std::strcmp(type_name, "editbox") != 0 && std::strcmp(type_name, "image") != 0 &&
+           std::strcmp(type_name, "progressbar") != 0;
 }
 
 /// OpenEPL property names use underscores (`background_color`) to match the rest
@@ -62,12 +104,37 @@ inline std::string rcss_value(const char* property, const char* value) {
 /// D21: a document created bare drops decorators silently while `SetProperty`
 /// still reports success. Always seed.
 inline std::string seed_document(int width, int height, const std::string& font_family) {
-    char buf[1024];
+    // RmlUi ships form controls with NO default appearance: an <input> or
+    // <progress> renders as nothing until styled. These defaults are what makes
+    // editbox/checkbox/progressbar real controls rather than invisible ones —
+    // and they live here so the designer canvas and the built app agree (D9).
+    char buf[2048];
     std::snprintf(buf, sizeof buf,
         "<rml><head><style>"
-        "body { width: %dpx; height: %dpx; font-family: '%s'; font-size: 16px; }"
-        "button { display: block; position: absolute; text-align: center; padding-top: 8px; }"
+        // RmlUi's default text colour is WHITE, so any component that does not
+        // set `color` renders invisibly on a light form. Give text a sensible
+        // ink by default; components override it with their `color` property.
+        "body { width: %dpx; height: %dpx; font-family: '%s'; font-size: 16px;"
+        " color: #1f2328; }"
         "div { display: block; position: absolute; }"
+        "button { display: block; position: absolute; text-align: center; padding-top: 8px; }"
+        // text box
+        "input.text { display: block; position: absolute; background-color: #ffffff;"
+        " border: 1px #d0d7de; border-radius: 4px; padding: 4px 6px 0 6px; color: #1f2328; }"
+        "input.text:focus { border: 1px #1e60d5; }"
+        // group box: a titled frame
+        "div.oe-groupbox { border: 1px #d0d7de; border-radius: 6px; padding: 8px; }"
+        // progress bar
+        "div.oe-checkbox { background-color: #00000000; }"
+        "div.oe-checkbox input { display: inline-block; width: 16px; height: 16px;"
+        " background-color: #ffffff; border: 1px #8c959f; border-radius: 3px;"
+        " vertical-align: -3px; }"
+        "div.oe-checkbox input:checked { background-color: #1e60d5; border: 1px #1e60d5; }"
+        "div.oe-checkbox span.oe-caption { display: inline-block; padding-left: 8px; }"
+        "progress { display: block; position: absolute; background-color: #e1e4e8;"
+        " border-radius: 8px; }"
+        "progress fill { background-color: #1e60d5; border-radius: 8px; }"
+        "img { display: block; position: absolute; }"
         "</style></head><body/></rml>",
         width, height, font_family.c_str());
     return std::string(buf);

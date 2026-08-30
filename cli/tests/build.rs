@@ -544,6 +544,44 @@ fn designer_toolbox_lists_components() {
         .expect("run designer");
     let stderr = String::from_utf8_lossy(&out.stderr);
     for want in ["oe-add=button", "oe-add=label"] {
-        assert!(stderr.contains(want), "toolbox is missing {want}:\n{stderr}");
+        assert!(
+            stderr.contains(want),
+            "toolbox is missing {want}:\n{stderr}"
+        );
     }
+}
+
+/// Every component the toolbox offers must be a REAL control, not a mockup:
+/// it renders, and where it holds data that data is readable from code.
+#[test]
+fn all_components_are_real_controls() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let bin = build_as("controls", "real");
+    let out = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "4")
+        // Handle 7 is the button: the form root is 1 and children follow in
+        // declaration order (ADR 0008).
+        .env("OPENEPL_UI_SYNTH_CLICK", "7")
+        .env("OPENEPL_UI_DUMP_A11Y", "1")
+        .output()
+        .expect("run controls");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The editbox holds real text that code can read back through the ABI.
+    assert!(
+        stdout.contains("name = Ada"),
+        "editbox value was not readable from code:\n{stdout}"
+    );
+    // Every component reached the accessibility tree, so each really exists.
+    let nodes = stdout
+        .lines()
+        .filter(|l| l.starts_with("a11y: id="))
+        .count();
+    assert!(
+        nodes >= 7,
+        "expected form + 6 components in the a11y tree, got {nodes}:\n{stdout}"
+    );
 }

@@ -43,9 +43,11 @@ constexpr int WIN_W = 1440, WIN_H = 900;
 /// about what actually exists — clicking one says so rather than failing oddly.
 struct PlannedTool { const char* section; const char* name; };
 const PlannedTool PLANNED[] = {
-    {"Common Controls", "EditBox"},  {"Common Controls", "ListBox"},
-    {"Common Controls", "ComboBox"}, {"Common Controls", "CheckBox"},
-    {"Common Controls", "Image"},    {"Containers", "GroupBox"},
+    // These need language or platform features that do not exist yet: list
+    // controls need arrays, and the System components need timers and native
+    // dialogs. Listed greyed rather than omitted, so the toolbox shows the
+    // intended shape without pretending they work.
+    {"Common Controls", "ListBox"},  {"Common Controls", "ComboBox"},
     {"Containers", "TabControl"},    {"Containers", "Splitter"},
     {"System", "Timer"},             {"System", "FileDialog"},
     {"System", "TrayIcon"},
@@ -64,6 +66,17 @@ struct Designer {
     bool dirty = false;
     bool dragging = false;
     int drag_dx = 0, drag_dy = 0;
+
+    /// Form-window resize, as in Visual Studio / RAD Studio: grab an edge or
+    /// the corner of the preview and drag.
+    bool resizing_form = false;
+    std::string resize_edge;          // "e", "s" or "se"
+    int resize_x0 = 0, resize_y0 = 0, resize_w0 = 0, resize_h0 = 0;
+
+    /// Component resize via the selection anchors.
+    bool resizing_comp = false;
+    std::string comp_edge;
+    int comp_x0 = 0, comp_y0 = 0, comp_w0 = 0, comp_h0 = 0;
 };
 Designer g;
 
@@ -234,6 +247,10 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     // selection chrome
     s << "#overlay{position:absolute;left:0;top:0;width:100%;height:100%}";
     s << ".selbox{border:1px " << ACCENT << "}";
+    s << ".fgrip{background-color:#00000000}";
+    s << ".fgrip:hover{background-color:" << ACCENT << "}";
+    s << ".fgrip.corner{background-color:" << BORDER << ";border-radius:2px}";
+    s << ".fgrip.corner:hover{background-color:" << ACCENT << "}";
     s << ".handle{width:7px;height:7px;background-color:#ffffff;border:1px " << ACCENT << "}";
     s << ".badge{background-color:" << ACCENT << ";color:#fff;font-size:11px;padding:3px 7px 3px 7px;"
          "border-radius:4px;white-space:nowrap}";
@@ -362,6 +379,12 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
 
 /* --- canvas --------------------------------------------------------------- */
 
+/// Snap to the canvas dot grid, so dragged components line up the way the grid
+/// implies they will. Holding nothing snaps; this is the behaviour users expect
+/// from a designer that draws a grid.
+constexpr int GRID = 10;
+int snap(int v) { return ((v + GRID / 2) / GRID) * GRID; }
+
 int prop_int(const Component& c, const char* name, int fallback) {
     if (const std::string* v = c.property(name)) {
         return std::atoi(v->c_str());
@@ -397,17 +420,70 @@ void rebuild_canvas() {
 
     for (const auto& comp : g.model.children) {
         Rml::ElementPtr child = g.doc->CreateElement(openepl::ui::tag_for(comp.type_name.c_str()));
+        const char* attr_value = nullptr;
+        if (const char* attr =
+                openepl::ui::creation_attribute(comp.type_name.c_str(), &attr_value)) {
+            child->SetAttribute(attr, Rml::String(attr_value));
+        }
         Rml::Element* e = canvas->AppendChild(std::move(child));
         e->SetProperty("position", "absolute");
+        if (comp.type_name == "groupbox") e->SetAttribute("class", Rml::String("oe-groupbox"));
+        if (comp.type_name == "checkbox") e->SetAttribute("class", Rml::String("oe-checkbox"));
+        if (const char* markup = openepl::ui::inner_markup(comp.type_name.c_str())) {
+            e->SetInnerRML(markup);
+        }
+        if (comp.type_name == "progressbar") e->SetAttribute("max", Rml::String("100"));
         e->SetAttribute("oe-id", comp.id);
         for (const auto& p : comp.properties) {
-            if (openepl::ui::is_text_property(p.first.c_str())) {
-                e->SetInnerRML(esc(p.second));
+            const char* attr =
+                openepl::ui::attribute_for(comp.type_name.c_str(), p.first.c_str());
+            if (attr) {
+                if (p.first == "checked") {
+                    Rml::Element* box = e;
+                    for (int i = 0; i < e->GetNumChildren(); i++) {
+                        if (e->GetChild(i)->GetTagName() == "input") { box = e->GetChild(i); break; }
+                    }
+                    if (p.second == "true" || p.second == "1") {
+                        box->SetAttribute(attr, Rml::String("checked"));
+                    }
+                } else {
+                    e->SetAttribute(attr, Rml::String(p.second));
+                }
+            } else if (openepl::ui::is_text_property(p.first.c_str()) &&
+                       openepl::ui::text_is_content(comp.type_name.c_str())) {
+                Rml::Element* text_target = e;
+                if (openepl::ui::is_composite(comp.type_name.c_str())) {
+                    for (int i = 0; i < e->GetNumChildren(); i++) {
+                        if (e->GetChild(i)->GetTagName() == "span") {
+                            text_target = e->GetChild(i);
+                            break;
+                        }
+                    }
+                }
+                text_target->SetInnerRML(esc(p.second));
             } else {
                 e->SetProperty(openepl::ui::rcss_name(p.first.c_str()),
                                openepl::ui::rcss_value(p.first.c_str(), p.second.c_str()));
             }
         }
+    }
+
+    // Form resize grips, on the edges of the preview window itself.
+    {
+        const int fwid = fw, fhei = fh;
+        auto grip = [&](const char* edge, int px, int py, int pw, int ph, const char* cls) {
+            Rml::Element* d = overlay->AppendChild(g.doc->CreateElement("div"));
+            d->SetProperty("position", "absolute");
+            d->SetAttribute("class", Rml::String(cls));
+            d->SetAttribute("oe-formgrip", Rml::String(edge));
+            d->SetProperty("left", Rml::String(std::to_string(px) + "px"));
+            d->SetProperty("top", Rml::String(std::to_string(py) + "px"));
+            d->SetProperty("width", Rml::String(std::to_string(pw) + "px"));
+            d->SetProperty("height", Rml::String(std::to_string(ph) + "px"));
+        };
+        grip("e",  fwid - 4, 0, 8, fhei - 4, "fgrip");
+        grip("s",  0, fhei - 4, fwid - 4, 8, "fgrip");
+        grip("se", fwid - 7, fhei - 7, 12, 12, "fgrip corner");
     }
 
     // Selection chrome lives in an overlay so it never perturbs the components
@@ -431,10 +507,12 @@ void rebuild_canvas() {
         place("selbox", ox + x - 1, oy + y - 1, w + 2, h + 2);
         const int hx[3] = {ox + x - 4, ox + x + w / 2 - 4, ox + x + w - 4};
         const int hy[3] = {oy + y - 4, oy + y + h / 2 - 4, oy + y + h - 4};
+        static const char* EDGE[3][3] = {{"nw", "w", "sw"}, {"n", "", "s"}, {"ne", "e", "se"}};
         for (int i = 0; i < 3; i++) {
             for (int j = 0; j < 3; j++) {
                 if (i == 1 && j == 1) continue;   // 8 anchors, not 9
-                place("handle", hx[i], hy[j], 0, 0);
+                Rml::Element* d = place("handle", hx[i], hy[j], 0, 0);
+                d->SetAttribute("oe-grip", Rml::String(EDGE[i][j]));
             }
         }
         // Event connector badge, as specified.
@@ -727,27 +805,112 @@ struct Listener : Rml::EventListener {
             return;
         }
 
-        if (type == "mousedown" && el->HasAttribute("oe-id")) {
-            select(el->GetAttribute<Rml::String>("oe-id", ""));
-            g.dragging = true;
-            const auto off = el->GetAbsoluteOffset();
-            g.drag_dx = ev.GetParameter<int>("mouse_x", 0) - (int)off.x;
-            g.drag_dy = ev.GetParameter<int>("mouse_y", 0) - (int)off.y;
-        } else if (type == "mousemove" && g.dragging && !g.selected.empty()) {
-            Component* comp = g.model.find(g.selected);
-            if (!comp) return;
-            Rml::Element* canvas = by_id("canvas");
-            if (!canvas) return;
-            const auto origin = canvas->GetAbsoluteOffset();
-            const int x = ev.GetParameter<int>("mouse_x", 0) - g.drag_dx - (int)origin.x;
-            const int y = ev.GetParameter<int>("mouse_y", 0) - g.drag_dy - (int)origin.y;
-            comp->set_property("left", std::to_string(x < 0 ? 0 : x));
-            comp->set_property("top", std::to_string(y < 0 ? 0 : y));
-            mark_dirty();
-            rebuild_canvas();
-        } else if (type == "mouseup") {
-            if (g.dragging) rebuild_inspector();
+        if (type == "mousedown") {
+            const int mx = ev.GetParameter<int>("mouse_x", 0);
+            const int my = ev.GetParameter<int>("mouse_y", 0);
+
+            // Resizing the form preview, as in Visual Studio / RAD Studio.
+            if (el->HasAttribute("oe-formgrip")) {
+                g.resizing_form = true;
+                g.resize_edge = el->GetAttribute<Rml::String>("oe-formgrip", "se");
+                g.resize_x0 = mx;
+                g.resize_y0 = my;
+                g.resize_w0 = prop_int(g.model.form, "width", 420);
+                g.resize_h0 = prop_int(g.model.form, "height", 260);
+                return;
+            }
+            // Resizing the selected component by its anchor.
+            if (el->HasAttribute("oe-grip")) {
+                if (Component* c = g.model.find(g.selected)) {
+                    g.resizing_comp = true;
+                    g.comp_edge = el->GetAttribute<Rml::String>("oe-grip", "se");
+                    g.resize_x0 = mx;
+                    g.resize_y0 = my;
+                    g.comp_x0 = prop_int(*c, "left", 0);
+                    g.comp_y0 = prop_int(*c, "top", 0);
+                    g.comp_w0 = prop_int(*c, "width", 120);
+                    g.comp_h0 = prop_int(*c, "height", 32);
+                }
+                return;
+            }
+            if (el->HasAttribute("oe-id")) {
+                select(el->GetAttribute<Rml::String>("oe-id", ""));
+                g.dragging = true;
+                const auto off = el->GetAbsoluteOffset();
+                g.drag_dx = mx - (int)off.x;
+                g.drag_dy = my - (int)off.y;
+            }
+            return;
+        }
+
+        if (type == "mousemove") {
+            const int mx = ev.GetParameter<int>("mouse_x", 0);
+            const int my = ev.GetParameter<int>("mouse_y", 0);
+
+            if (g.resizing_form) {
+                int w = g.resize_w0, h = g.resize_h0;
+                if (g.resize_edge != "s") w = g.resize_w0 + (mx - g.resize_x0);
+                if (g.resize_edge != "e") h = g.resize_h0 + (my - g.resize_y0);
+                g.model.form.set_property("width", std::to_string(snap(w < 120 ? 120 : w)));
+                g.model.form.set_property("height", std::to_string(snap(h < 80 ? 80 : h)));
+                mark_dirty();
+                rebuild_canvas();
+                return;
+            }
+
+            if (g.resizing_comp) {
+                Component* c = g.model.find(g.selected);
+                if (!c) return;
+                const int dx = mx - g.resize_x0, dy = my - g.resize_y0;
+                int x = g.comp_x0, y = g.comp_y0, w = g.comp_w0, h = g.comp_h0;
+                const bool west = g.comp_edge.find('w') != std::string::npos;
+                const bool east = g.comp_edge.find('e') != std::string::npos;
+                const bool north = g.comp_edge.find('n') != std::string::npos;
+                const bool south = g.comp_edge.find('s') != std::string::npos;
+                if (east) w = g.comp_w0 + dx;
+                if (west) { x = g.comp_x0 + dx; w = g.comp_w0 - dx; }
+                if (south) h = g.comp_h0 + dy;
+                if (north) { y = g.comp_y0 + dy; h = g.comp_h0 - dy; }
+                if (w < 20) w = 20;
+                if (h < 16) h = 16;
+                c->set_property("left", std::to_string(snap(x < 0 ? 0 : x)));
+                c->set_property("top", std::to_string(snap(y < 0 ? 0 : y)));
+                c->set_property("width", std::to_string(snap(w)));
+                c->set_property("height", std::to_string(snap(h)));
+                mark_dirty();
+                rebuild_canvas();
+                return;
+            }
+
+            if (g.dragging && !g.selected.empty()) {
+                Component* c = g.model.find(g.selected);
+                Rml::Element* canvas = by_id("canvas");
+                if (!c || !canvas) return;
+                const auto origin = canvas->GetAbsoluteOffset();
+                int x = mx - g.drag_dx - (int)origin.x;
+                int y = my - g.drag_dy - (int)origin.y;
+                // Clamp inside the form and snap to the grid the canvas draws.
+                const int fw = prop_int(g.model.form, "width", 420);
+                const int fh = prop_int(g.model.form, "height", 260);
+                const int w = prop_int(*c, "width", 120), h = prop_int(*c, "height", 32);
+                if (x < 0) x = 0;
+                if (y < 0) y = 0;
+                if (x > fw - w) x = fw - w;
+                if (y > fh - h) y = fh - h;
+                c->set_property("left", std::to_string(snap(x)));
+                c->set_property("top", std::to_string(snap(y)));
+                mark_dirty();
+                rebuild_canvas();
+            }
+            return;
+        }
+
+        if (type == "mouseup") {
+            if (g.dragging || g.resizing_comp || g.resizing_form) rebuild_inspector();
             g.dragging = false;
+            g.resizing_comp = false;
+            g.resizing_form = false;
+            return;
         }
     }
 };

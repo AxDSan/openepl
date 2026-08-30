@@ -124,7 +124,36 @@ file (`libs/ui/ui_rmlui.cpp`).
 This is load-bearing: if substrate types ever leak through this header, the
 substrate choice silently stops being reversible.
 
-## 7. Deferred
+## 7. The component set
+
+| Component | Substrate | Notes |
+|---|---|---|
+| `form` | container | the window itself |
+| `button` | `<button>` | hover/press states driven by the backend |
+| `label` | `<div>` | text content |
+| `editbox` | `<input type=text>` | `text` is its **value**, readable from code |
+| `checkbox` | `<div>` + `<input type=checkbox>` + caption | composite; `checked` is `bool` |
+| `groupbox` | `<div>` | titled frame |
+| `image` | `<img>` | `source` is the file path |
+| `progressbar` | `<progress>` | `value` is a percentage (`max` is set to 100) |
+
+Two substrate facts the mapping must absorb, both discovered by rendering and
+looking rather than by reading docs:
+
+- **RmlUi form controls have no default appearance.** An `<input>` or
+  `<progress>` renders as *nothing* until styled, so the shared seed carries
+  real default styling for each. Without it the toolbox offers controls that
+  vanish when placed.
+- **RmlUi's default text colour is white.** Any component that does not set
+  `color` was therefore invisible on a light form. The seed now sets a default
+  ink, which components override with their own `color`.
+
+Not yet available, because they need language or platform features that do not
+exist: `listbox` and `combobox` (need arrays), `timer`, `filedialog`, `trayicon`
+(need platform services). The designer lists these greyed and says so when
+clicked, rather than omitting them or pretending they work.
+
+## 8. Deferred
 
 Property read/write from code; components created dynamically at run time (all
 components come from the form today); layout containers; more than the three

@@ -208,6 +208,7 @@ impl Lowerer<'_> {
             Expr::TextLit(s) => s.clone(),
             Expr::IntLit(v) => v.to_string(),
             Expr::DoubleLit(v) => format!("{v}"),
+            Expr::BoolLit(b) => b.to_string(),
             _ => return err("component property values must be literals in v0.2"),
         })
     }
