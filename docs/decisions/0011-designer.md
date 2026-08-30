@@ -64,6 +64,20 @@ asserting the designed button reaches its handler. Testing that the designer
 produced *plausible text* would prove nothing; testing that the real compiler
 accepts it proves everything.
 
+## Closing the window saves
+
+There is no dialog layer to ask "save changes?" with, and discarding a user's
+work silently is far worse than an unexpected write, so the designer tracks a
+dirty flag and **saves on exit**, announcing it on stdout. Found by watching a
+real session add two components and lose both on close.
+
+The scripted path applies the identical rule, so a scripted session can never
+behave differently from the interactive one — a divergence there would make
+tests prove something other than what users experience.
+
+A proper "save / discard / cancel" prompt supersedes this once the designer has
+a dialog layer.
+
 ## Known debt, stated rather than hidden
 
 - **The designer's own chrome is not accessible.** It bypasses the D10 layer that

@@ -39,6 +39,10 @@ struct Designer {
     std::vector<std::string> pending_subs;     // handler stubs to append on save
     std::string status;
 
+    /// Set by any edit, cleared by a save. Closing the window with unsaved
+    /// edits used to discard them silently.
+    bool dirty = false;
+
     // drag state
     bool dragging = false;
     int drag_dx = 0, drag_dy = 0;
@@ -148,6 +152,8 @@ void select(const std::string& id) {
 
 /* --- actions -------------------------------------------------------------- */
 
+void mark_dirty() { g.dirty = true; }
+
 void add_component(const std::string& type_name) {
     const OpenEPL_ComponentDesc* desc = describe(type_name.c_str());
     if (!desc) { set_status("unknown component type " + type_name); return; }
@@ -163,6 +169,7 @@ void add_component(const std::string& type_name) {
     c.set_property("left", std::to_string(20 + 12 * (int)g.model.children.size()));
     c.set_property("top", std::to_string(20 + 34 * (int)g.model.children.size()));
     g.model.children.push_back(c);
+    mark_dirty();
     set_status("added " + c.id);
     select(c.id);
 }
@@ -171,6 +178,7 @@ void save() {
     std::string err;
     if (!save_model(g.model, g.pending_subs, err)) { set_status("save failed: " + err); return; }
     g.pending_subs.clear();
+    g.dirty = false;
     set_status("saved " + g.model.path);
 }
 
@@ -219,12 +227,14 @@ struct Listener : Rml::EventListener {
             if (name.empty()) return;
             if (cls.find("ev") != Rml::String::npos) {
                 comp->set_handler(name, value);
+                mark_dirty();
                 if (!value.empty() && !g.model.has_sub(value)) {
                     g.pending_subs.push_back(value);   // stub written on save
                     set_status("will create sub " + value);
                 }
             } else {
                 comp->set_property(name, value);
+                mark_dirty();
                 rebuild_canvas();
             }
             return;
@@ -244,6 +254,7 @@ struct Listener : Rml::EventListener {
             const int y = ev.GetParameter<int>("mouse_y", 0) - g.drag_dy - CANVAS_Y;
             comp->set_property("left", std::to_string(x < 0 ? 0 : x));
             comp->set_property("top", std::to_string(y < 0 ? 0 : y));
+            mark_dirty();
             rebuild_canvas();
         } else if (type == "mouseup") {
             if (g.dragging) rebuild_inspector();
@@ -273,6 +284,7 @@ void run_script(const char* script) {
                 if (eq != std::string::npos && !g.selected.empty()) {
                     if (Component* c = g.model.find(g.selected)) {
                         c->set_property(arg.substr(0, eq), arg.substr(eq + 1));
+                        mark_dirty();
                         rebuild_canvas();
                         rebuild_inspector();
                     }
@@ -284,6 +296,7 @@ void run_script(const char* script) {
                     if (Component* c = g.model.find(g.selected)) {
                         const std::string ev = arg.substr(0, eq), sub = arg.substr(eq + 1);
                         c->set_handler(ev, sub);
+                        mark_dirty();
                         if (!g.model.has_sub(sub)) g.pending_subs.push_back(sub);
                     }
                 }
@@ -394,6 +407,12 @@ int main(int argc, char** argv) {
     if (const char* script = std::getenv("OPENEPL_DESIGNER_SCRIPT")) {
         g.context->Update();
         run_script(script);
+        // Same exit rule as the interactive path, so scripted sessions cannot
+        // behave differently from the real thing.
+        if (g.dirty) {
+            std::printf("designer: unsaved changes — saving before exit\n");
+            save();
+        }
         std::printf("designer: script complete\n");
         Rml::Shutdown();
         Backend::Shutdown();
@@ -406,6 +425,15 @@ int main(int argc, char** argv) {
         g.context->Render();
         Backend::PresentFrame();
     }
+
+    // Closing the window must not throw away work. There is no dialog layer to
+    // ask with, and losing edits silently is far worse than an unexpected save,
+    // so persist and say so loudly.
+    if (g.dirty) {
+        std::printf("designer: unsaved changes — saving before exit\n");
+        save();
+    }
+
     Rml::Shutdown();
     Backend::Shutdown();
     return 0;
