@@ -135,6 +135,8 @@ impl Parser {
                 }
                 Tok::Let => body.push(self.stmt_let()?),
                 Tok::Call => body.push(self.stmt_call()?),
+                // `component.property = expr`
+                Tok::Ident(_) => body.push(self.stmt_set_property()?),
                 Tok::Eof => return self.err("unexpected end of file inside `sub` (missing `end`)"),
                 other => return self.err(format!("expected statement or `end`, found {other:?}")),
             }
@@ -246,6 +248,21 @@ impl Parser {
         Ok(c)
     }
 
+    /// `component.property = expr`
+    fn stmt_set_property(&mut self) -> Result<Stmt, ParseError> {
+        let component = self.ident("component name")?;
+        self.expect(&Tok::Dot, "`.` after component name")?;
+        let property = self.ident("property name")?;
+        self.expect(&Tok::Eq, "`=` in property assignment")?;
+        let value = self.expr()?;
+        self.expect(&Tok::Newline, "newline after property assignment")?;
+        Ok(Stmt::SetProperty {
+            component,
+            property,
+            value,
+        })
+    }
+
     /// `on <event>: <subroutine>`
     fn binding(&mut self) -> Result<(String, String), ParseError> {
         self.expect(&Tok::On, "`on`")?;
@@ -347,6 +364,14 @@ impl Parser {
                     self.bump();
                     let args = self.arg_list()?;
                     Ok(Expr::Call { cmd: name, args })
+                } else if matches!(self.peek(), Tok::Dot) {
+                    // Property read: component.property
+                    self.bump();
+                    let property = self.ident("property name")?;
+                    Ok(Expr::GetProperty {
+                        component: name,
+                        property,
+                    })
                 } else {
                     Ok(Expr::Var(name))
                 }

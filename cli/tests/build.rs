@@ -356,3 +356,57 @@ fn app_runs_with_accessibility_disabled() {
         "app must behave identically with accessibility disabled"
     );
 }
+
+/// Reading and writing component properties from code (ADR 0008). The counter
+/// holds its state in the label's own text, so one synthetic click must both
+/// print the new count and leave the label showing it.
+#[test]
+fn property_access_updates_a_component() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let bin = build_as("counter", "prop");
+    let out = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "6")
+        .env("OPENEPL_UI_SYNTH_CLICK", "3")
+        .env("OPENEPL_UI_DUMP_A11Y", "1")
+        .output()
+        .expect("run counter");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("count = 1"),
+        "handler did not update the label:\n{stdout}"
+    );
+    // The accessible name must track the live text, not the construction-time
+    // value — otherwise a screen reader announces stale content.
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("a11y: id=2") && l.contains("name=\"1\"")),
+        "accessible name is stale:\n{stdout}"
+    );
+}
+
+/// A module with BOTH `main` and a form: the form must be built before `main`
+/// runs, or `main` addresses components that do not exist yet. This is the
+/// ordering bug that would only ever appear for this module shape.
+#[test]
+fn main_may_touch_components_before_the_loop_starts() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let bin = build_as("mainorder", "order");
+    let out = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "3")
+        .output()
+        .expect("run mainorder");
+    assert!(out.status.success(), "main touching a component crashed");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("main saw: set from main"),
+        "main could not read back the property it set"
+    );
+}

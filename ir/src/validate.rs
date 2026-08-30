@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::sema::{check_args, type_of_expr};
+use crate::sema::{check_args_in, property_type, type_of_expr_in, Components};
 use crate::{Component, Expr, Item, Module, Registry, Stmt, Ty};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +83,14 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         }
     }
 
+    // Component ids are module-scoped: every subroutine can address them.
+    let mut components: Components = Components::new();
+    for form in &forms {
+        for child in &form.children {
+            components.insert(child.id.clone(), child.type_name.clone());
+        }
+    }
+
     // --- subroutine bodies -----------------------------------------------
     for item in &m.items {
         let Item::Sub(sub) = item else { continue };
@@ -90,7 +98,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         for stmt in &sub.body {
             match stmt {
                 Stmt::Let { name, ty, value } => {
-                    match type_of_expr(value, &vars, reg) {
+                    match type_of_expr_in(value, &vars, reg, &components) {
                         Ok(got) if got == *ty => {}
                         Ok(got) => push(format!(
                             "in `{}`: `let {name}` declared {} but expression is {}",
@@ -110,10 +118,29 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                 Stmt::Call { cmd, args } => match reg.get(cmd) {
                     None => push(format!("in `{}`: unknown command `{cmd}`", sub.name)),
                     Some(c) => {
-                        if let Err(e) = check_args(cmd, &c.sig.params, args, &vars, reg) {
+                        if let Err(e) =
+                            check_args_in(cmd, &c.sig.params, args, &vars, reg, &components)
+                        {
                             push(format!("in `{}`: {}", sub.name, e));
                         }
                     }
+                },
+                Stmt::SetProperty {
+                    component,
+                    property,
+                    value,
+                } => match property_type(component, property, reg, &components) {
+                    Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                    Ok(expected) => match type_of_expr_in(value, &vars, reg, &components) {
+                        Ok(got) if got == expected => {}
+                        Ok(got) => push(format!(
+                            "in `{}`: `{component}.{property}` expects {}, got {}",
+                            sub.name,
+                            expected.as_str(),
+                            got.as_str()
+                        )),
+                        Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                    },
                 },
             }
         }
@@ -182,7 +209,7 @@ fn check_component_like(
             ));
             continue;
         };
-        match type_of_expr(value, &empty, reg) {
+        match type_of_expr_in(value, &empty, reg, &Components::new()) {
             Ok(got) if got == prop.ty => {}
             Ok(got) => push(format!(
                 "`{where_}`: property `{name}` expects {}, got {}",

@@ -73,8 +73,17 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         vars: HashMap::new(),
         used: BTreeSet::new(),
         ui_used: BTreeSet::new(),
+        handles: HashMap::new(),
+        component_types: HashMap::new(),
         tmp: 0,
     };
+
+    // Assign component handles BEFORE lowering subroutines: a handler may
+    // address a component, and handles are compile-time constants derived from
+    // creation order (ADR 0008), so they can be known up front.
+    if let Some(form) = forms.first() {
+        lo.map_components(form);
+    }
 
     // Each subroutine becomes its own function.
     let mut functions = String::new();
@@ -91,14 +100,20 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         ));
     }
 
-    // The entry function.
+    // The entry function. Order matters: the form must be BUILT before any user
+    // code runs, or `main` could address a component that does not exist yet
+    // (a segfault that would only appear for modules having both). The event
+    // loop starts last, after start-up code has had its say.
     lo.body.clear();
     lo.vars.clear();
+    if let Some(form) = forms.first() {
+        lo.form_build(form)?;
+    }
     if subs.iter().any(|s| s.name == "main") {
         writeln!(lo.body, "  call void @{}()", user_symbol("main")).unwrap();
     }
-    if let Some(form) = forms.first() {
-        lo.form(form)?;
+    if !forms.is_empty() {
+        lo.form_run();
     }
 
     Ok(lo.finish(&m.name, &functions))
@@ -126,6 +141,15 @@ struct Lowerer<'a> {
     used: BTreeSet<String>,
     /// UI-interface symbols referenced (declared separately; see finish()).
     ui_used: BTreeSet<&'static str>,
+    /// Component id -> its runtime widget handle.
+    ///
+    /// Handles are assigned by creation order, and creation order is fully
+    /// static, so every id resolves to a compile-time integer constant. This is
+    /// why component ids need no interning table and never reach the binary:
+    /// `ok_button` simply compiles to `3` (ADR 0008).
+    handles: HashMap<String, u64>,
+    /// Component id -> component type name, for resolving property types.
+    component_types: HashMap<String, String>,
     tmp: usize,
 }
 
@@ -156,7 +180,20 @@ impl Lowerer<'_> {
     }
 
     /// Lower a form into the calls that build it at run time.
-    fn form(&mut self, form: &openepl_ir::Form) -> Result<(), LowerError> {
+    /// Assign each component its compile-time handle constant. The root form is
+    /// always 1 and children follow in declaration order, which is exactly the
+    /// order `form_build` creates them in.
+    fn map_components(&mut self, form: &openepl_ir::Form) {
+        let mut next: u64 = 2;
+        for child in &form.children {
+            self.handles.insert(child.id.clone(), next);
+            self.component_types
+                .insert(child.id.clone(), child.type_name.clone());
+            next += 1;
+        }
+    }
+
+    fn form_build(&mut self, form: &openepl_ir::Form) -> Result<(), LowerError> {
         // Window geometry/title come from the form's own properties.
         let mut title = "OpenEPL Application".to_string();
         let (mut width, mut height) = (800i64, 600i64);
@@ -177,9 +214,11 @@ impl Lowerer<'_> {
         )
         .unwrap();
 
+        // The root is always handle 1; children follow in creation order.
         self.ui_used.insert("oe_ui_root");
-        let root = self.fresh();
-        writeln!(self.body, "  {root} = call i64 @oe_ui_root()").unwrap();
+        let root_tmp = self.fresh();
+        writeln!(self.body, "  {root_tmp} = call i64 @oe_ui_root()").unwrap();
+        let root = "1".to_string();
 
         // Root properties (skip the window-level ones already consumed).
         for (name, value) in &form.properties {
@@ -230,12 +269,16 @@ impl Lowerer<'_> {
             self.bind_handlers(&handle, &child.handlers);
         }
 
+        Ok(())
+    }
+
+    /// Start the event loop and tear down. Emitted after start-up code.
+    fn form_run(&mut self) {
         self.ui_used.insert("oe_ui_run");
         let rc = self.fresh();
         writeln!(self.body, "  {rc} = call i32 @oe_ui_run()").unwrap();
         self.ui_used.insert("oe_ui_shutdown");
         writeln!(self.body, "  call void @oe_ui_shutdown()").unwrap();
-        Ok(())
     }
 
     fn set_property(&mut self, handle: &str, name: &str, value: &str) {
@@ -302,7 +345,92 @@ impl Lowerer<'_> {
                 self.eval_call(cmd, args)?; // any return value discarded
                 Ok(())
             }
+            Stmt::SetProperty {
+                component,
+                property,
+                value,
+            } => {
+                let handle = self.handle_of(component)?;
+                let v = self.eval(value)?;
+                // The D10 boundary takes textual values, so convert first.
+                let text = self.value_as_text(&v)?;
+                let n = self.cstr(property);
+                self.ui_used.insert("oe_ui_set");
+                writeln!(
+                    self.body,
+                    "  call i32 @oe_ui_set(i64 {handle}, ptr {n}, ptr {text})"
+                )
+                .unwrap();
+                Ok(())
+            }
         }
+    }
+
+    /// The compile-time handle constant for a component id (ADR 0008).
+    fn handle_of(&self, id: &str) -> Result<u64, LowerError> {
+        self.handles.get(id).copied().ok_or_else(|| LowerError {
+            msg: format!("unknown component `{id}`"),
+        })
+    }
+
+    /// Render a value as a `ptr` to text, converting numbers via the runtime.
+    fn value_as_text(&mut self, v: &Val) -> Result<String, LowerError> {
+        match v.ty {
+            Ty::Text => Ok(v.operand.clone()),
+            Ty::Int | Ty::Int64 | Ty::Double => {
+                let sym = match v.ty {
+                    Ty::Int => "oe_int_to_text",
+                    Ty::Int64 => "oe_int64_to_text",
+                    _ => "oe_double_to_text",
+                };
+                let converted = self.call_symbol_1(sym, v)?;
+                Ok(converted)
+            }
+        }
+    }
+
+    /// Call a one-argument slot-ABI runtime command and return its text result.
+    fn call_symbol_1(&mut self, symbol: &str, arg: &Val) -> Result<String, LowerError> {
+        let raw = self.emit_arg_i64(arg);
+        let argv = self.fresh();
+        writeln!(self.body, "  {argv} = alloca [1 x %Slot]").unwrap();
+        let slot = self.fresh();
+        writeln!(
+            self.body,
+            "  {slot} = getelementptr [1 x %Slot], ptr {argv}, i64 0, i64 0"
+        )
+        .unwrap();
+        let tagp = self.fresh();
+        writeln!(
+            self.body,
+            "  {tagp} = getelementptr %Slot, ptr {slot}, i32 0, i32 0"
+        )
+        .unwrap();
+        writeln!(self.body, "  store i32 {}, ptr {tagp}", arg.ty.sdt_tag()).unwrap();
+        let valp = self.fresh();
+        writeln!(
+            self.body,
+            "  {valp} = getelementptr %Slot, ptr {slot}, i32 0, i32 2"
+        )
+        .unwrap();
+        writeln!(self.body, "  store i64 {raw}, ptr {valp}").unwrap();
+        let ret = self.fresh();
+        writeln!(self.body, "  {ret} = alloca %Slot").unwrap();
+        self.used.insert(symbol.to_string());
+        writeln!(
+            self.body,
+            "  call void @{symbol}(ptr {ret}, i32 1, ptr {slot})"
+        )
+        .unwrap();
+        let rvalp = self.fresh();
+        writeln!(
+            self.body,
+            "  {rvalp} = getelementptr %Slot, ptr {ret}, i32 0, i32 2"
+        )
+        .unwrap();
+        let rraw = self.fresh();
+        writeln!(self.body, "  {rraw} = load i64, ptr {rvalp}").unwrap();
+        Ok(self.emit_ret_from_i64(Ty::Text, &rraw))
     }
 
     fn eval(&mut self, e: &Expr) -> Result<Val, LowerError> {
@@ -374,7 +502,61 @@ impl Lowerer<'_> {
                     msg: format!("command `{cmd}` returns nothing and cannot be used as a value"),
                 })
             }
+            Expr::GetProperty {
+                component,
+                property,
+            } => {
+                let handle = self.handle_of(component)?;
+                let n = self.cstr(property);
+                let ty = self.property_ty(component, property)?;
+                match ty {
+                    Ty::Int => {
+                        self.ui_used.insert("oe_ui_get_int");
+                        let t = self.fresh();
+                        writeln!(
+                            self.body,
+                            "  {t} = call i32 @oe_ui_get_int(i64 {handle}, ptr {n})"
+                        )
+                        .unwrap();
+                        Ok(Val {
+                            ty: Ty::Int,
+                            operand: t,
+                        })
+                    }
+                    _ => {
+                        self.ui_used.insert("oe_ui_get");
+                        let t = self.fresh();
+                        writeln!(
+                            self.body,
+                            "  {t} = call ptr @oe_ui_get(i64 {handle}, ptr {n})"
+                        )
+                        .unwrap();
+                        Ok(Val {
+                            ty: Ty::Text,
+                            operand: t,
+                        })
+                    }
+                }
+            }
         }
+    }
+
+    /// The declared type of a component property, from the introspected
+    /// descriptor (the validator has already proven it exists).
+    fn property_ty(&self, component: &str, property: &str) -> Result<Ty, LowerError> {
+        let type_name = self
+            .component_types
+            .get(component)
+            .ok_or_else(|| LowerError {
+                msg: format!("unknown component `{component}`"),
+            })?;
+        self.reg
+            .component(type_name)
+            .and_then(|d| d.property(property))
+            .map(|p| p.ty)
+            .ok_or_else(|| LowerError {
+                msg: format!("`{type_name}` has no property `{property}`"),
+            })
     }
 
     /// Reinterpret a value's operand as the raw `i64` stored in a slot's value
@@ -564,6 +746,8 @@ impl Lowerer<'_> {
                 "oe_ui_root" => "declare i64 @oe_ui_root()",
                 "oe_ui_create" => "declare i64 @oe_ui_create(i64, ptr)",
                 "oe_ui_set" => "declare i32 @oe_ui_set(i64, ptr, ptr)",
+                "oe_ui_get" => "declare ptr @oe_ui_get(i64, ptr)",
+                "oe_ui_get_int" => "declare i32 @oe_ui_get_int(i64, ptr)",
                 "oe_ui_on" => "declare i32 @oe_ui_on(i64, ptr, ptr)",
                 "oe_ui_set_a11y" => "declare i32 @oe_ui_set_a11y(i64, i32, ptr)",
                 "oe_ui_run" => "declare i32 @oe_ui_run()",

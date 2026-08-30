@@ -36,6 +36,11 @@ void put_node(const Node& n);
 /// Update just the bounds of a node (main thread, per frame).
 void set_bounds(uint64_t id, float x, float y, float w, float h);
 
+/// Update a node's accessible name. Must be called whenever the user-visible
+/// text changes, or an assistive technology announces stale content — the
+/// accessible name is not a construction-time snapshot.
+void set_label(uint64_t id, const std::string& label);
+
 /// A consistent copy for the adapter thread to read.
 std::vector<Node> snapshot();
 

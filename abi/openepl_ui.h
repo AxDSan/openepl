@@ -42,10 +42,17 @@ OpenEPL_Widget oe_ui_create(OpenEPL_Widget parent, const char *type_name);
 /* The form root, valid after oe_ui_init. */
 OpenEPL_Widget oe_ui_root(void);
 
-/* Set/get a property by name. Values are textual in v0. `oe_ui_get` returns a
- * pointer valid until the next call on the same widget, or NULL. */
+/* Set/get a property by name. Values are textual at this boundary in v0.
+ *
+ * `oe_ui_get` returns runtime-owned memory (allocated through the notification
+ * channel, D4) and is therefore safe to hold and to nest — `concat(a.text,
+ * b.text)` does not alias. It is freed with everything else at shutdown.
+ * Returns NULL if the property is unset. */
 int         oe_ui_set(OpenEPL_Widget w, const char *property, const char *value);
 const char *oe_ui_get(OpenEPL_Widget w, const char *property);
+
+/* Integer-typed convenience getter, so callers do not each re-parse text. */
+int32_t     oe_ui_get_int(OpenEPL_Widget w, const char *property);
 
 /* Bind an event by name (generic vocabulary, e.g. "click") to a handler. */
 int oe_ui_on(OpenEPL_Widget w, const char *event, OpenEPL_EventFn handler);

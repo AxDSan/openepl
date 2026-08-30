@@ -129,6 +129,8 @@ pub enum Expr {
     Bin(BinOp, Box<Expr>, Box<Expr>),
     /// Call to a non-void command, used as a value (PRD §5.0 uniform call form).
     Call { cmd: String, args: Vec<Expr> },
+    /// Read a component's property: `ok_button.text`.
+    GetProperty { component: String, property: String },
 }
 
 /// A single statement inside a subroutine body.
@@ -139,6 +141,12 @@ pub enum Stmt {
     /// `call CMD(args...)` — a call in statement position; a non-void return is
     /// discarded.
     Call { cmd: String, args: Vec<Expr> },
+    /// `ok_button.text = EXPR` — assign a component property at run time.
+    SetProperty {
+        component: String,
+        property: String,
+        value: Expr,
+    },
 }
 
 /// A subroutine (EPL 子程序).  v0.1 subs take no params and return nothing;

@@ -6,6 +6,10 @@ use std::collections::HashMap;
 
 use crate::{Expr, Registry, Ty};
 
+/// Maps a form's component ids to their component type names. Component ids are
+/// module-scoped (they are not locals), so every subroutine can see them.
+pub type Components = HashMap<String, String>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SemaError {
     pub msg: String,
@@ -37,6 +41,16 @@ pub fn type_of_expr(
     vars: &HashMap<String, Ty>,
     reg: &Registry,
 ) -> Result<Ty, SemaError> {
+    type_of_expr_in(expr, vars, reg, &Components::new())
+}
+
+/// As `type_of_expr`, but with component ids in scope so `id.property` resolves.
+pub fn type_of_expr_in(
+    expr: &Expr,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
     match expr {
         Expr::IntLit(v) => Ok(int_literal_type(*v)),
         Expr::DoubleLit(_) => Ok(Ty::Double),
@@ -45,8 +59,8 @@ pub fn type_of_expr(
             msg: format!("use of undefined variable `{name}`"),
         }),
         Expr::Bin(op, l, r) => {
-            let lt = type_of_expr(l, vars, reg)?;
-            let rt = type_of_expr(r, vars, reg)?;
+            let lt = type_of_expr_in(l, vars, reg, components)?;
+            let rt = type_of_expr_in(r, vars, reg, components)?;
             if !lt.is_numeric() {
                 return err(format!(
                     "operator `{}` needs numeric operands, left is {}",
@@ -71,8 +85,42 @@ pub fn type_of_expr(
             let ret = c.sig.ret.ok_or_else(|| SemaError {
                 msg: format!("command `{cmd}` returns nothing and cannot be used in an expression"),
             })?;
-            check_args(cmd, &c.sig.params, args, vars, reg)?;
+            check_args_in(cmd, &c.sig.params, args, vars, reg, components)?;
             Ok(ret)
+        }
+        Expr::GetProperty {
+            component,
+            property,
+        } => property_type(component, property, reg, components),
+    }
+}
+
+/// The declared type of `component.property`, or a diagnostic.
+pub fn property_type(
+    component: &str,
+    property: &str,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
+    let Some(type_name) = components.get(component) else {
+        return err(format!(
+            "unknown component `{component}` (component ids come from the form)"
+        ));
+    };
+    let Some(desc) = reg.component(type_name) else {
+        return err(format!(
+            "component `{component}` has unknown type `{type_name}`"
+        ));
+    };
+    match desc.property(property) {
+        Some(p) => Ok(p.ty),
+        None => {
+            let mut known: Vec<&str> = desc.properties.iter().map(|p| p.name.as_str()).collect();
+            known.sort_unstable();
+            err(format!(
+                "`{type_name}` has no property `{property}` (has: {})",
+                known.join(", ")
+            ))
         }
     }
 }
@@ -85,6 +133,17 @@ pub fn check_args(
     vars: &HashMap<String, Ty>,
     reg: &Registry,
 ) -> Result<(), SemaError> {
+    check_args_in(cmd, params, args, vars, reg, &Components::new())
+}
+
+pub fn check_args_in(
+    cmd: &str,
+    params: &[Ty],
+    args: &[Expr],
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<(), SemaError> {
     if args.len() != params.len() {
         return err(format!(
             "command `{cmd}` expects {} argument(s), got {}",
@@ -93,7 +152,7 @@ pub fn check_args(
         ));
     }
     for (i, (a, expected)) in args.iter().zip(params).enumerate() {
-        let got = type_of_expr(a, vars, reg)?;
+        let got = type_of_expr_in(a, vars, reg, components)?;
         if got != *expected {
             return err(format!(
                 "command `{cmd}` argument {} expects {}, got {}",

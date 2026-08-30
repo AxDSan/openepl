@@ -1,0 +1,39 @@
+# An app that changes at run time: clicking increments a counter.
+# Demonstrates reading and writing component properties from code.
+#
+# There are no mutable globals yet, so the count lives in the label's own text —
+# read it, add one, write it back.
+module counter
+use ui
+
+form main_window
+  title  = "OpenEPL — counter"
+  width  = 420
+  height = 240
+  background_color = "#1e2233"
+
+  label count_label
+    text  = "0"
+    left  = 40
+    top   = 40
+    width = 340
+    color = "#ffffff"
+  end
+
+  button add_button
+    text   = "Add one"
+    left   = 40
+    top    = 110
+    width  = 160
+    height = 44
+    background_color = "#4a86e8"
+    border_radius = 8
+    on click: on_add
+  end
+end
+
+sub on_add
+  let current: int = text_to_int(count_label.text)
+  count_label.text = int_to_text(current + 1)
+  call print_text(concat("count = ", count_label.text))
+end

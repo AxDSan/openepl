@@ -20,6 +20,7 @@
 #include "RmlUi_Backend.h"
 #include "RmlUi_Renderer_GL3.h"
 #include "RmlUi_Include_GL3.h"
+#include "openepl_abi.h"   /* oe_malloc — runtime-owned allocation (D4) */
 #include "a11y_bridge.h"
 #include "a11y_model.h"
 #include "openepl_ui.h"
@@ -197,7 +198,13 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
     Rml::Element* e = resolve(w);
     if (!e || !property || !value) return 1;
 
-    if (is_text_property(property)) { e->SetInnerRML(value); return 0; }
+    if (is_text_property(property)) {
+        e->SetInnerRML(value);
+        /* Keep the accessible name in step: a screen reader must announce the
+         * current text, not whatever it was at construction. */
+        openepl::a11y::set_label(w, value);
+        return 0;
+    }
 
     /* Bare integers are pixel lengths for geometry properties. */
     std::string v = value;
@@ -223,11 +230,28 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
 const char* oe_ui_get(OpenEPL_Widget w, const char* property) {
     Rml::Element* e = resolve(w);
     if (!e || !property) return nullptr;
-    if (is_text_property(property)) { g.get_scratch = e->GetInnerRML(); return g.get_scratch.c_str(); }
-    const Rml::Property* p = e->GetProperty(rcss_name(property));
-    if (!p) return nullptr;
-    g.get_scratch = p->ToString();
-    return g.get_scratch.c_str();
+
+    Rml::String value;
+    if (is_text_property(property)) {
+        value = e->GetInnerRML();
+    } else {
+        const Rml::Property* p = e->GetProperty(rcss_name(property));
+        if (!p) return nullptr;
+        value = p->ToString();
+    }
+
+    /* Return a runtime-owned copy rather than a shared scratch buffer, so two
+     * reads in one expression — concat(a.text, b.text) — cannot alias. Freed
+     * with all other runtime data at shutdown (D4). */
+    char* out = (char*)oe_malloc((long)value.size() + 1);
+    if (!out) return nullptr;
+    std::memcpy(out, value.c_str(), value.size() + 1);
+    return out;
+}
+
+int32_t oe_ui_get_int(OpenEPL_Widget w, const char* property) {
+    const char* text = oe_ui_get(w, property);
+    return text ? (int32_t)std::strtol(text, nullptr, 10) : 0;
 }
 
 int oe_ui_on(OpenEPL_Widget w, const char* event, OpenEPL_EventFn handler) {

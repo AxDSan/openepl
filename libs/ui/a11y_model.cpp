@@ -37,6 +37,11 @@ void set_bounds(uint64_t id, float x, float y, float w, float h) {
     if (Node* n = find_locked(id)) { n->x = x; n->y = y; n->w = w; n->h = h; }
 }
 
+void set_label(uint64_t id, const std::string& label) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (Node* n = find_locked(id)) n->label = label;
+}
+
 std::vector<Node> snapshot() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_nodes;

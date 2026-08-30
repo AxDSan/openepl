@@ -25,6 +25,7 @@ pub enum Tok {
     RParen,
     Comma,
     Colon,
+    Dot,
     Eq,
     Plus,
     Minus,
@@ -93,6 +94,10 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
             }
             b':' => {
                 push(&mut out, Tok::Colon, line);
+                i += 1;
+            }
+            b'.' => {
+                push(&mut out, Tok::Dot, line);
                 i += 1;
             }
             b'=' => {
