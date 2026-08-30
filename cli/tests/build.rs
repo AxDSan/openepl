@@ -515,3 +515,35 @@ end
         "the designed button did not reach its handler"
     );
 }
+
+/// The toolbox must actually contain the component types the UI library
+/// declares. It once shipped EMPTY — the toolbox markup was built but never
+/// passed to the formatter, so `%s` consumed garbage and rendered nothing. The
+/// designer looked fine and simply could not add anything.
+#[test]
+fn designer_toolbox_lists_components() {
+    let repo = repo();
+    let designer = repo.join("designer/openepl-designer");
+    if !designer.exists() {
+        eprintln!("designer not built; skipping");
+        return;
+    }
+    let project = std::env::temp_dir().join("openepl_toolbox_probe.oir");
+    std::fs::write(
+        &project,
+        "module probe\nuse ui\n\nform win\n  title = \"Probe\"\nend\n",
+    )
+    .expect("write project");
+
+    let out = Command::new(&designer)
+        .arg(&project)
+        .arg(repo.join("target/debug/openepl"))
+        .env("OPENEPL_DESIGNER_DEBUG", "1")
+        .env("OPENEPL_DESIGNER_SCRIPT", "")
+        .output()
+        .expect("run designer");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for want in ["oe-add=button", "oe-add=label"] {
+        assert!(stderr.contains(want), "toolbox is missing {want}:\n{stderr}");
+    }
+}

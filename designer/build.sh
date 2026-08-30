@@ -11,7 +11,7 @@ if [ ! -f vendor/RmlUi/build/librmlui.a ]; then
   exit 1
 fi
 
-FLAGS=(-std=c++17 -O1 -DRMLUI_SDL_VERSION_MAJOR=2 -DSDL_VIDEO_RENDER_OGL=1
+FLAGS=(-std=c++17 -O1 -Wall -Wextra -Wformat=2 -DRMLUI_SDL_VERSION_MAJOR=2 -DSDL_VIDEO_RENDER_OGL=1
        -I abi -I libs/ui -I designer -I vendor/RmlUi/Include -I vendor/RmlUi/Backends)
 read -r -a PKG_CFLAGS <<< "$(pkg-config --cflags sdl2 SDL2_image freetype2)"
 read -r -a PKG_LIBS <<< "$(pkg-config --libs sdl2 SDL2_image freetype2)"

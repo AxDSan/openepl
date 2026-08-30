@@ -359,8 +359,13 @@ int main(int argc, char** argv) {
         "<div id='inspector'/>"
         "<div id='status'>ready</div>"
         "</body></rml>",
-        WIN_W, WIN_H, family.c_str(), WIN_W, WIN_H - 72, CANVAS_X, CANVAS_Y, WIN_H - 72, WIN_W);
+        WIN_W, WIN_H, family.c_str(), WIN_W, WIN_H - 72, CANVAS_X, CANVAS_Y, WIN_H - 72, WIN_W,
+        toolbox.c_str());
 
+    if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+        std::fprintf(stderr, "designer: chrome %zu bytes (buffer %zu)\n",
+                     std::strlen(chrome), sizeof chrome);
+    }
     g.doc = g.context->LoadDocumentFromMemory(chrome);
     if (!g.doc) { std::fprintf(stderr, "designer: chrome failed to load\n"); return 1; }
     g.doc->Show();
@@ -372,6 +377,19 @@ int main(int argc, char** argv) {
     rebuild_canvas();
     rebuild_inspector();
     set_status("editing " + path);
+
+    if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+        // Report what the toolbox actually contains, so a non-responding
+        // toolbox can be told apart from one that was never clicked.
+        if (Rml::Element* side = g.doc->GetElementById("side")) {
+            std::fprintf(stderr, "designer: toolbox has %d children\n", side->GetNumChildren());
+            for (int i = 0; i < side->GetNumChildren(); i++) {
+                Rml::Element* c = side->GetChild(i);
+                std::fprintf(stderr, "designer:   <%s> oe-add=%s\n", c->GetTagName().c_str(),
+                             c->GetAttribute<Rml::String>("oe-add", "(none)").c_str());
+            }
+        }
+    }
 
     if (const char* script = std::getenv("OPENEPL_DESIGNER_SCRIPT")) {
         g.context->Update();
