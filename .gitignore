@@ -40,3 +40,6 @@ codedb.snapshot
 
 # Designer binary
 /designer/openepl-designer
+
+# Designer scratch
+/openepl_dotgrid.tga

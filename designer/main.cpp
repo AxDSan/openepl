@@ -843,7 +843,7 @@ int main(int argc, char** argv) {
         if (Rml::LoadFontFace(fonts[i].path)) { family = fonts[i].family; break; }
     }
 
-    const std::string dot_tile = write_dot_tile("/tmp/openepl_dotgrid.tga", 10);
+    const std::string dot_tile = write_dot_tile("openepl_dotgrid.tga", 10);
     g.context = Rml::CreateContext("studio", Rml::Vector2i(WIN_W, WIN_H));
 
     const std::string chrome = build_chrome(family, dot_tile);
