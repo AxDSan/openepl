@@ -11,7 +11,8 @@
 //! type    := "int" | "text"
 //! expr    := term (("+" | "-") term)*
 //! term    := factor (("*" | "/") factor)*
-//! factor  := INT | STRING | IDENT | "(" expr ")"
+//! factor  := INT | FLOAT | STRING | call | IDENT | "(" expr ")"
+//! call    := IDENT "(" (expr ("," expr)*)? ")"
 //! ```
 
 use crate::lexer::{lex, Spanned, Tok};
@@ -127,9 +128,15 @@ impl Parser {
         let name = self.ident("variable name")?;
         self.expect(&Tok::Colon, "`:` after variable name")?;
         let ty = match self.bump() {
-            Tok::KwInt => Ty::Int,
-            Tok::KwText => Ty::Text,
-            other => return self.err(format!("expected type (`int`/`text`), found {other:?}")),
+            Tok::Ident(w) => match Ty::from_keyword(&w) {
+                Some(t) => t,
+                None => {
+                    return self.err(format!(
+                        "expected a type (int/int64/double/text), found `{w}`"
+                    ))
+                }
+            },
+            other => return self.err(format!("expected a type, found {other:?}")),
         };
         self.expect(&Tok::Eq, "`=`")?;
         let value = self.expr()?;
@@ -141,6 +148,14 @@ impl Parser {
         self.expect(&Tok::Call, "`call`")?;
         let cmd = self.ident("command name")?;
         self.expect(&Tok::LParen, "`(`")?;
+        let args = self.arg_list()?;
+        self.expect(&Tok::Newline, "newline after call")?;
+        Ok(Stmt::Call { cmd, args })
+    }
+
+    /// Parse a comma-separated argument list, assuming the opening `(` has been
+    /// consumed; consumes the closing `)`.
+    fn arg_list(&mut self) -> Result<Vec<Expr>, ParseError> {
         let mut args = Vec::new();
         if !matches!(self.peek(), Tok::RParen) {
             loop {
@@ -155,8 +170,7 @@ impl Parser {
             }
         }
         self.expect(&Tok::RParen, "`)`")?;
-        self.expect(&Tok::Newline, "newline after call")?;
-        Ok(Stmt::Call { cmd, args })
+        Ok(args)
     }
 
     fn expr(&mut self) -> Result<Expr, ParseError> {
@@ -192,8 +206,18 @@ impl Parser {
     fn factor(&mut self) -> Result<Expr, ParseError> {
         match self.bump() {
             Tok::Int(v) => Ok(Expr::IntLit(v)),
+            Tok::Float(v) => Ok(Expr::DoubleLit(v)),
             Tok::Str(s) => Ok(Expr::TextLit(s)),
-            Tok::Ident(name) => Ok(Expr::Var(name)),
+            Tok::Ident(name) => {
+                if matches!(self.peek(), Tok::LParen) {
+                    // Call-expression: NAME(args...)
+                    self.bump();
+                    let args = self.arg_list()?;
+                    Ok(Expr::Call { cmd: name, args })
+                } else {
+                    Ok(Expr::Var(name))
+                }
+            }
             Tok::LParen => {
                 let e = self.expr()?;
                 self.expect(&Tok::RParen, "`)`")?;

@@ -1,0 +1,30 @@
+# Phase 1 showcase: call-expressions, int64/double, math, text, datetime.
+module demo
+
+sub main
+  # --- text ---
+  let greeting: text = concat("Hello, ", "OpenEPL")
+  call print_text(uppercase(greeting))
+  call print_int(length(greeting))
+  call print_text(replace("a-b-c-d", "-", "/"))
+  call print_text(trim("   padded   "))
+  call print_text(reverse("stressed"))
+
+  # --- integer math ---
+  call print_int(max_int(3, 9))
+  call print_int(pow_int(2, 10))
+  call print_int(mod_int(17, 5))
+
+  # --- floating point (no implicit conversion: convert explicitly) ---
+  let two: double = int_to_double(2)
+  let root: double = sqrt(two)
+  call print_double(root)
+  call print_double(round(pow(root, 2.0)))
+
+  # --- conversions round-trip ---
+  let n: int = text_to_int("42")
+  call print_text(concat("n = ", int_to_text(n)))
+
+  # --- datetime (year of the epoch, UTC) ---
+  call print_int(year(int_to_int64(0)))
+end

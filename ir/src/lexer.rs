@@ -12,11 +12,10 @@ pub enum Tok {
     End,
     Let,
     Call,
-    KwInt,
-    KwText,
     // Literals / identifiers
     Ident(String),
     Int(i64),
+    Float(f64),
     Str(String),
     // Punctuation / operators
     LParen,
@@ -90,12 +89,27 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                 while i < n && bytes[i].is_ascii_digit() {
                     i += 1;
                 }
-                let text = &src[start..i];
-                let v: i64 = text.parse().map_err(|_| LexError {
-                    line,
-                    msg: format!("integer literal out of range: {text}"),
-                })?;
-                push(&mut out, Tok::Int(v), line);
+                // Fractional part -> floating-point literal (needs a digit after `.`).
+                let is_float = i + 1 < n && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit();
+                if is_float {
+                    i += 1; // consume '.'
+                    while i < n && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    let text = &src[start..i];
+                    let v: f64 = text.parse().map_err(|_| LexError {
+                        line,
+                        msg: format!("invalid float literal: {text}"),
+                    })?;
+                    push(&mut out, Tok::Float(v), line);
+                } else {
+                    let text = &src[start..i];
+                    let v: i64 = text.parse().map_err(|_| LexError {
+                        line,
+                        msg: format!("integer literal out of range: {text}"),
+                    })?;
+                    push(&mut out, Tok::Int(v), line);
+                }
             }
             _ if is_ident_start(c) => {
                 let start = i;
@@ -109,8 +123,6 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     "end" => Tok::End,
                     "let" => Tok::Let,
                     "call" => Tok::Call,
-                    "int" => Tok::KwInt,
-                    "text" => Tok::KwText,
                     _ => Tok::Ident(word.to_string()),
                 };
                 push(&mut out, tok, line);

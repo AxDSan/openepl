@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 use openepl_backend::lower_module;
-use openepl_ir::parse;
+use openepl_ir::{parse, validate, Registry};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -159,7 +159,17 @@ fn lower_source(input: &Path) -> Result<String, String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let module = parse(&src).map_err(|e| e.to_string())?;
-    lower_module(&module).map_err(|e| e.to_string())
+    let reg = Registry::core();
+    if let Err(errs) = validate(&module, &reg) {
+        // Surface every diagnostic, one per line.
+        let joined = errs
+            .iter()
+            .map(|e| format!("  - {e}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("{} error(s) in {}:\n{joined}", errs.len(), input.display()));
+    }
+    lower_module(&module, &reg).map_err(|e| e.to_string())
 }
 
 fn default_output(input: &Path) -> PathBuf {
@@ -170,7 +180,16 @@ fn default_output(input: &Path) -> PathBuf {
 /// Invoke clang to assemble the `.ll` and link the runtime objects into a
 /// native executable, dead-stripping unused command objects (PRD D3).
 fn clang_link(ll_path: &Path, runtime_dir: &Path, out_bin: &Path) -> Result<(), i32> {
-    let runtime_srcs = ["e_init.c", "oe_start.c", "oe_print_int.c", "oe_print_text.c"];
+    let runtime_srcs = [
+        "e_init.c",
+        "oe_start.c",
+        "oe_mem.c",
+        "oe_io.c",
+        "oe_math.c",
+        "oe_convert.c",
+        "oe_text.c",
+        "oe_datetime.c",
+    ];
     let mut cmd = Command::new("clang");
     cmd.arg("-O0")
         .arg("-ffunction-sections")
@@ -183,6 +202,7 @@ fn clang_link(ll_path: &Path, runtime_dir: &Path, out_bin: &Path) -> Result<(), 
     for s in runtime_srcs {
         cmd.arg(runtime_dir.join(s));
     }
+    cmd.arg("-lm"); // libm for the floating-point commands
     cmd.arg("-o").arg(out_bin);
 
     match cmd.status() {
