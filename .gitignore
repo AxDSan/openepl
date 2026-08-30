@@ -37,3 +37,6 @@ codedb.snapshot
 
 # Vendored third-party sources (fetch with tools/fetch-rmlui.sh)
 /vendor/
+
+# Designer binary
+/designer/openepl-designer

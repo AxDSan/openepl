@@ -432,3 +432,86 @@ fn control_flow_runs_correctly() {
     // Two separately-built strings with the same characters must compare equal.
     assert_eq!(lines[21], "text equality ok");
 }
+
+/// **M0, the RAD metric (PRD §8).** A scripted designer session adds a button,
+/// sets its properties, wires a click handler, and saves — and the resulting
+/// `.oir` compiles to a native binary whose button actually works.
+///
+/// This is the whole product thesis in one test: draw it, wire it, ship it.
+#[test]
+fn designer_produces_a_working_app() {
+    let repo = repo();
+    let designer = repo.join("designer/openepl-designer");
+    if !designer.exists() {
+        eprintln!("designer not built (run designer/build.sh); skipping");
+        return;
+    }
+    let project = std::env::temp_dir().join("openepl_designed.oir");
+    std::fs::write(
+        &project,
+        r#"module designed
+use ui
+
+form win
+  title = "Designed"
+  width = 400
+  height = 260
+end
+"#,
+    )
+    .expect("write project");
+
+    let out = Command::new(&designer)
+        .arg(&project)
+        .arg(repo.join("target/debug/openepl"))
+        .env(
+            "OPENEPL_DESIGNER_SCRIPT",
+            "add:button;set:text=Press me;set:left=40;set:top=80;wire:click=on_press;save",
+        )
+        .output()
+        .expect("run designer");
+    assert!(
+        out.status.success(),
+        "designer session failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The designer must not have written a second parser: what it saved has to
+    // satisfy the real compiler.
+    let src = std::fs::read_to_string(&project).expect("read saved project");
+    assert!(
+        src.contains("button button1"),
+        "component not saved:\n{src}"
+    );
+    assert!(
+        src.contains("on click: on_press"),
+        "handler not wired:\n{src}"
+    );
+    assert!(
+        src.contains("sub on_press"),
+        "handler stub not generated:\n{src}"
+    );
+
+    let bin = std::env::temp_dir().join("openepl_designed_app");
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args([
+            "build",
+            project.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+        ])
+        .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+        .status()
+        .expect("compile designed app");
+    assert!(status.success(), "the designed app did not compile");
+
+    let run = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "4")
+        .env("OPENEPL_UI_SYNTH_CLICK", "2")
+        .output()
+        .expect("run designed app");
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("on_press"),
+        "the designed button did not reach its handler"
+    );
+}
