@@ -656,12 +656,16 @@ fn dragging_moves_components_precisely() {
     let project = std::env::temp_dir().join("openepl_drag.oir");
     std::fs::copy(repo.join("examples/controls.oir"), &project).expect("seed");
 
-    // grp starts at (20,120). Grab 10px inside it and drop at (150,60), so it
-    // must land at (140,50) — cursor position minus the grab offset.
+    // grp starts at (20,120). Grab 10px inside it and drop at (150,120), so it
+    // must land at (140,110) — cursor position minus the grab offset.
+    //
+    // The target is deliberately clear of every other component's edges AND
+    // centre lines: alignment snapping is correct behaviour, but it must not
+    // participate in a measurement of the grab offset.
     let out = Command::new(&designer)
         .arg(&project)
         .arg(repo.join("target/debug/openepl"))
-        .env("OPENEPL_DESIGNER_SCRIPT", "drag:grp@30,130->150,60;save")
+        .env("OPENEPL_DESIGNER_SCRIPT", "drag:grp@30,130->150,120;save")
         .output()
         .expect("run designer");
     assert!(out.status.success());
@@ -677,7 +681,7 @@ fn dragging_moves_components_precisely() {
         "drag lost the grab offset:\n{grp}"
     );
     assert!(
-        grp.contains("top = 50"),
+        grp.contains("top = 110"),
         "drag lost the grab offset:\n{grp}"
     );
 
@@ -741,5 +745,41 @@ fn selection_outline_traces_the_rendered_frame() {
     assert!(
         line.contains("selection rect=20,120 258x108"),
         "outline does not trace the rendered frame: {line}"
+    );
+}
+
+/// Dragging a component near another's edge should snap flush to it — that is
+/// what alignment guides are for, and it is the difference between a designer
+/// that feels precise and one that feels approximate.
+#[test]
+fn dragging_snaps_to_alignment_guides() {
+    let repo = repo();
+    let designer = repo.join("designer/openepl-designer");
+    if !designer.exists() {
+        eprintln!("designer not built; skipping");
+        return;
+    }
+    let project = std::env::temp_dir().join("openepl_align.oir");
+    std::fs::copy(repo.join("examples/controls.oir"), &project).expect("seed");
+
+    // Most components sit at left = 20. Drop grp at left = 23, close enough
+    // that it must snap flush to 20 rather than to the 10px grid.
+    let out = Command::new(&designer)
+        .arg(&project)
+        .arg(repo.join("target/debug/openepl"))
+        .env("OPENEPL_DESIGNER_SCRIPT", "drag:grp@20,120->23,200;save")
+        .output()
+        .expect("run designer");
+    assert!(out.status.success());
+
+    let src = std::fs::read_to_string(&project).expect("read");
+    let grp = src
+        .split("groupbox grp")
+        .nth(1)
+        .expect("groupbox")
+        .to_string();
+    assert!(
+        grp.contains("left = 20"),
+        "did not snap flush to the neighbouring edge:\n{grp}"
     );
 }

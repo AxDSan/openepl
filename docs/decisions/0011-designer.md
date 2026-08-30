@@ -78,6 +78,28 @@ tests prove something other than what users experience.
 A proper "save / discard / cancel" prompt supersedes this once the designer has
 a dialog layer.
 
+## Editing model
+
+- **Undo/redo** keeps whole-model snapshots rather than reversible commands. The
+  model is a few dozen strings, so copying it is cheaper than describing every
+  edit as an invertible operation — and a snapshot cannot drift from what it
+  claims to undo. One snapshot per *gesture*, not per mouse-move, so a drag
+  undoes in one step.
+- **Run tracks its child process**, so Stop can actually stop it. `system()`
+  gives no handle on the child, which is why Stop could only ever say "nothing
+  running". The loop reaps the child if it exits on its own, so the status stays
+  honest.
+- **Alignment guides** snap a dragged component flush to a neighbour's edge or
+  centre line when within 6px, and draw the line that claimed it. Grid snapping
+  applies only when no neighbour did, so guides always win over the grid — the
+  designer feels precise rather than approximate.
+- **Multi-select** (ctrl-click) shows a plain outline on secondary selections
+  and handles on the primary. Copy/paste re-identifies pasted components so ids
+  stay unique, and offsets them so the copies are visible.
+- Every outline measures the component's **rendered border box** through one
+  shared helper, so a padded component (groupbox) cannot get an outline that
+  disagrees with what is painted.
+
 ## Known debt, stated rather than hidden
 
 - **The designer's own chrome is not accessible.** It bypasses the D10 layer that

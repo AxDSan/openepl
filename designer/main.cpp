@@ -17,8 +17,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fstream>
+#include <signal.h>
 #include <sstream>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <string>
 #include <vector>
 
@@ -41,6 +45,26 @@ constexpr int WIN_W = 1440, WIN_H = 900;
 /// Components named in the design spec that the UI library does not provide
 /// yet. Shown greyed so the toolbox reads as designed while staying honest
 /// about what actually exists — clicking one says so rather than failing oddly.
+/// A menu entry: label, the action it fires, and its shortcut hint.
+struct MenuItem { const char* label; const char* action; const char* keys; };
+struct Menu { const char* title; std::vector<MenuItem> items; };
+
+/// The menu bar. Every entry here does something — an entry that only prints
+/// "not implemented" is worse than no entry at all.
+inline const std::vector<Menu>& menus() {
+    static const std::vector<Menu> m = {
+        {"File", {{"Save", "save", "Ctrl+S"}, {"Build Binary", "build", ""},
+                  {"Run", "run", ""}, {"Exit", "exit", ""}}},
+        {"Edit", {{"Undo", "undo", "Ctrl+Z"}, {"Redo", "redo", "Ctrl+Shift+Z"},
+                  {"Copy", "copy", "Ctrl+C"}, {"Paste", "paste", "Ctrl+V"},
+                  {"Delete", "delete", "Del"}}},
+        {"View", {{"Designer", "view-designer", ""}, {"Code", "view-code", ""}}},
+        {"Build", {{"Build Binary", "build", ""}, {"Run", "run", ""}, {"Stop", "stop", ""}}},
+        {"Help", {{"About OpenEPL", "about", ""}}},
+    };
+    return m;
+}
+
 struct PlannedTool { const char* section; const char* name; };
 const PlannedTool PLANNED[] = {
     // These need language or platform features that do not exist yet: list
@@ -87,6 +111,24 @@ struct Designer {
 
     /// "designer" or "code" — the centre pane's view.
     std::string view = "designer";
+
+    /// The app launched by Run, so Stop can actually stop it.
+    pid_t running_app = 0;
+
+    /// Edit history. Whole-model snapshots: the model is a few dozen strings,
+    /// so copying it is cheaper than describing every edit as a reversible
+    /// command, and it cannot drift from what it claims to undo.
+    std::vector<Model> undo_stack;
+    std::vector<Model> redo_stack;
+
+    /// Components selected in the designer. `selected` is the primary one.
+    std::vector<std::string> selection;
+
+    /// Clipboard for copy/paste.
+    std::vector<Component> clipboard;
+
+    /// Alignment guides to draw this frame: x positions and y positions.
+    std::vector<int> guide_x, guide_y;
 };
 Designer g;
 
@@ -162,6 +204,40 @@ void log(const std::string& line, const char* cls = nullptr) {
 }
 
 void mark_dirty() { g.dirty = true; }
+
+void run_app(const std::string& path);
+void stop_app();
+void refresh_all();
+bool is_selected(const std::string& id);
+
+/// Record the model before a change, so it can be undone. Call BEFORE mutating.
+void push_undo() {
+    g.undo_stack.push_back(g.model);
+    if (g.undo_stack.size() > 100) g.undo_stack.erase(g.undo_stack.begin());
+    g.redo_stack.clear();
+}
+
+void undo() {
+    if (g.undo_stack.empty()) { set_status("nothing to undo"); return; }
+    g.redo_stack.push_back(g.model);
+    g.model = g.undo_stack.back();
+    g.undo_stack.pop_back();
+    if (!g.model.find(g.selected)) g.selected.clear();
+    mark_dirty();
+    refresh_all();
+    set_status("undo");
+}
+
+void redo() {
+    if (g.redo_stack.empty()) { set_status("nothing to redo"); return; }
+    g.undo_stack.push_back(g.model);
+    g.model = g.redo_stack.back();
+    g.redo_stack.pop_back();
+    if (!g.model.find(g.selected)) g.selected.clear();
+    mark_dirty();
+    refresh_all();
+    set_status("redo");
+}
 
 /* --- toolbox -------------------------------------------------------------- */
 
@@ -244,6 +320,13 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     s << "#menubar .m{display:inline-block;padding:6px 10px 6px 10px;"
          "font-size:12px;color:" << TEXT << ";border-radius:4px}";
     s << "#menubar .m:hover{background-color:#e8eaed}";
+    s << "#menupop{position:absolute;background-color:" << PANEL << ";border:1px "
+         << BORDER << ";border-radius:6px;padding:4px;"
+         "box-shadow:#00000024 0 6px 18px 0px;z-index:10}";
+    s << "#menupop .mi{display:block;padding:6px 26px 6px 10px;border-radius:4px;"
+         "white-space:nowrap;color:" << TEXT << "}";
+    s << "#menupop .mi:hover{background-color:" << ACCENT << ";color:#fff}";
+    s << "#menupop .keys{color:" << TEXT_MUTED << ";padding-left:18px}";
 
     // ---- action toolbar -------------------------------------------------
     s << "#toolbar{left:0;top:" << (TITLEBAR_H + MENUBAR_H) << "px;width:" << WIN_W << "px;height:"
@@ -309,11 +392,20 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     // selection chrome
     s << "#overlay{position:absolute;left:0;top:0;width:100%;height:100%}";
     s << ".selbox{border:1px " << ACCENT << "}";
+    s << ".selbox.alt{border:1px #9db8ea}";
+    s << ".guide{background-color:#ff4d9a}";
     s << ".fgrip{background-color:#00000000}";
     s << ".fgrip:hover{background-color:" << ACCENT << "}";
     s << ".fgrip.corner{background-color:" << BORDER << ";border-radius:2px}";
     s << ".fgrip.corner:hover{background-color:" << ACCENT << "}";
     s << ".handle{width:7px;height:7px;background-color:#ffffff;border:1px " << ACCENT << "}";
+    // Cursor per anchor, so the resize direction is obvious before clicking.
+    s << ".handle.nw,.handle.se{cursor:resize-nwse}";
+    s << ".handle.ne,.handle.sw{cursor:resize-nesw}";
+    s << ".handle.n,.handle.s{cursor:resize-ns}";
+    s << ".handle.e,.handle.w{cursor:resize-ew}";
+    s << ".fgrip.e{cursor:resize-ew}.fgrip.s{cursor:resize-ns}";
+    s << ".fgrip.corner{cursor:resize-nwse}";
     s << ".badge{background-color:" << ACCENT << ";color:#fff;font-size:11px;padding:3px 7px 3px 7px;"
          "border-radius:4px;white-space:nowrap}";
 
@@ -385,14 +477,15 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
          "<div class='wc' style='right:18px;background-color:#ff5f57'/></div>";
 
     s << "<div id='menubar'>";
-    for (const char* m : {"File", "Edit", "View", "Project", "Components", "Build", "Debug", "Run", "Help"})
-        s << "<div class='m'>" << m << "</div>";
-    s << "</div>";
+    for (size_t i = 0; i < menus().size(); i++) {
+        s << "<div class='m' oe-menu='" << i << "'>" << menus()[i].title << "</div>";
+    }
+    s << "</div><div id='menupop' style='display:none'/>";
 
     s << "<div id='toolbar'>"
-         "<div class='tb' oe-action='new'>New</div>"
-         "<div class='tb' oe-action='open'>Open</div>"
          "<div class='tb' oe-action='save'>Save</div>"
+         "<div class='tb' oe-action='undo'>Undo</div>"
+         "<div class='tb' oe-action='redo'>Redo</div>"
          "<div class='sep'/>"
          "<div class='tb primary' id='btndesigner' oe-view='designer'>Designer</div>"
          "<div class='tb ghost' id='btncode' oe-view='code'>Code</div>"
@@ -464,6 +557,32 @@ int prop_int(const Component& c, const char* name, int fallback) {
         return std::atoi(v->c_str());
     }
     return fallback;
+}
+
+/// The rendered border-box rect of a component, in canvas coordinates.
+/// Model width/height size the CONTENT box, so anything with padding or a
+/// border draws larger; outlines must trace what is actually painted.
+bool measure_component(Rml::Element* canvas, const std::string& id, int& x, int& y, int& w,
+                       int& h) {
+    if (!canvas) return false;
+    Rml::Element* target = nullptr;
+    for (int i = 0; i < canvas->GetNumChildren(); i++) {
+        Rml::Element* child = canvas->GetChild(i);
+        if (child->GetAttribute<Rml::String>("oe-id", "") == id) {
+            target = child;
+            break;
+        }
+    }
+    if (!target) return false;
+    g.context->Update();   // layout must be current for the measurement to mean anything
+    const auto canvas_at = canvas->GetAbsoluteOffset(Rml::BoxArea::Border);
+    const auto at = target->GetAbsoluteOffset(Rml::BoxArea::Border);
+    const auto size = target->GetBox().GetSize(Rml::BoxArea::Border);
+    x = (int)(at.x - canvas_at.x);
+    y = (int)(at.y - canvas_at.y);
+    w = (int)size.x;
+    h = (int)size.y;
+    return true;
 }
 
 void rebuild_canvas() {
@@ -555,9 +674,43 @@ void rebuild_canvas() {
             d->SetProperty("width", Rml::String(std::to_string(pw) + "px"));
             d->SetProperty("height", Rml::String(std::to_string(ph) + "px"));
         };
-        grip("e",  fwid - 4, 0, 8, fhei - 4, "fgrip");
-        grip("s",  0, fhei - 4, fwid - 4, 8, "fgrip");
+        grip("e",  fwid - 4, 0, 8, fhei - 4, "fgrip e");
+        grip("s",  0, fhei - 4, fwid - 4, 8, "fgrip s");
         grip("se", fwid - 7, fhei - 7, 12, 12, "fgrip corner");
+    }
+
+    // Alignment guides, drawn only while dragging.
+    for (int gx : g.guide_x) {
+        Rml::Element* d = overlay->AppendChild(g.doc->CreateElement("div"));
+        d->SetProperty("position", "absolute");
+        d->SetAttribute("class", Rml::String("guide v"));
+        d->SetProperty("left", Rml::String(std::to_string(gx) + "px"));
+        d->SetProperty("top", "0px");
+        d->SetProperty("width", "1px");
+        d->SetProperty("height", "100%");
+    }
+    for (int gy : g.guide_y) {
+        Rml::Element* d = overlay->AppendChild(g.doc->CreateElement("div"));
+        d->SetProperty("position", "absolute");
+        d->SetAttribute("class", Rml::String("guide h"));
+        d->SetProperty("left", "0px");
+        d->SetProperty("top", Rml::String(std::to_string(gy) + "px"));
+        d->SetProperty("width", "100%");
+        d->SetProperty("height", "1px");
+    }
+
+    // Secondary selections get a plain outline; the primary one gets handles.
+    for (const auto& id : g.selection) {
+        if (id == g.selected) continue;
+        int sx = 0, sy = 0, sw = 0, sh = 0;
+        if (!measure_component(canvas, id, sx, sy, sw, sh)) continue;
+        Rml::Element* d = overlay->AppendChild(g.doc->CreateElement("div"));
+        d->SetProperty("position", "absolute");
+        d->SetAttribute("class", Rml::String("selbox alt"));
+        d->SetProperty("left", Rml::String(std::to_string(sx - 1) + "px"));
+        d->SetProperty("top", Rml::String(std::to_string(sy - 1) + "px"));
+        d->SetProperty("width", Rml::String(std::to_string(sw + 2) + "px"));
+        d->SetProperty("height", Rml::String(std::to_string(sh + 2) + "px"));
     }
 
     // Selection chrome lives in an overlay so it never perturbs the components
@@ -567,25 +720,8 @@ void rebuild_canvas() {
         // model's width/height: those size the CONTENT box, so a component with
         // padding or a border (a groupbox has both) draws larger than its
         // declared size, and a model-derived outline sits inside the real frame.
-        Rml::Element* target = nullptr;
-        for (int i = 0; i < canvas->GetNumChildren(); i++) {
-            Rml::Element* child = canvas->GetChild(i);
-            if (child->GetAttribute<Rml::String>("oe-id", "") == g.selected) {
-                target = child;
-                break;
-            }
-        }
-        if (!target) return;
-        // Layout must be current for the measurement to mean anything.
-        g.context->Update();
-        // Offset and size must describe the SAME box area: GetAbsoluteOffset
-        // defaults to the content origin, which sits inside the padding and
-        // border, so pairing it with a border-box size skews the outline.
-        const auto canvas_at = canvas->GetAbsoluteOffset(Rml::BoxArea::Border);
-        const auto at = target->GetAbsoluteOffset(Rml::BoxArea::Border);
-        const auto size = target->GetBox().GetSize(Rml::BoxArea::Border);
-        const int x = (int)(at.x - canvas_at.x), y = (int)(at.y - canvas_at.y);
-        const int w = (int)size.x, h = (int)size.y;
+        int x = 0, y = 0, w = 0, h = 0;
+        if (!measure_component(canvas, g.selected, x, y, w, h)) return;
         if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
             const Component* c = g.model.find(g.selected);
             std::fprintf(stderr,
@@ -612,6 +748,7 @@ void rebuild_canvas() {
             for (int j = 0; j < 3; j++) {
                 if (i == 1 && j == 1) continue;   // 8 anchors, not 9
                 Rml::Element* d = place("handle", hx[i], hy[j], 0, 0);
+                d->SetAttribute("class", Rml::String(std::string("handle ") + EDGE[i][j]));
                 d->SetAttribute("oe-grip", Rml::String(EDGE[i][j]));
             }
         }
@@ -778,7 +915,11 @@ void refresh_all() {
     rebuild_code();
 }
 
-void select(const std::string& id) {
+/// Select `id`. With `add`, extend the selection (ctrl-click) instead of
+/// replacing it.
+void select(const std::string& id, bool add = false) {
+    if (!add) g.selection.clear();
+    if (!id.empty() && !is_selected(id)) g.selection.push_back(id);
     g.selected = id;
     refresh_all();
 }
@@ -788,6 +929,7 @@ void select(const std::string& id) {
 void add_component(const std::string& type_name) {
     const OpenEPL_ComponentDesc* desc = describe(type_name.c_str());
     if (!desc) { set_status("unknown component type " + type_name); return; }
+    push_undo();
     Component c;
     c.id = g.model.fresh_id(type_name);
     c.type_name = type_name;
@@ -826,6 +968,7 @@ void begin_drag(const std::string& id, int mx, int my) {
     Rml::Element* canvas = by_id("canvas");
     const Component* comp = g.model.find(id);
     if (!canvas || !comp) return;
+    push_undo();   // one snapshot per drag, not per mouse move
     const auto origin = canvas->GetAbsoluteOffset();
     g.drag_dx = mx - ((int)origin.x + prop_int(*comp, "left", 0));
     g.drag_dy = my - ((int)origin.y + prop_int(*comp, "top", 0));
@@ -849,10 +992,85 @@ void drag_to(int mx, int my) {
     if (y < 0) y = 0;
     if (x > fw - w) x = fw - w;
     if (y > fh - h) y = fh - h;
-    c->set_property("left", std::to_string(snap(x)));
-    c->set_property("top", std::to_string(snap(y)));
+
+    // Alignment guides: if an edge or centre lines up with another component's,
+    // snap exactly to it and remember the line so it can be drawn. This is what
+    // makes a designer feel precise rather than approximate.
+    constexpr int PULL = 6;
+    g.guide_x.clear();
+    g.guide_y.clear();
+    for (const auto& other : g.model.children) {
+        if (other.id == c->id) continue;
+        const int ox = prop_int(other, "left", 0), oy = prop_int(other, "top", 0);
+        const int ow = prop_int(other, "width", 120), oh = prop_int(other, "height", 32);
+        const int xs[3] = {ox, ox + ow / 2 - w / 2, ox + ow - w};
+        const int xg[3] = {ox, ox + ow / 2, ox + ow};
+        for (int i = 0; i < 3; i++) {
+            if (std::abs(x - xs[i]) <= PULL) { x = xs[i]; g.guide_x.push_back(xg[i]); }
+        }
+        const int ys[3] = {oy, oy + oh / 2 - h / 2, oy + oh - h};
+        const int yg[3] = {oy, oy + oh / 2, oy + oh};
+        for (int i = 0; i < 3; i++) {
+            if (std::abs(y - ys[i]) <= PULL) { y = ys[i]; g.guide_y.push_back(yg[i]); }
+        }
+    }
+    // Snap to the grid only when no neighbour claimed the position.
+    c->set_property("left", std::to_string(g.guide_x.empty() ? snap(x) : x));
+    c->set_property("top", std::to_string(g.guide_y.empty() ? snap(y) : y));
     mark_dirty();
     rebuild_canvas();
+}
+
+/// Is `id` part of the current selection?
+bool is_selected(const std::string& id) {
+    for (const auto& s : g.selection) {
+        if (s == id) return true;
+    }
+    return false;
+}
+
+/// Delete every selected component.
+void delete_selection() {
+    if (g.selection.empty()) { set_status("nothing selected"); return; }
+    push_undo();
+    const size_t before = g.model.children.size();
+    std::vector<Component> kept;
+    for (const auto& c : g.model.children) {
+        if (!is_selected(c.id)) kept.push_back(c);
+    }
+    g.model.children = kept;
+    g.selection.clear();
+    g.selected.clear();
+    mark_dirty();
+    refresh_all();
+    set_status("deleted " + std::to_string(before - g.model.children.size()) + " component(s)");
+}
+
+void copy_selection() {
+    g.clipboard.clear();
+    for (const auto& c : g.model.children) {
+        if (is_selected(c.id)) g.clipboard.push_back(c);
+    }
+    set_status("copied " + std::to_string(g.clipboard.size()) + " component(s)");
+}
+
+/// Paste the clipboard, offset slightly so the copies are visible and
+/// re-identified so ids stay unique.
+void paste_clipboard() {
+    if (g.clipboard.empty()) { set_status("clipboard is empty"); return; }
+    push_undo();
+    g.selection.clear();
+    for (Component c : g.clipboard) {
+        c.id = g.model.fresh_id(c.type_name);
+        c.set_property("left", std::to_string(prop_int(c, "left", 0) + 10));
+        c.set_property("top", std::to_string(prop_int(c, "top", 0) + 10));
+        g.model.children.push_back(c);
+        g.selection.push_back(c.id);
+        g.selected = c.id;
+    }
+    mark_dirty();
+    refresh_all();
+    set_status("pasted " + std::to_string(g.clipboard.size()) + " component(s)");
 }
 
 void save() {
@@ -902,9 +1120,48 @@ void build_binary(bool then_run) {
     log(line, "ok");
     log("> IR stripped — no decompilation possible", "muted");
     set_status("build succeeded");
-    if (then_run) {
-        log("> running…", "muted");
-        std::system((out + " &").c_str());
+    if (then_run) run_app(out);
+}
+
+/// Launch the built app, keeping its pid so Stop can end it. `system()` would
+/// give us no handle on the child, which is why Stop could only ever say
+/// "nothing running".
+void run_app(const std::string& path) {
+    stop_app();
+    const pid_t pid = fork();
+    if (pid == 0) {
+        execl(path.c_str(), path.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    if (pid < 0) { log("could not start the app"); return; }
+    g.running_app = pid;
+    log("> running (pid " + std::to_string(pid) + ")", "muted");
+    set_status("running");
+}
+
+/// Stop the app started by Run, if it is still alive.
+void stop_app() {
+    if (g.running_app <= 0) { set_status("nothing running"); return; }
+    if (::kill(g.running_app, 0) != 0) {   // already exited
+        g.running_app = 0;
+        set_status("nothing running");
+        return;
+    }
+    ::kill(g.running_app, SIGTERM);
+    int status = 0;
+    ::waitpid(g.running_app, &status, 0);
+    log("> stopped (pid " + std::to_string(g.running_app) + ")", "muted");
+    g.running_app = 0;
+    set_status("stopped");
+}
+
+/// Reap the app if it exited on its own, so Stop reports honestly.
+void poll_app() {
+    if (g.running_app <= 0) return;
+    int status = 0;
+    if (::waitpid(g.running_app, &status, WNOHANG) == g.running_app) {
+        log("> app exited", "muted");
+        g.running_app = 0;
     }
 }
 
@@ -940,6 +1197,7 @@ struct Listener : Rml::EventListener {
             }
             if (name.empty()) return;
             if (cls.find("ev") != Rml::String::npos) {
+                push_undo();
                 comp->set_handler(name, value);
                 mark_dirty();
                 if (!value.empty() && !g.model.has_sub(value)) {
@@ -948,6 +1206,7 @@ struct Listener : Rml::EventListener {
                 }
                 refresh_all();
             } else if (cls.find("pv") != Rml::String::npos) {
+                push_undo();
                 comp->set_property(name, value);
                 mark_dirty();
                 refresh_all();
@@ -955,7 +1214,72 @@ struct Listener : Rml::EventListener {
             return;
         }
 
+        if (type == "keydown") {
+            const int key = ev.GetParameter<int>("key_identifier", 0);
+            const bool ctrl = ev.GetParameter<bool>("ctrl_key", false);
+            const bool shift = ev.GetParameter<bool>("shift_key", false);
+            if (ctrl && key == Rml::Input::KI_Z) { shift ? redo() : undo(); return; }
+            if (ctrl && key == Rml::Input::KI_Y) { redo(); return; }
+            if (ctrl && key == Rml::Input::KI_C) { copy_selection(); return; }
+            if (ctrl && key == Rml::Input::KI_V) { paste_clipboard(); return; }
+            if (ctrl && key == Rml::Input::KI_S) { save(); return; }
+            if (key == Rml::Input::KI_DELETE) { delete_selection(); return; }
+            // Nudge the selection with the arrow keys: 1px normally, a grid
+            // step with shift.
+            int dx = 0, dy = 0;
+            if (key == Rml::Input::KI_LEFT) dx = -1;
+            else if (key == Rml::Input::KI_RIGHT) dx = 1;
+            else if (key == Rml::Input::KI_UP) dy = -1;
+            else if (key == Rml::Input::KI_DOWN) dy = 1;
+            if (dx || dy) {
+                if (shift) { dx *= GRID; dy *= GRID; }
+                push_undo();
+                for (const auto& id : g.selection) {
+                    if (Component* c = g.model.find(id)) {
+                        c->set_property("left",
+                                        std::to_string(std::max(0, prop_int(*c, "left", 0) + dx)));
+                        c->set_property("top",
+                                        std::to_string(std::max(0, prop_int(*c, "top", 0) + dy)));
+                    }
+                }
+                mark_dirty();
+                refresh_all();
+            }
+            return;
+        }
+
         if (type == "click") {
+            // A click anywhere dismisses an open menu, unless it opened one.
+            bool opened_menu = false;
+            for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                if (!e->HasAttribute("oe-menu")) continue;
+                const int idx = e->GetAttribute<int>("oe-menu", 0);
+                if (Rml::Element* pop = by_id("menupop")) {
+                    std::string html;
+                    for (const auto& item : menus()[(size_t)idx].items) {
+                        html += "<div class='mi' oe-action='" + std::string(item.action) + "'>" +
+                                item.label +
+                                (item.keys[0] ? "<span class='keys'>" + std::string(item.keys) +
+                                                    "</span>"
+                                              : "") +
+                                "</div>";
+                    }
+                    pop->SetInnerRML(html);
+                    const auto at = e->GetAbsoluteOffset(Rml::BoxArea::Border);
+                    pop->SetProperty("left", Rml::String(std::to_string((int)at.x) + "px"));
+                    pop->SetProperty("top", Rml::String(std::to_string(theme::TITLEBAR_H +
+                                                                      theme::MENUBAR_H) + "px"));
+                    pop->SetProperty("display", "block");
+                }
+                opened_menu = true;
+                break;
+            }
+            if (!opened_menu) {
+                if (Rml::Element* pop = by_id("menupop")) pop->SetProperty("display", "none");
+            } else {
+                return;
+            }
+
             for (Rml::Element* e = el; e; e = e->GetParentNode()) {
                 if (e->HasAttribute("oe-add")) {
                     add_component(e->GetAttribute<Rml::String>("oe-add", ""));
@@ -992,12 +1316,27 @@ struct Listener : Rml::EventListener {
                     if (a == "save") save();
                     else if (a == "run") build_binary(true);
                     else if (a == "build") build_binary(false);
-                    else if (a == "stop") set_status("nothing running");
-                    else set_status(a + " is not implemented yet");
+                    else if (a == "stop") stop_app();
+                    else if (a == "undo") undo();
+                    else if (a == "redo") redo();
+                    else if (a == "copy") copy_selection();
+                    else if (a == "paste") paste_clipboard();
+                    else if (a == "delete") delete_selection();
+                    else if (a == "view-designer") set_view("designer");
+                    else if (a == "view-code") set_view("code");
+                    else if (a == "about") {
+                        log("OpenEPL Studio — RAD for clean native binaries.", "muted");
+                        set_status("OpenEPL Studio");
+                    } else if (a == "exit") {
+                        Backend::RequestExit();
+                    } else {
+                        set_status(a + " is not implemented yet");
+                    }
                     return;
                 }
                 if (e->HasAttribute("oe-id")) {
-                    select(e->GetAttribute<Rml::String>("oe-id", ""));
+                    select(e->GetAttribute<Rml::String>("oe-id", ""),
+                           ev.GetParameter<bool>("ctrl_key", false));
                     return;
                 }
             }
@@ -1026,6 +1365,7 @@ struct Listener : Rml::EventListener {
 
             // Resizing the form preview, as in Visual Studio / RAD Studio.
             if (el->HasAttribute("oe-formgrip")) {
+                push_undo();
                 g.resizing_form = true;
                 g.resize_edge = el->GetAttribute<Rml::String>("oe-formgrip", "se");
                 g.resize_x0 = mx;
@@ -1037,6 +1377,7 @@ struct Listener : Rml::EventListener {
             // Resizing the selected component by its anchor.
             if (el->HasAttribute("oe-grip")) {
                 if (Component* c = g.model.find(g.selected)) {
+                    push_undo();
                     g.resizing_comp = true;
                     g.comp_edge = el->GetAttribute<Rml::String>("oe-grip", "se");
                     g.resize_x0 = mx;
@@ -1058,7 +1399,13 @@ struct Listener : Rml::EventListener {
             // could be dragged depended on which part you grabbed.
             for (Rml::Element* e = el; e; e = e->GetParentNode()) {
                 if (!e->HasAttribute("oe-id")) continue;
-                begin_drag(e->GetAttribute<Rml::String>("oe-id", ""), mx, my);
+                const std::string id = e->GetAttribute<Rml::String>("oe-id", "");
+                if (ev.GetParameter<bool>("ctrl_key", false)) {
+                    select(id, true);   // extend the selection instead of dragging
+                } else {
+                    if (!is_selected(id)) select(id);
+                    begin_drag(id, mx, my);
+                }
                 break;
             }
             return;
@@ -1124,6 +1471,11 @@ struct Listener : Rml::EventListener {
         if (type == "mouseup") {
             if (g.dragging || g.resizing_comp || g.resizing_form) rebuild_inspector();
             g.splitting.clear();
+            if (g.dragging) {
+                g.guide_x.clear();
+                g.guide_y.clear();
+                rebuild_canvas();
+            }
             g.dragging = false;
             g.resizing_comp = false;
             g.resizing_form = false;
@@ -1199,7 +1551,13 @@ void run_script(const char* script) {
                         g.dragging = false;
                     }
                 }
-            } else if (verb == "save") save();
+            } else if (verb == "undo") undo();
+            else if (verb == "redo") redo();
+            else if (verb == "copy") copy_selection();
+            else if (verb == "paste") paste_clipboard();
+            else if (verb == "delete") delete_selection();
+            else if (verb == "addsel") select(arg, true);
+            else if (verb == "save") save();
             else if (verb == "build") build_binary(false);
         }
         if (semi == std::string::npos) break;
@@ -1301,11 +1659,13 @@ int main(int argc, char** argv) {
     }
 
     while (Backend::ProcessEvents(g.context, nullptr, true)) {
+        poll_app();
         g.context->Update();
         Backend::BeginFrame();
         g.context->Render();
         Backend::PresentFrame();
     }
+    stop_app();
     if (g.dirty) {
         std::printf("designer: unsaved changes — saving before exit\n");
         save();
