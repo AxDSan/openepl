@@ -12,8 +12,11 @@ fn repo() -> PathBuf {
 
 /// Build `<repo>/examples/<name>.oir` to a temp binary; return its path.
 ///
-/// `tag` disambiguates the output path so tests that build the same example can
-/// run in parallel without clobbering each other's binary.
+/// `tag` MUST be unique per test. Tests run in parallel, and two tests writing
+/// the same output path race: one truncates the binary while the other executes
+/// it, producing an intermittent failure that looks like a product bug. There is
+/// deliberately no tag-less convenience wrapper — it is what caused exactly that
+/// flake twice.
 fn build_as(name: &str, tag: &str) -> PathBuf {
     let repo = repo();
     let example = repo.join("examples").join(format!("{name}.oir"));
@@ -32,10 +35,6 @@ fn build_as(name: &str, tag: &str) -> PathBuf {
     out_bin
 }
 
-fn build(name: &str) -> PathBuf {
-    build_as(name, "main")
-}
-
 fn run(bin: &Path) -> String {
     let out = Command::new(bin).output().expect("run built binary");
     assert!(out.status.success(), "binary exited non-zero");
@@ -44,7 +43,7 @@ fn run(bin: &Path) -> String {
 
 #[test]
 fn hello_builds_and_runs() {
-    let stdout = run(&build("hello"));
+    let stdout = run(&build_as("hello", "run"));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
         lines,
@@ -54,7 +53,7 @@ fn hello_builds_and_runs() {
 
 #[test]
 fn demo_builds_and_runs() {
-    let stdout = run(&build("demo"));
+    let stdout = run(&build_as("demo", "run"));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
         lines,
@@ -80,7 +79,7 @@ fn demo_builds_and_runs() {
 /// dead-stripped by `-ffunction-sections` + `--gc-sections`.
 #[test]
 fn unused_commands_are_dead_stripped() {
-    let bin = build("hello"); // uses only print_text / print_int + arithmetic
+    let bin = build_as("hello", "strip"); // uses only print_text / print_int + arithmetic
     let nm = match Command::new("nm").arg(&bin).output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
         _ => {
@@ -115,7 +114,7 @@ fn unused_commands_are_dead_stripped() {
 #[test]
 fn hello_library_via_abi() {
     // `use hello` — a third-party support library loaded through the ABI.
-    let stdout = run(&build("hellolib"));
+    let stdout = run(&build_as("hellolib", "abi"));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines, vec!["Hello, OpenEPL!", "HELLO, WORLD!"]);
 }
@@ -132,7 +131,7 @@ fn form_builds_and_click_reaches_handler() {
         eprintln!("RmlUi not vendored (run tools/fetch-rmlui.sh); skipping GUI test");
         return;
     }
-    let bin = build("form");
+    let bin = build_as("form", "click");
 
     let out = Command::new(&bin)
         .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "3")
