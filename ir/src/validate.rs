@@ -98,7 +98,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         // A global's initializer may call commands but must not read another
         // global: order-dependent global initialisation is a swamp, and a clear
         // error now beats a subtle one later.
-        if let Err(e) = check_initializer(&g.value, &global_types, reg) {
+        if let Err(e) = check_initializer(&g.value, &global_types) {
             push(format!("in initializer of `{}`: {e}", g.name));
         }
         match type_of_expr_in(&g.value, &HashMap::new(), reg, &components) {
@@ -256,23 +256,19 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
 
 /// A module variable's initializer may call commands but must not read another
 /// module variable (see the note where this is called).
-fn check_initializer(
-    e: &Expr,
-    globals: &HashMap<String, Ty>,
-    reg: &Registry,
-) -> Result<(), String> {
+fn check_initializer(e: &Expr, globals: &HashMap<String, Ty>) -> Result<(), String> {
     match e {
         Expr::Var(name) if globals.contains_key(name) => Err(format!(
             "cannot read module variable `{name}` here; module variable initializers may use literals and command calls only"
         )),
         Expr::Var(name) => Err(format!("unknown variable `{name}`")),
         Expr::Bin(_, l, r) => {
-            check_initializer(l, globals, reg)?;
-            check_initializer(r, globals, reg)
+            check_initializer(l, globals)?;
+            check_initializer(r, globals)
         }
         Expr::Call { args, .. } => {
             for a in args {
-                check_initializer(a, globals, reg)?;
+                check_initializer(a, globals)?;
             }
             Ok(())
         }
