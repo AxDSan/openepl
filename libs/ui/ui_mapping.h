@@ -103,41 +103,46 @@ inline std::string rcss_value(const char* property, const char* value) {
 ///
 /// D21: a document created bare drops decorators silently while `SetProperty`
 /// still reports success. Always seed.
-inline std::string seed_document(int width, int height, const std::string& font_family) {
-    // RmlUi ships form controls with NO default appearance: an <input> or
-    // <progress> renders as nothing until styled. These defaults are what makes
-    // editbox/checkbox/progressbar real controls rather than invisible ones —
-    // and they live here so the designer canvas and the built app agree (D9).
-    char buf[2048];
-    std::snprintf(buf, sizeof buf,
-        "<rml><head><style>"
-        // RmlUi's default text colour is WHITE, so any component that does not
-        // set `color` renders invisibly on a light form. Give text a sensible
-        // ink by default; components override it with their `color` property.
-        "body { width: %dpx; height: %dpx; font-family: '%s'; font-size: 16px;"
-        " color: #1f2328; }"
+/// Default appearance for every component type.
+///
+/// RmlUi ships form controls with NO default styling: an `<input>` or
+/// `<progress>` renders as *nothing* until styled. These rules are what make
+/// editbox/checkbox/progressbar real controls rather than invisible ones.
+///
+/// Shared by the runtime seed AND the designer canvas — with two copies, a
+/// control would look different in the designer than in the built app, which is
+/// the WYSIWYG drift D9 exists to prevent.
+inline const char* control_styles() {
+    return
         "div { display: block; position: absolute; }"
         "button { display: block; position: absolute; text-align: center; padding-top: 8px; }"
-        // text box
         "input.text { display: block; position: absolute; background-color: #ffffff;"
         " border: 1px #d0d7de; border-radius: 4px; padding: 4px 6px 0 6px; color: #1f2328; }"
         "input.text:focus { border: 1px #1e60d5; }"
-        // group box: a titled frame
-        "div.oe-groupbox { border: 1px #d0d7de; border-radius: 6px; padding: 8px; }"
-        // progress bar
         "div.oe-checkbox { background-color: #00000000; }"
         "div.oe-checkbox input { display: inline-block; width: 16px; height: 16px;"
         " background-color: #ffffff; border: 1px #8c959f; border-radius: 3px;"
         " vertical-align: -3px; }"
         "div.oe-checkbox input:checked { background-color: #1e60d5; border: 1px #1e60d5; }"
         "div.oe-checkbox span.oe-caption { display: inline-block; padding-left: 8px; }"
+        "div.oe-groupbox { border: 1px #d0d7de; border-radius: 6px; padding: 8px; }"
         "progress { display: block; position: absolute; background-color: #e1e4e8;"
         " border-radius: 8px; }"
         "progress fill { background-color: #1e60d5; border-radius: 8px; }"
-        "img { display: block; position: absolute; }"
-        "</style></head><body/></rml>",
-        width, height, font_family.c_str());
-    return std::string(buf);
+        "img { display: block; position: absolute; }";
+}
+
+/// The seed document every OpenEPL form is built into.
+///
+/// D21: a document created bare drops decorators silently while `SetProperty`
+/// still reports success. Always seed.
+inline std::string seed_document(int width, int height, const std::string& font_family) {
+    std::string out = "<rml><head><style>";
+    out += "body { width: " + std::to_string(width) + "px; height: " + std::to_string(height) +
+           "px; font-family: '" + font_family + "'; font-size: 16px; color: #1f2328; }";
+    out += control_styles();
+    out += "</style></head><body/></rml>";
+    return out;
 }
 
 /// Font files to try, with the family name each one registers as. RmlUi has no

@@ -77,6 +77,16 @@ struct Designer {
     bool resizing_comp = false;
     std::string comp_edge;
     int comp_x0 = 0, comp_y0 = 0, comp_w0 = 0, comp_h0 = 0;
+
+    /// Dock sizes, adjustable by dragging the splitters between panels.
+    int toolbox_w = theme::TOOLBOX_W;
+    int inspect_w = theme::INSPECT_W;
+    int bottom_h = theme::BOTTOM_H;
+    std::string splitting;            // "left", "right", "bottom" or empty
+    int split_x0 = 0, split_y0 = 0, split_v0 = 0;
+
+    /// "designer" or "code" — the centre pane's view.
+    std::string view = "designer";
 };
 Designer g;
 
@@ -89,6 +99,51 @@ std::string basename_of(const std::string& p) {
 }
 
 Rml::Element* by_id(const char* id) { return g.doc ? g.doc->GetElementById(id) : nullptr; }
+
+/// Apply the current dock sizes to the layout. Geometry lives here rather than
+/// in the stylesheet so the panels can be resized at run time.
+void relayout() {
+    using namespace theme;
+    if (!g.doc) return;
+    const int content_y = TITLEBAR_H + MENUBAR_H + TOOLBAR_H;
+    const int content_h = WIN_H - content_y - STATUS_H;
+    const int centre_w = WIN_W - g.toolbox_w - g.inspect_w;
+    const int canvas_h = content_h - TABBAR_H - g.bottom_h;
+
+    auto place = [&](const char* id, int x, int y, int w, int h) {
+        if (Rml::Element* e = by_id(id)) {
+            e->SetProperty("left", Rml::String(std::to_string(x) + "px"));
+            e->SetProperty("top", Rml::String(std::to_string(y) + "px"));
+            e->SetProperty("width", Rml::String(std::to_string(w) + "px"));
+            e->SetProperty("height", Rml::String(std::to_string(h) + "px"));
+        }
+    };
+    place("toolbox", 0, content_y, g.toolbox_w, content_h);
+    place("centre", g.toolbox_w, content_y, centre_w, content_h);
+    place("canvasarea", 0, TABBAR_H, centre_w, canvas_h);
+    place("inspectdock", g.toolbox_w + centre_w, content_y, g.inspect_w, content_h);
+    place("bottom", g.toolbox_w, content_y + TABBAR_H + canvas_h, centre_w, g.bottom_h);
+    place("splitleft", g.toolbox_w - 3, content_y, 6, content_h);
+    place("splitright", g.toolbox_w + centre_w - 3, content_y, 6, content_h);
+    place("splitbottom", g.toolbox_w, content_y + TABBAR_H + canvas_h - 3, centre_w, 6);
+
+    const int half = centre_w / 2;
+    if (Rml::Element* e = by_id("codepane")) {
+        e->SetProperty("left", "0px");
+        e->SetProperty("width", Rml::String(std::to_string(half) + "px"));
+        e->SetProperty("height", Rml::String(std::to_string(g.bottom_h) + "px"));
+    }
+    if (Rml::Element* e = by_id("logpane")) {
+        e->SetProperty("left", Rml::String(std::to_string(half) + "px"));
+        e->SetProperty("width", Rml::String(std::to_string(centre_w - half) + "px"));
+        e->SetProperty("height", Rml::String(std::to_string(g.bottom_h) + "px"));
+    }
+    for (const char* id : {"code", "log"}) {
+        if (Rml::Element* e = by_id(id)) {
+            e->SetProperty("height", Rml::String(std::to_string(g.bottom_h - 32) + "px"));
+        }
+    }
+}
 
 void set_status(const std::string& text) {
     if (Rml::Element* e = by_id("statustext")) e->SetInnerRML(esc(text));
@@ -231,6 +286,9 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
       << "px;padding:9px 14px 0 14px;font-size:12px;color:" << TEXT_MUTED << "}";
     s << ".tab.active{background-color:" << CANVAS << ";color:" << TEXT
       << ";border-bottom:2px " << ACCENT << "}";
+    s << "#codeview{position:absolute;left:0;top:" << TABBAR_H << "px;width:100%;"
+         "background-color:" << PANEL << ";overflow:auto}";
+    s << "#fullcode{font-family:'" << family << "';font-size:12px;padding:8px 0 0 0}";
     s << "#canvasarea{left:0;top:" << TABBAR_H << "px;width:" << centre_w << "px;height:" << canvas_h
       << "px;background-color:" << CANVAS << ";decorator:image(\"" << dot_tile << "\" repeat)}";
 
@@ -241,7 +299,9 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
       << ";border-bottom:1px " << BORDER_SOFT << ";border-top-left-radius:8px;"
          "border-top-right-radius:8px;padding:7px 10px 0 10px;font-size:12px;color:" << TEXT << "}";
     s << "#formtitle .dot{position:absolute;top:10px;width:9px;height:9px;border-radius:5px}";
-    s << "#canvas div,#canvas button{position:absolute}";
+    // Components on the canvas get the SAME default styling as in the built
+    // app, from the shared mapping — otherwise the preview lies.
+    s << openepl::ui::control_styles();
     s << "#canvas{position:relative;overflow:hidden;border-bottom-left-radius:8px;"
          "border-bottom-right-radius:8px}";
     // selection chrome
@@ -291,9 +351,10 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
       << ";border-bottom:1px " << BORDER_SOFT << "}";
     s << "#code{font-family:'" << family
       << "';font-size:12px;padding:6px 0 0 0;height:" << (BOTTOM_H - 32) << "px;overflow:auto}";
-    s << ".ln{display:inline-block;width:30px;color:#9aa3b0;text-align:right;padding-right:8px}";
-    s << ".cl{display:block;white-space:pre;padding-left:2px;height:17px}";
-    s << ".cl span{white-space:pre}";
+    s << ".ln{color:#9aa3b0}";
+    s << ".cl{display:block;white-space:nowrap}";
+    s << ".ln{display:inline-block;width:34px;text-align:right;padding-right:10px}";
+    
     s << ".k{color:" << SYN_KEYWORD << "}.m{color:" << SYN_METHOD << "}.s{color:" << SYN_STRING
       << "}.i{color:" << SYN_IDENT << "}.c{color:" << SYN_COMMENT << ";font-style:italic}.n{color:"
       << SYN_NUMBER << "}";
@@ -303,6 +364,8 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     s << "#log div{white-space:nowrap;overflow:hidden;height:17px}";
 
     // ---- status bar -----------------------------------------------------
+    s << ".split{position:absolute;background-color:#00000000}";
+    s << ".split:hover{background-color:" << ACCENT << "}";
     s << "#status{left:0;top:" << (WIN_H - STATUS_H) << "px;width:" << WIN_W << "px;height:"
       << STATUS_H << "px;background-color:" << CHROME << ";border-top:1px " << BORDER
       << ";font-size:11px;color:" << TEXT_MUTED << ";padding:5px 10px 0 10px}";
@@ -329,8 +392,8 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
          "<div class='tb' oe-action='open'>Open</div>"
          "<div class='tb' oe-action='save'>Save</div>"
          "<div class='sep'/>"
-         "<div class='tb primary' oe-action='view-designer'>Designer</div>"
-         "<div class='tb ghost' oe-action='view-code'>Code</div>"
+         "<div class='tb primary' id='btndesigner' oe-view='designer'>Designer</div>"
+         "<div class='tb ghost' id='btncode' oe-view='code'>Code</div>"
          "<div class='sep'/>"
          "<div class='tb run' oe-action='run'>▶ Run</div>"
          "<div class='tb' oe-action='build'>Build Binary</div>"
@@ -343,9 +406,11 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
 
     s << "<div id='centre'>"
          "<div id='tabs'>"
-         "<div class='tab active'>Designer — " << esc(g.model.form_name) << "</div>"
-         "<div class='tab'>Code</div>"
+         "<div class='tab active' id='tabdesigner' oe-view='designer'>Designer — "
+      << esc(g.model.form_name) << "</div>"
+         "<div class='tab' id='tabcode' oe-view='code'>Code</div>"
          "</div>"
+         "<div id='codeview' style='display:none'><div id='fullcode'/></div>"
          "<div id='canvasarea'>"
          "<div id='formwin'>"
          "<div id='formtitle'><span id='formtitletext'>Form</span>"
@@ -362,11 +427,18 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
 
     const int half = centre_w / 2;
     s << "<div id='bottom'>"
-         "<div class='pane' style='left:0;width:" << half << "px;border-right:1px " << BORDER << "'>"
-         "<div class='panehead'>CODE EDITOR</div><div id='code'/></div>"
-         "<div class='pane' style='left:" << half << "px;width:" << (centre_w - half) << "px'>"
+         "<div class='pane' id='codepane' style='left:0;width:" << half
+      << "px;border-right:1px " << BORDER << "'>"
+         "<div class='panehead' id='codehead'>CODE EDITOR</div><div id='code'/></div>"
+         "<div class='pane' id='logpane' style='left:" << half << "px;width:"
+      << (centre_w - half) << "px'>"
          "<div class='panehead'>OUTPUT / BUILD LOG</div><div id='log'/></div>"
          "</div>";
+
+    // Splitters: thin draggable bars between the docks.
+    s << "<div id='splitleft' class='split v'/>"
+         "<div id='splitright' class='split v'/>"
+         "<div id='splitbottom' class='split h'/>";
 
     s << "<div id='status'>RAD is the identity  |  English-first  |  "
          "Cross-platform  |  Assignment is not an expression"
@@ -621,7 +693,9 @@ void rebuild_code() {
 
     std::string html;
     for (size_t i = from; i < to && i < lines.size(); i++) {
-        html += "<div class='cl'><span class='ln'>" + std::to_string(i + 1) + "</span>" +
+        char num[16];
+        std::snprintf(num, sizeof num, "%4zu", i + 1);
+        html += "<div class='cl'><span class='ln'>" + std::string(num) + "</span>" +
                 highlight_line(lines[i]) + "</div>";
     }
     if (Rml::Element* head = code->GetParentNode()->GetChild(0)) {
@@ -629,6 +703,44 @@ void rebuild_code() {
                                        : "CODE EDITOR · " + esc(want));
     }
     code->SetInnerRML(html);
+
+    // The Code view shows the whole module, not just the wired handler.
+    if (Rml::Element* full = by_id("fullcode")) {
+        std::string all;
+        for (size_t i = 0; i < lines.size(); i++) {
+            char num[16];
+            std::snprintf(num, sizeof num, "%4zu", i + 1);
+            all += "<div class='cl'><span class='ln'>" + std::string(num) + "</span>" +
+                   highlight_line(lines[i]) + "</div>";
+        }
+        full->SetInnerRML(all);
+    }
+}
+
+/// Switch the centre pane between the designer canvas and the code view.
+void set_view(const std::string& view) {
+    g.view = view;
+    const bool code = (view == "code");
+    if (Rml::Element* e = by_id("canvasarea")) e->SetProperty("display", code ? "none" : "block");
+    if (Rml::Element* e = by_id("codeview")) e->SetProperty("display", code ? "block" : "none");
+    if (Rml::Element* e = by_id("codeview")) {
+        const int content_h = WIN_H - (theme::TITLEBAR_H + theme::MENUBAR_H + theme::TOOLBAR_H) -
+                              theme::STATUS_H - theme::TABBAR_H;
+        e->SetProperty("height", Rml::String(std::to_string(content_h) + "px"));
+    }
+    // Keep the toolbar switcher and the document tabs in step.
+    for (const char* id : {"tabdesigner", "tabcode", "btndesigner", "btncode"}) {
+        if (Rml::Element* e = by_id(id)) {
+            const bool is_code = std::string(id).find("code") != std::string::npos;
+            const bool active = (is_code == code);
+            const std::string base = std::string(id).rfind("tab", 0) == 0 ? "tab" : "tb";
+            e->SetAttribute("class", Rml::String(active ? base + (base == "tab" ? " active"
+                                                                               : " primary")
+                                                        : base + (base == "tab" ? "" : " ghost")));
+        }
+    }
+    rebuild_code();
+    set_status(code ? "code view" : "designer view");
 }
 
 void refresh_all() {
@@ -787,6 +899,10 @@ struct Listener : Rml::EventListener {
                                " is in the design spec but not implemented yet");
                     return;
                 }
+                if (e->HasAttribute("oe-view")) {
+                    set_view(e->GetAttribute<Rml::String>("oe-view", "designer"));
+                    return;
+                }
                 if (e->HasAttribute("oe-tab")) {
                     g.inspector_tab = e->GetAttribute<Rml::String>("oe-tab", "props");
                     for (const char* id : {"props", "events"}) {
@@ -825,6 +941,22 @@ struct Listener : Rml::EventListener {
             const int mx = ev.GetParameter<int>("mouse_x", 0);
             const int my = ev.GetParameter<int>("mouse_y", 0);
 
+            // Dock splitters.
+            {
+                const Rml::String id = el->GetId();
+                if (id == "splitleft" || id == "splitright" || id == "splitbottom") {
+                    g.splitting = id == "splitleft"    ? "left"
+                                  : id == "splitright" ? "right"
+                                                       : "bottom";
+                    g.split_x0 = mx;
+                    g.split_y0 = my;
+                    g.split_v0 = g.splitting == "left"    ? g.toolbox_w
+                                 : g.splitting == "right" ? g.inspect_w
+                                                          : g.bottom_h;
+                    return;
+                }
+            }
+
             // Resizing the form preview, as in Visual Studio / RAD Studio.
             if (el->HasAttribute("oe-formgrip")) {
                 g.resizing_form = true;
@@ -849,12 +981,18 @@ struct Listener : Rml::EventListener {
                 }
                 return;
             }
-            if (el->HasAttribute("oe-id")) {
-                select(el->GetAttribute<Rml::String>("oe-id", ""));
+            // Composite components (a checkbox is a container holding a box and
+            // a caption) deliver mousedown on the CHILD, which carries no id —
+            // so walk up to the component. Without this, whether a component
+            // could be dragged depended on which part you grabbed.
+            for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                if (!e->HasAttribute("oe-id")) continue;
+                select(e->GetAttribute<Rml::String>("oe-id", ""));
                 g.dragging = true;
-                const auto off = el->GetAbsoluteOffset();
+                const auto off = e->GetAbsoluteOffset();
                 g.drag_dx = mx - (int)off.x;
                 g.drag_dy = my - (int)off.y;
+                break;
             }
             return;
         }
@@ -862,6 +1000,20 @@ struct Listener : Rml::EventListener {
         if (type == "mousemove") {
             const int mx = ev.GetParameter<int>("mouse_x", 0);
             const int my = ev.GetParameter<int>("mouse_y", 0);
+
+            if (!g.splitting.empty()) {
+                int v = g.split_v0;
+                if (g.splitting == "left") v = g.split_v0 + (mx - g.split_x0);
+                else if (g.splitting == "right") v = g.split_v0 - (mx - g.split_x0);
+                else v = g.split_v0 - (my - g.split_y0);
+                if (v < 120) v = 120;
+                if (v > 640) v = 640;
+                if (g.splitting == "left") g.toolbox_w = v;
+                else if (g.splitting == "right") g.inspect_w = v;
+                else g.bottom_h = v;
+                relayout();
+                return;
+            }
 
             if (g.resizing_form) {
                 int w = g.resize_w0, h = g.resize_h0;
@@ -923,6 +1075,7 @@ struct Listener : Rml::EventListener {
 
         if (type == "mouseup") {
             if (g.dragging || g.resizing_comp || g.resizing_form) rebuild_inspector();
+            g.splitting.clear();
             g.dragging = false;
             g.resizing_comp = false;
             g.resizing_form = false;
@@ -1037,12 +1190,21 @@ int main(int argc, char** argv) {
         g.doc->AddEventListener(e, &g_listener);
     }
 
+    relayout();
     refresh_all();
     log("OpenEPL Studio ready.", "muted");
     log("> " + g.model.path, "muted");
     set_status("Ready");
 
     if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+        for (const char* id : {"bottom", "codepane", "code", "codeview"}) {
+            if (Rml::Element* e = by_id(id)) {
+                const auto b = e->GetBox().GetSize();
+                const auto o = e->GetAbsoluteOffset();
+                std::fprintf(stderr, "designer: #%s box=%.0fx%.0f at %.0f,%.0f\n", id, b.x, b.y,
+                             o.x, o.y);
+            }
+        }
         if (Rml::Element* tb = by_id("toolbox")) {
             std::fprintf(stderr, "designer: toolbox has %d children\n", tb->GetNumChildren());
             for (int i = 0; i < tb->GetNumChildren(); i++) {
