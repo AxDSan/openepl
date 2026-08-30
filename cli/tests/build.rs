@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 /// Build `<repo>/examples/<name>.oir` to a temp binary; return its path.
@@ -13,7 +16,12 @@ fn build(name: &str) -> PathBuf {
     let example = repo.join("examples").join(format!("{name}.oir"));
     let out_bin = std::env::temp_dir().join(format!("openepl_{name}_test"));
     let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
-        .args(["build", example.to_str().unwrap(), "-o", out_bin.to_str().unwrap()])
+        .args([
+            "build",
+            example.to_str().unwrap(),
+            "-o",
+            out_bin.to_str().unwrap(),
+        ])
         .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
         .status()
         .expect("run openepl");
@@ -31,7 +39,10 @@ fn run(bin: &Path) -> String {
 fn hello_builds_and_runs() {
     let stdout = run(&build("hello"));
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines, vec!["OpenEPL — arithmetic demo", "42", "14", "42", "42"]);
+    assert_eq!(
+        lines,
+        vec!["OpenEPL — arithmetic demo", "42", "14", "42", "42"]
+    );
 }
 
 #[test]
@@ -80,7 +91,24 @@ fn unused_commands_are_dead_stripped() {
         assert!(symbols.contains(&want), "expected `{want}` to be linked in");
     }
     // Unreferenced commands are gone.
-    for gone in ["oe_sqrt", "oe_replace", "oe_now", "oe_uppercase", "oe_pow_int"] {
-        assert!(!symbols.contains(&gone), "unused command `{gone}` was not stripped");
+    for gone in [
+        "oe_sqrt",
+        "oe_replace",
+        "oe_now",
+        "oe_uppercase",
+        "oe_pow_int",
+    ] {
+        assert!(
+            !symbols.contains(&gone),
+            "unused command `{gone}` was not stripped"
+        );
     }
+}
+
+#[test]
+fn hello_library_via_abi() {
+    // `use hello` — a third-party support library loaded through the ABI.
+    let stdout = run(&build("hellolib"));
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines, vec!["Hello, OpenEPL!", "HELLO, WORLD!"]);
 }

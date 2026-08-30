@@ -1,88 +1,49 @@
-/* libopenepl_core — Phase 1 spike runtime (PRD G3).
+/* libopenepl_core — internal runtime header (Phase 2).
  *
- * A portable C reimplementation of a slice of EPL's core library (`krnln`).
- * Commands are grouped by family into a few translation units; per-command
- * dead-stripping is achieved with `-ffunction-sections` + `--gc-sections`
- * (each function gets its own section), which realizes BlackMoon "fragment
- * extraction" (PRD D3) without one-file-per-command sprawl.  See ADR 0002.
- *
- * MEMORY (PRD D4): the runtime owns EPL-data allocation via oe_alloc/oe_free.
- * Text-returning commands allocate their result with oe_alloc.  The Phase-1
- * spike does NOT yet reclaim these (no GC / notification channel) — results
- * live for the process lifetime.  Ownership tracking arrives with the ABI's
- * NRS_MALLOC/NRS_MFREE channel in Phase 2.
- *
- * Runtime language (C vs Rust) remains open (ADR 0001); nothing here is ABI-C.
+ * The core support library, now speaking the real slot ABI (abi/openepl_abi.h):
+ * every command is an `OpenEPL_CommandFn` — `void cmd(Slot* ret, int argc,
+ * Slot* argv)`.  Command implementations live in the family `.c` files and are
+ * static-linked into each program; the LibInfo *table* that names them lives in
+ * `core_libinfo.c`, compiled ONLY into the introspection `.so` (never a shipped
+ * program) so `--gc-sections` still strips unused commands (PRD D3/G8; ADR 0003).
  */
 #ifndef OPENEPL_CORE_H
 #define OPENEPL_CORE_H
 
+#include "openepl_abi.h"
+
 /* Program entry emitted by the backend (PRD §1.4 lean-entry model). */
 extern int ECodeStart(void);
 
-/* Runtime lifecycle. */
+/* Runtime lifecycle (PRD §1.4). */
 void E_Init(void);
 void E_DestroyRes(void);
 
-/* Memory (runtime-owned, PRD D4). */
-void *oe_alloc(long size);
-void  oe_free(void *p);
+/* Notification channel + allocation (PRD §1.2/D4/§11).  `oe_notify` is declared
+ * in the ABI header; these are the concrete runtime entry points behind it. */
+void *E_MAlloc(long size);
+void  E_MFree(void *p);
+void *E_MRealloc(void *p, long size);
 
-/* --- I/O ------------------------------------------------------------- */
-void oe_print_int(int value);
-void oe_print_int64(long long value);
-void oe_print_double(double value);
-void oe_print_text(const char *text); /* NULL = empty string */
+/* Every core command (OpenEPL_CommandFn).  Referenced by core_libinfo.c. */
+#define OE_CMD(n) void n(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv)
 
-/* --- Integer math ---------------------------------------------------- */
-int oe_abs_int(int a);
-int oe_min_int(int a, int b);
-int oe_max_int(int a, int b);
-int oe_mod_int(int a, int b);
-int oe_pow_int(int base, int exp);
-
-/* --- Floating-point math --------------------------------------------- */
-double oe_sqrt(double x);
-double oe_sin(double x);
-double oe_cos(double x);
-double oe_tan(double x);
-double oe_pow(double base, double exp);
-double oe_exp(double x);
-double oe_ln(double x);
-double oe_log10(double x);
-double oe_floor(double x);
-double oe_ceil(double x);
-double oe_round(double x);
-double oe_abs_double(double x);
-double oe_min_double(double a, double b);
-double oe_max_double(double a, double b);
-
-/* --- Conversions ----------------------------------------------------- */
-double     oe_int_to_double(int a);
-int        oe_double_to_int(double a);   /* truncates toward zero */
-long long  oe_int_to_int64(int a);
-int        oe_int64_to_int(long long a);
-char      *oe_int_to_text(int a);
-char      *oe_int64_to_text(long long a);
-char      *oe_double_to_text(double a);
-int        oe_text_to_int(const char *s);
-double     oe_text_to_double(const char *s);
-
-/* --- Text (results allocated via oe_alloc) --------------------------- */
-int   oe_length(const char *s);
-char *oe_uppercase(const char *s);
-char *oe_lowercase(const char *s);
-char *oe_trim(const char *s);
-char *oe_substr(const char *s, int start, int count);
-int   oe_find(const char *haystack, const char *needle); /* index or -1 */
-char *oe_replace(const char *s, const char *from, const char *to);
-char *oe_concat(const char *a, const char *b);
-char *oe_repeat(const char *s, int times);
-char *oe_reverse(const char *s);
-
-/* --- Date / time ----------------------------------------------------- */
-long long oe_now(void);                                  /* Unix seconds (UTC) */
-int       oe_year(long long unix_seconds);               /* full year, UTC */
-char     *oe_format_time(long long unix_seconds, const char *fmt); /* strftime, UTC */
+/* I/O */
+OE_CMD(oe_print_int); OE_CMD(oe_print_int64); OE_CMD(oe_print_double); OE_CMD(oe_print_text);
+/* integer math */
+OE_CMD(oe_abs_int); OE_CMD(oe_min_int); OE_CMD(oe_max_int); OE_CMD(oe_mod_int); OE_CMD(oe_pow_int);
+/* float math */
+OE_CMD(oe_sqrt); OE_CMD(oe_sin); OE_CMD(oe_cos); OE_CMD(oe_tan); OE_CMD(oe_pow);
+OE_CMD(oe_exp); OE_CMD(oe_ln); OE_CMD(oe_log10); OE_CMD(oe_floor); OE_CMD(oe_ceil);
+OE_CMD(oe_round); OE_CMD(oe_abs_double); OE_CMD(oe_min_double); OE_CMD(oe_max_double);
+/* conversions */
+OE_CMD(oe_int_to_double); OE_CMD(oe_double_to_int); OE_CMD(oe_int_to_int64); OE_CMD(oe_int64_to_int);
+OE_CMD(oe_int_to_text); OE_CMD(oe_int64_to_text); OE_CMD(oe_double_to_text);
+OE_CMD(oe_text_to_int); OE_CMD(oe_text_to_double);
+/* text */
+OE_CMD(oe_length); OE_CMD(oe_uppercase); OE_CMD(oe_lowercase); OE_CMD(oe_trim); OE_CMD(oe_substr);
+OE_CMD(oe_find); OE_CMD(oe_replace); OE_CMD(oe_concat); OE_CMD(oe_repeat); OE_CMD(oe_reverse);
+/* datetime */
+OE_CMD(oe_now); OE_CMD(oe_year); OE_CMD(oe_format_time);
 
 #endif /* OPENEPL_CORE_H */

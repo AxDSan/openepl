@@ -1,136 +1,63 @@
-/* Core commands: text. All results are runtime-owned (oe_alloc). Inputs treat
- * NULL as the empty string (ABI text-slot rule, PRD §1.2). */
+/* Core commands: text (slot ABI). Results allocated through the channel. */
 #include <ctype.h>
-#include <stdlib.h>
 #include <string.h>
 #include "openepl_core.h"
 
-static const char *nz(const char *s) { return s ? s : ""; }
+static const char *nz(const char *s){ return s?s:""; }
+static char *astr(long len){ return (char*)oe_malloc(len+1); }
 
-static char *alloc_str(long len) { return (char *)oe_alloc(len + 1); }
+void oe_length(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){ (void)c; oe_ret_int(r,(int)strlen(nz(oe_arg_text(argv,0)))); }
 
-int oe_length(const char *s) { return (int)strlen(nz(s)); }
-
-char *oe_uppercase(const char *s) {
-    s = nz(s);
-    long n = (long)strlen(s);
-    char *out = alloc_str(n);
-    for (long i = 0; i < n; i++) out[i] = (char)toupper((unsigned char)s[i]);
-    out[n] = '\0';
-    return out;
+void oe_uppercase(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c; const char*s=nz(oe_arg_text(argv,0)); long n=(long)strlen(s); char*o=astr(n);
+    for(long i=0;i<n;i++) o[i]=(char)toupper((unsigned char)s[i]); o[n]='\0'; oe_ret_text(r,o);
 }
-
-char *oe_lowercase(const char *s) {
-    s = nz(s);
-    long n = (long)strlen(s);
-    char *out = alloc_str(n);
-    for (long i = 0; i < n; i++) out[i] = (char)tolower((unsigned char)s[i]);
-    out[n] = '\0';
-    return out;
+void oe_lowercase(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c; const char*s=nz(oe_arg_text(argv,0)); long n=(long)strlen(s); char*o=astr(n);
+    for(long i=0;i<n;i++) o[i]=(char)tolower((unsigned char)s[i]); o[n]='\0'; oe_ret_text(r,o);
 }
-
-char *oe_trim(const char *s) {
-    s = nz(s);
-    const char *start = s;
-    while (*start && isspace((unsigned char)*start)) start++;
-    const char *end = s + strlen(s);
-    while (end > start && isspace((unsigned char)end[-1])) end--;
-    long n = end - start;
-    char *out = alloc_str(n);
-    memcpy(out, start, n);
-    out[n] = '\0';
-    return out;
+void oe_trim(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c; const char*s=nz(oe_arg_text(argv,0));
+    const char*a=s; while(*a && isspace((unsigned char)*a)) a++;
+    const char*e=s+strlen(s); while(e>a && isspace((unsigned char)e[-1])) e--;
+    long n=e-a; char*o=astr(n); memcpy(o,a,n); o[n]='\0'; oe_ret_text(r,o);
 }
-
-/* substr(s, start, count): byte offsets, clamped to bounds. */
-char *oe_substr(const char *s, int start, int count) {
-    s = nz(s);
-    long len = (long)strlen(s);
-    if (start < 0) start = 0;
-    if (start > len) start = (int)len;
-    if (count < 0) count = 0;
-    long avail = len - start;
-    long n = count < avail ? count : avail;
-    char *out = alloc_str(n);
-    memcpy(out, s + start, n);
-    out[n] = '\0';
-    return out;
+void oe_substr(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c; const char*s=nz(oe_arg_text(argv,0)); int start=oe_arg_int(argv,1), count=oe_arg_int(argv,2);
+    long len=(long)strlen(s);
+    if(start<0)start=0; if(start>len)start=(int)len; if(count<0)count=0;
+    long avail=len-start, n=count<avail?count:avail;
+    char*o=astr(n); memcpy(o,s+start,n); o[n]='\0'; oe_ret_text(r,o);
 }
-
-/* find(haystack, needle): byte index of first match, or -1. Empty needle -> 0. */
-int oe_find(const char *haystack, const char *needle) {
-    haystack = nz(haystack);
-    needle = nz(needle);
-    const char *hit = strstr(haystack, needle);
-    return hit ? (int)(hit - haystack) : -1;
+void oe_find(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c; const char*h=nz(oe_arg_text(argv,0)), *n=nz(oe_arg_text(argv,1));
+    const char*hit=strstr(h,n); oe_ret_int(r, hit?(int)(hit-h):-1);
 }
-
-char *oe_concat(const char *a, const char *b) {
-    a = nz(a); b = nz(b);
-    long la = (long)strlen(a), lb = (long)strlen(b);
-    char *out = alloc_str(la + lb);
-    memcpy(out, a, la);
-    memcpy(out + la, b, lb);
-    out[la + lb] = '\0';
-    return out;
+void oe_concat(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c; const char*a=nz(oe_arg_text(argv,0)),*b=nz(oe_arg_text(argv,1));
+    long la=(long)strlen(a),lb=(long)strlen(b); char*o=astr(la+lb);
+    memcpy(o,a,la); memcpy(o+la,b,lb); o[la+lb]='\0'; oe_ret_text(r,o);
 }
-
-char *oe_repeat(const char *s, int times) {
-    s = nz(s);
-    if (times < 0) times = 0;
-    long n = (long)strlen(s);
-    long total = n * (long)times;
-    char *out = alloc_str(total);
-    char *p = out;
-    for (int i = 0; i < times; i++) { memcpy(p, s, n); p += n; }
-    *p = '\0';
-    return out;
+void oe_repeat(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c; const char*s=nz(oe_arg_text(argv,0)); int times=oe_arg_int(argv,1); if(times<0)times=0;
+    long n=(long)strlen(s), total=n*(long)times; char*o=astr(total); char*p=o;
+    for(int i=0;i<times;i++){ memcpy(p,s,n); p+=n; } *p='\0'; oe_ret_text(r,o);
 }
-
-char *oe_reverse(const char *s) {
-    s = nz(s);
-    long n = (long)strlen(s);
-    char *out = alloc_str(n);
-    for (long i = 0; i < n; i++) out[i] = s[n - 1 - i];
-    out[n] = '\0';
-    return out;
+void oe_reverse(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c; const char*s=nz(oe_arg_text(argv,0)); long n=(long)strlen(s); char*o=astr(n);
+    for(long i=0;i<n;i++) o[i]=s[n-1-i]; o[n]='\0'; oe_ret_text(r,o);
 }
-
-/* replace(s, from, to): all non-overlapping occurrences. Empty `from` -> copy. */
-char *oe_replace(const char *s, const char *from, const char *to) {
-    s = nz(s); from = nz(from); to = nz(to);
-    long flen = (long)strlen(from);
-    if (flen == 0) {
-        long n = (long)strlen(s);
-        char *copy = alloc_str(n);
-        memcpy(copy, s, n + 1);
-        return copy;
-    }
-    long tlen = (long)strlen(to);
-
-    /* Count occurrences to size the output exactly. */
-    long count = 0;
-    for (const char *p = s; (p = strstr(p, from)); p += flen) count++;
-
-    long slen = (long)strlen(s);
-    long outlen = slen + count * (tlen - flen);
-    char *out = alloc_str(outlen);
-
-    char *w = out;
-    const char *p = s;
-    while (1) {
-        const char *hit = strstr(p, from);
-        if (!hit) {
-            long rest = (long)strlen(p);
-            memcpy(w, p, rest);
-            w += rest;
-            break;
-        }
-        long chunk = hit - p;
-        memcpy(w, p, chunk); w += chunk;
-        memcpy(w, to, tlen);  w += tlen;
-        p = hit + flen;
-    }
-    *w = '\0';
-    return out;
+void oe_replace(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c;
+    const char*s=nz(oe_arg_text(argv,0)),*from=nz(oe_arg_text(argv,1)),*to=nz(oe_arg_text(argv,2));
+    long flen=(long)strlen(from);
+    if(flen==0){ long n=(long)strlen(s); char*o=astr(n); memcpy(o,s,n+1); oe_ret_text(r,o); return; }
+    long tlen=(long)strlen(to), count=0;
+    for(const char*p=s;(p=strstr(p,from));p+=flen) count++;
+    long slen=(long)strlen(s), outlen=slen+count*(tlen-flen);
+    char*o=astr(outlen); char*w=o; const char*p=s;
+    for(;;){ const char*hit=strstr(p,from);
+        if(!hit){ long rest=(long)strlen(p); memcpy(w,p,rest); w+=rest; break; }
+        long chunk=hit-p; memcpy(w,p,chunk); w+=chunk; memcpy(w,to,tlen); w+=tlen; p=hit+flen; }
+    *w='\0'; oe_ret_text(r,o);
 }

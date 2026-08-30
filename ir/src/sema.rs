@@ -41,15 +41,18 @@ pub fn type_of_expr(
         Expr::IntLit(v) => Ok(int_literal_type(*v)),
         Expr::DoubleLit(_) => Ok(Ty::Double),
         Expr::TextLit(_) => Ok(Ty::Text),
-        Expr::Var(name) => vars
-            .get(name)
-            .copied()
-            .ok_or_else(|| SemaError { msg: format!("use of undefined variable `{name}`") }),
+        Expr::Var(name) => vars.get(name).copied().ok_or_else(|| SemaError {
+            msg: format!("use of undefined variable `{name}`"),
+        }),
         Expr::Bin(op, l, r) => {
             let lt = type_of_expr(l, vars, reg)?;
             let rt = type_of_expr(r, vars, reg)?;
             if !lt.is_numeric() {
-                return err(format!("operator `{}` needs numeric operands, left is {}", op.symbol(), lt.as_str()));
+                return err(format!(
+                    "operator `{}` needs numeric operands, left is {}",
+                    op.symbol(),
+                    lt.as_str()
+                ));
             }
             if lt != rt {
                 return err(format!(
@@ -62,9 +65,9 @@ pub fn type_of_expr(
             Ok(lt)
         }
         Expr::Call { cmd, args } => {
-            let c = reg
-                .get(cmd)
-                .ok_or_else(|| SemaError { msg: format!("unknown command `{cmd}`") })?;
+            let c = reg.get(cmd).ok_or_else(|| SemaError {
+                msg: format!("unknown command `{cmd}`"),
+            })?;
             let ret = c.sig.ret.ok_or_else(|| SemaError {
                 msg: format!("command `{cmd}` returns nothing and cannot be used in an expression"),
             })?;

@@ -12,6 +12,7 @@ pub enum Tok {
     End,
     Let,
     Call,
+    Use,
     // Literals / identifiers
     Ident(String),
     Int(i64),
@@ -58,7 +59,13 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
             b'\n' => {
                 // Collapse runs of blank lines into a single Newline token so the
                 // parser's statement loop stays simple.
-                if !matches!(out.last(), Some(Spanned { tok: Tok::Newline, .. }) | None) {
+                if !matches!(
+                    out.last(),
+                    Some(Spanned {
+                        tok: Tok::Newline,
+                        ..
+                    }) | None
+                ) {
                     push(&mut out, Tok::Newline, line);
                 }
                 line += 1;
@@ -70,15 +77,42 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     i += 1;
                 }
             }
-            b'(' => { push(&mut out, Tok::LParen, line); i += 1; }
-            b')' => { push(&mut out, Tok::RParen, line); i += 1; }
-            b',' => { push(&mut out, Tok::Comma, line); i += 1; }
-            b':' => { push(&mut out, Tok::Colon, line); i += 1; }
-            b'=' => { push(&mut out, Tok::Eq, line); i += 1; }
-            b'+' => { push(&mut out, Tok::Plus, line); i += 1; }
-            b'-' => { push(&mut out, Tok::Minus, line); i += 1; }
-            b'*' => { push(&mut out, Tok::Star, line); i += 1; }
-            b'/' => { push(&mut out, Tok::Slash, line); i += 1; }
+            b'(' => {
+                push(&mut out, Tok::LParen, line);
+                i += 1;
+            }
+            b')' => {
+                push(&mut out, Tok::RParen, line);
+                i += 1;
+            }
+            b',' => {
+                push(&mut out, Tok::Comma, line);
+                i += 1;
+            }
+            b':' => {
+                push(&mut out, Tok::Colon, line);
+                i += 1;
+            }
+            b'=' => {
+                push(&mut out, Tok::Eq, line);
+                i += 1;
+            }
+            b'+' => {
+                push(&mut out, Tok::Plus, line);
+                i += 1;
+            }
+            b'-' => {
+                push(&mut out, Tok::Minus, line);
+                i += 1;
+            }
+            b'*' => {
+                push(&mut out, Tok::Star, line);
+                i += 1;
+            }
+            b'/' => {
+                push(&mut out, Tok::Slash, line);
+                i += 1;
+            }
             b'"' => {
                 let (s, ni) = lex_string(bytes, i + 1, line)?;
                 push(&mut out, Tok::Str(s), line);
@@ -123,6 +157,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     "end" => Tok::End,
                     "let" => Tok::Let,
                     "call" => Tok::Call,
+                    "use" => Tok::Use,
                     _ => Tok::Ident(word.to_string()),
                 };
                 push(&mut out, tok, line);
@@ -135,7 +170,10 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
             }
         }
     }
-    out.push(Spanned { tok: Tok::Eof, line });
+    out.push(Spanned {
+        tok: Tok::Eof,
+        line,
+    });
     Ok(out)
 }
 
@@ -153,15 +191,26 @@ fn lex_string(bytes: &[u8], mut i: usize, line: usize) -> Result<(String, usize)
     let n = bytes.len();
     loop {
         if i >= n {
-            return Err(LexError { line, msg: "unterminated string literal".into() });
+            return Err(LexError {
+                line,
+                msg: "unterminated string literal".into(),
+            });
         }
         match bytes[i] {
             b'"' => return Ok((s, i + 1)),
-            b'\n' => return Err(LexError { line, msg: "newline in string literal".into() }),
+            b'\n' => {
+                return Err(LexError {
+                    line,
+                    msg: "newline in string literal".into(),
+                })
+            }
             b'\\' => {
                 i += 1;
                 if i >= n {
-                    return Err(LexError { line, msg: "unterminated escape".into() });
+                    return Err(LexError {
+                        line,
+                        msg: "unterminated escape".into(),
+                    });
                 }
                 match bytes[i] {
                     b'n' => s.push('\n'),

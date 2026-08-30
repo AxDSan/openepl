@@ -61,9 +61,9 @@ notification channel, PRD D4). Datetime is carried as `int64` Unix seconds.
 ## 4. Commands
 
 A call is the single uniform form (PRD §5.0), in statement position (`call
-f(..)`) or expression position (`f(..)`, for non-void commands). Commands
-resolve against the shared registry `openepl_ir::registry` (signatures + runtime
-symbols); the full list is in `docs/spec/commands.md` (~40 commands across
+f(..)`) or expression position (`f(..)`, for non-void commands). Commands resolve against a registry built by introspecting each library's
+`LibInfo` at build time (`docs/spec/abi.md`); the core list is in
+`docs/spec/commands.md` (~40 commands across
 math / conversions / text / datetime / io).
 
 A command has a `Signature { params: [Ty], ret: Option<Ty> }`; `ret: None` is a

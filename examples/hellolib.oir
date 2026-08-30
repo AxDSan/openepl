@@ -1,0 +1,8 @@
+# Uses a third-party support library (libs/hello) via the ABI.
+module hellolib
+use hello
+
+sub main
+  call print_text(greet("OpenEPL"))
+  call print_text(uppercase(greet("world")))   # mix core + library commands
+end

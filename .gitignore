@@ -31,3 +31,6 @@
 # CodeDB / CodeGraph index artifacts
 codedb.snapshot
 .codegraph/
+
+# KDE folder metadata
+.directory

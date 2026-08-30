@@ -31,7 +31,10 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
 
     let subs: Vec<_> = m.subs().collect();
     if !subs.iter().any(|s| s.name == "main") {
-        push(&mut errs, "module has no `main` subroutine (the program entry)".into());
+        push(
+            &mut errs,
+            "module has no `main` subroutine (the program entry)".into(),
+        );
     }
     if subs.len() > 1 {
         push(
@@ -47,7 +50,10 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     }
     for (name, n) in seen_sub {
         if n > 1 {
-            push(&mut errs, format!("subroutine `{name}` is defined {n} times"));
+            push(
+                &mut errs,
+                format!("subroutine `{name}` is defined {n} times"),
+            );
         }
     }
 
@@ -75,12 +81,18 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                     if vars.insert(name.clone(), *ty).is_some() {
                         push(
                             &mut errs,
-                            format!("in `{}`: variable `{name}` is defined more than once", sub.name),
+                            format!(
+                                "in `{}`: variable `{name}` is defined more than once",
+                                sub.name
+                            ),
                         );
                     }
                 }
                 Stmt::Call { cmd, args } => match reg.get(cmd) {
-                    None => push(&mut errs, format!("in `{}`: unknown command `{cmd}`", sub.name)),
+                    None => push(
+                        &mut errs,
+                        format!("in `{}`: unknown command `{cmd}`", sub.name),
+                    ),
                     Some(c) => {
                         if let Err(e) = check_args(cmd, &c.sig.params, args, &vars, reg) {
                             push(&mut errs, format!("in `{}`: {}", sub.name, e));
@@ -125,10 +137,8 @@ mod tests {
 
     #[test]
     fn rejects_type_mismatch_and_unknown_cmd() {
-        let m = parse(
-            "module m\nsub main\n  let x: int = \"nope\"\n  call frob(1)\nend\n",
-        )
-        .unwrap();
+        let m =
+            parse("module m\nsub main\n  let x: int = \"nope\"\n  call frob(1)\nend\n").unwrap();
         let e = validate(&m, &reg()).unwrap_err();
         assert!(e.len() >= 2, "expected both errors, got {e:?}");
     }
@@ -141,10 +151,8 @@ mod tests {
 
     #[test]
     fn rejects_mixed_numeric() {
-        let m = parse(
-            "module m\nsub main\n  let d: double = 1.5\n  let x: double = d + 1\nend\n",
-        )
-        .unwrap();
+        let m = parse("module m\nsub main\n  let d: double = 1.5\n  let x: double = d + 1\nend\n")
+            .unwrap();
         // `d + 1` mixes double and int -> error (no implicit conversion).
         assert!(validate(&m, &reg()).is_err());
     }

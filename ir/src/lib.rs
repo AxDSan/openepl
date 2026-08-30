@@ -63,6 +63,28 @@ impl Ty {
     pub fn is_numeric(self) -> bool {
         matches!(self, Ty::Int | Ty::Int64 | Ty::Double)
     }
+
+    /// The ABI `SDT_*` numeric tag (must match `abi/openepl_abi.h`).
+    pub fn sdt_tag(self) -> i32 {
+        match self {
+            Ty::Int => 3,    // OE_SDT_INT
+            Ty::Int64 => 4,  // OE_SDT_INT64
+            Ty::Double => 6, // OE_SDT_DOUBLE
+            Ty::Text => 9,   // OE_SDT_TEXT
+        }
+    }
+
+    /// Map an ABI `SDT_*` tag back to an IR type; `None` for tags not modeled in
+    /// this phase (or `OE_SDT_NULL`, used for void returns).
+    pub fn from_sdt_tag(tag: i32) -> Option<Ty> {
+        Some(match tag {
+            3 => Ty::Int,
+            4 => Ty::Int64,
+            6 => Ty::Double,
+            9 => Ty::Text,
+            _ => return None,
+        })
+    }
 }
 
 /// A command's signature: parameter slot types plus an optional return slot
@@ -138,6 +160,10 @@ pub enum Item {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub name: String,
+    /// Support libraries this module uses (`use <name>`), beyond the implicit
+    /// `core`.  The compiler introspects each for command signatures and links
+    /// its implementations (PRD §5.4).
+    pub uses: Vec<String>,
     pub items: Vec<Item>,
 }
 

@@ -12,8 +12,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
+mod libload;
+
 use openepl_backend::lower_module;
-use openepl_ir::{parse, validate, Registry};
+use openepl_ir::{parse, validate};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -89,8 +91,8 @@ fn cmd_emit(rest: &[String]) -> i32 {
             return 2;
         }
     };
-    match lower_source(&input) {
-        Ok(ll) => {
+    match compile(&input) {
+        Ok((ll, _)) => {
             print!("{ll}");
             0
         }
@@ -111,8 +113,8 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
     };
     let out_bin = output.unwrap_or_else(|| default_output(&input));
 
-    let ll = match lower_source(&input) {
-        Ok(ll) => ll,
+    let (ll, impl_sources) = match compile(&input) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
             return 1;
@@ -125,18 +127,8 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
         return 1;
     }
 
-    let runtime_dir = match find_runtime_dir() {
-        Some(d) => d,
-        None => {
-            eprintln!(
-                "openepl: could not locate the runtime (runtime/openepl_core.h).\n\
-                 Set OPENEPL_RUNTIME_DIR or run from the repo root."
-            );
-            return 1;
-        }
-    };
-
-    if let Err(code) = clang_link(&ll_path, &runtime_dir, &out_bin) {
+    let repo_root = find_repo_root().expect("runtime located during compile()");
+    if let Err(code) = clang_link(&ll_path, &repo_root, &impl_sources, &out_bin) {
         return code;
     }
     eprintln!("openepl: wrote {}", out_bin.display());
@@ -155,21 +147,37 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
     }
 }
 
-fn lower_source(input: &Path) -> Result<String, String> {
+/// Parse, introspect libraries, validate, and lower to LLVM IR.
+/// Returns the `.ll` text and the implementation sources to static-link.
+fn compile(input: &Path) -> Result<(String, Vec<PathBuf>), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let module = parse(&src).map_err(|e| e.to_string())?;
-    let reg = Registry::core();
-    if let Err(errs) = validate(&module, &reg) {
-        // Surface every diagnostic, one per line.
+
+    let repo_root = find_repo_root().ok_or_else(|| {
+        "could not locate the OpenEPL runtime (runtime/openepl_core.h); \
+         set OPENEPL_RUNTIME_DIR or run from the repo root"
+            .to_string()
+    })?;
+
+    // Introspect `core` + each `use`d library for command signatures (the
+    // authoritative source — no hard-coded table).
+    let plan = libload::load(&repo_root, &module.uses)?;
+
+    if let Err(errs) = validate(&module, &plan.registry) {
         let joined = errs
             .iter()
             .map(|e| format!("  - {e}"))
             .collect::<Vec<_>>()
             .join("\n");
-        return Err(format!("{} error(s) in {}:\n{joined}", errs.len(), input.display()));
+        return Err(format!(
+            "{} error(s) in {}:\n{joined}",
+            errs.len(),
+            input.display()
+        ));
     }
-    lower_module(&module, &reg).map_err(|e| e.to_string())
+    let ll = lower_module(&module, &plan.registry).map_err(|e| e.to_string())?;
+    Ok((ll, plan.impl_sources))
 }
 
 fn default_output(input: &Path) -> PathBuf {
@@ -177,19 +185,14 @@ fn default_output(input: &Path) -> PathBuf {
     PathBuf::from(stem)
 }
 
-/// Invoke clang to assemble the `.ll` and link the runtime objects into a
-/// native executable, dead-stripping unused command objects (PRD D3).
-fn clang_link(ll_path: &Path, runtime_dir: &Path, out_bin: &Path) -> Result<(), i32> {
-    let runtime_srcs = [
-        "e_init.c",
-        "oe_start.c",
-        "oe_mem.c",
-        "oe_io.c",
-        "oe_math.c",
-        "oe_convert.c",
-        "oe_text.c",
-        "oe_datetime.c",
-    ];
+/// Invoke clang to assemble the `.ll` and static-link the library implementation
+/// sources into a native executable, dead-stripping unused commands (PRD D3).
+fn clang_link(
+    ll_path: &Path,
+    repo_root: &Path,
+    impl_sources: &[PathBuf],
+    out_bin: &Path,
+) -> Result<(), i32> {
     let mut cmd = Command::new("clang");
     cmd.arg("-O0")
         .arg("-ffunction-sections")
@@ -197,10 +200,12 @@ fn clang_link(ll_path: &Path, runtime_dir: &Path, out_bin: &Path) -> Result<(), 
         .arg("-Wl,--gc-sections")
         .arg("-Wno-override-module")
         .arg("-I")
-        .arg(runtime_dir)
+        .arg(repo_root.join("abi"))
+        .arg("-I")
+        .arg(repo_root.join("runtime"))
         .arg(ll_path);
-    for s in runtime_srcs {
-        cmd.arg(runtime_dir.join(s));
+    for s in impl_sources {
+        cmd.arg(s);
     }
     cmd.arg("-lm"); // libm for the floating-point commands
     cmd.arg("-o").arg(out_bin);
@@ -237,6 +242,11 @@ fn find_runtime_dir() -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// The repository root (parent of the located `runtime/` directory).
+fn find_repo_root() -> Option<PathBuf> {
+    find_runtime_dir().and_then(|d| d.parent().map(|p| p.to_path_buf()))
 }
 
 /// Make a bare relative path executable-invokable (`./name`).
