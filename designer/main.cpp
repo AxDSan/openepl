@@ -562,11 +562,37 @@ void rebuild_canvas() {
 
     // Selection chrome lives in an overlay so it never perturbs the components
     // themselves — what you see on the canvas is exactly what the app renders.
-    if (const Component* sel = g.model.find(g.selected)) {
-        const int x = prop_int(*sel, "left", 0), y = prop_int(*sel, "top", 0);
-        const int w = prop_int(*sel, "width", 120), h = prop_int(*sel, "height", 32);
-        // The overlay lives inside the canvas, so component coordinates are
-        // already the right frame of reference.
+    if (g.model.find(g.selected)) {
+        // Measure the RENDERED element rather than deriving the rect from the
+        // model's width/height: those size the CONTENT box, so a component with
+        // padding or a border (a groupbox has both) draws larger than its
+        // declared size, and a model-derived outline sits inside the real frame.
+        Rml::Element* target = nullptr;
+        for (int i = 0; i < canvas->GetNumChildren(); i++) {
+            Rml::Element* child = canvas->GetChild(i);
+            if (child->GetAttribute<Rml::String>("oe-id", "") == g.selected) {
+                target = child;
+                break;
+            }
+        }
+        if (!target) return;
+        // Layout must be current for the measurement to mean anything.
+        g.context->Update();
+        // Offset and size must describe the SAME box area: GetAbsoluteOffset
+        // defaults to the content origin, which sits inside the padding and
+        // border, so pairing it with a border-box size skews the outline.
+        const auto canvas_at = canvas->GetAbsoluteOffset(Rml::BoxArea::Border);
+        const auto at = target->GetAbsoluteOffset(Rml::BoxArea::Border);
+        const auto size = target->GetBox().GetSize(Rml::BoxArea::Border);
+        const int x = (int)(at.x - canvas_at.x), y = (int)(at.y - canvas_at.y);
+        const int w = (int)size.x, h = (int)size.y;
+        if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+            const Component* c = g.model.find(g.selected);
+            std::fprintf(stderr,
+                         "designer: selection rect=%d,%d %dx%d   model=%d,%d %dx%d\n", x, y, w, h,
+                         c ? prop_int(*c, "left", 0) : -1, c ? prop_int(*c, "top", 0) : -1,
+                         c ? prop_int(*c, "width", 0) : -1, c ? prop_int(*c, "height", 0) : -1);
+        }
         const int ox = 0, oy = 0;
         auto place = [&](const char* cls, int px, int py, int pw, int ph) {
             Rml::Element* d = overlay->AppendChild(g.doc->CreateElement("div"));
@@ -590,7 +616,8 @@ void rebuild_canvas() {
             }
         }
         // Event connector badge, as specified.
-        if (!sel->handlers.empty()) {
+        const Component* sel = g.model.find(g.selected);
+        if (sel && !sel->handlers.empty()) {
             const auto& hnd = sel->handlers.front();
             Rml::Element* b = place("badge", ox + x, oy + y - 24, 0, 0);
             b->SetInnerRML("▸ on" + esc(hnd.first) + " → " + esc(hnd.second));

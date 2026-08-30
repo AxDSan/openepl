@@ -706,3 +706,40 @@ fn dragging_moves_components_precisely() {
         "composite drag lost its y offset:\n{cb}"
     );
 }
+
+/// The selection outline must trace the component's RENDERED frame.
+///
+/// It was derived from the model's width/height, but those size the CONTENT
+/// box: a groupbox declaring 240x90 with 8px padding and a 1px border draws
+/// 258x108, so the outline sat inside the real frame. Mixing a content-box
+/// origin with a border-box size skewed it further.
+#[test]
+fn selection_outline_traces_the_rendered_frame() {
+    let repo = repo();
+    let designer = repo.join("designer/openepl-designer");
+    if !designer.exists() {
+        eprintln!("designer not built; skipping");
+        return;
+    }
+    let project = std::env::temp_dir().join("openepl_sel.oir");
+    std::fs::copy(repo.join("examples/controls.oir"), &project).expect("seed");
+
+    let out = Command::new(&designer)
+        .arg(&project)
+        .arg(repo.join("target/debug/openepl"))
+        .env("OPENEPL_DESIGNER_DEBUG", "1")
+        .env("OPENEPL_DESIGNER_SCRIPT", "select:grp")
+        .output()
+        .expect("run designer");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("selection rect="))
+        .expect("designer should report the selection rect");
+
+    // grp is 240x90 with 8px padding and a 1px border on each side.
+    assert!(
+        line.contains("selection rect=20,120 258x108"),
+        "outline does not trace the rendered frame: {line}"
+    );
+}
