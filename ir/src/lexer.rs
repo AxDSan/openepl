@@ -1,0 +1,182 @@
+//! Tokenizer for the OpenEPL IR text encoding (`.oir`).
+//!
+//! Line structure is significant only in that statements end at a newline; the
+//! lexer emits explicit `Newline` tokens and the parser consumes them.  Blank
+//! lines and `# ...` comments are skipped here.
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tok {
+    // Keywords
+    Module,
+    Sub,
+    End,
+    Let,
+    Call,
+    KwInt,
+    KwText,
+    // Literals / identifiers
+    Ident(String),
+    Int(i64),
+    Str(String),
+    // Punctuation / operators
+    LParen,
+    RParen,
+    Comma,
+    Colon,
+    Eq,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Newline,
+    Eof,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spanned {
+    pub tok: Tok,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LexError {
+    pub line: usize,
+    pub msg: String,
+}
+
+pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
+    let mut out = Vec::new();
+    let mut line = 1usize;
+    let bytes = src.as_bytes();
+    let mut i = 0usize;
+    let n = bytes.len();
+
+    let push = |out: &mut Vec<Spanned>, tok: Tok, line: usize| out.push(Spanned { tok, line });
+
+    while i < n {
+        let c = bytes[i];
+        match c {
+            b'\n' => {
+                // Collapse runs of blank lines into a single Newline token so the
+                // parser's statement loop stays simple.
+                if !matches!(out.last(), Some(Spanned { tok: Tok::Newline, .. }) | None) {
+                    push(&mut out, Tok::Newline, line);
+                }
+                line += 1;
+                i += 1;
+            }
+            b' ' | b'\t' | b'\r' => i += 1,
+            b'#' => {
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'(' => { push(&mut out, Tok::LParen, line); i += 1; }
+            b')' => { push(&mut out, Tok::RParen, line); i += 1; }
+            b',' => { push(&mut out, Tok::Comma, line); i += 1; }
+            b':' => { push(&mut out, Tok::Colon, line); i += 1; }
+            b'=' => { push(&mut out, Tok::Eq, line); i += 1; }
+            b'+' => { push(&mut out, Tok::Plus, line); i += 1; }
+            b'-' => { push(&mut out, Tok::Minus, line); i += 1; }
+            b'*' => { push(&mut out, Tok::Star, line); i += 1; }
+            b'/' => { push(&mut out, Tok::Slash, line); i += 1; }
+            b'"' => {
+                let (s, ni) = lex_string(bytes, i + 1, line)?;
+                push(&mut out, Tok::Str(s), line);
+                i = ni;
+            }
+            _ if c.is_ascii_digit() => {
+                let start = i;
+                while i < n && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let text = &src[start..i];
+                let v: i64 = text.parse().map_err(|_| LexError {
+                    line,
+                    msg: format!("integer literal out of range: {text}"),
+                })?;
+                push(&mut out, Tok::Int(v), line);
+            }
+            _ if is_ident_start(c) => {
+                let start = i;
+                while i < n && is_ident_cont(bytes[i]) {
+                    i += 1;
+                }
+                let word = &src[start..i];
+                let tok = match word {
+                    "module" => Tok::Module,
+                    "sub" => Tok::Sub,
+                    "end" => Tok::End,
+                    "let" => Tok::Let,
+                    "call" => Tok::Call,
+                    "int" => Tok::KwInt,
+                    "text" => Tok::KwText,
+                    _ => Tok::Ident(word.to_string()),
+                };
+                push(&mut out, tok, line);
+            }
+            _ => {
+                return Err(LexError {
+                    line,
+                    msg: format!("unexpected character: {:?}", c as char),
+                });
+            }
+        }
+    }
+    out.push(Spanned { tok: Tok::Eof, line });
+    Ok(out)
+}
+
+fn is_ident_start(c: u8) -> bool {
+    c == b'_' || c.is_ascii_alphabetic()
+}
+fn is_ident_cont(c: u8) -> bool {
+    c == b'_' || c.is_ascii_alphanumeric()
+}
+
+/// Lex a string body starting just after the opening quote; returns the decoded
+/// string and the index just past the closing quote.  Supports `\n \t \\ \" \0`.
+fn lex_string(bytes: &[u8], mut i: usize, line: usize) -> Result<(String, usize), LexError> {
+    let mut s = String::new();
+    let n = bytes.len();
+    loop {
+        if i >= n {
+            return Err(LexError { line, msg: "unterminated string literal".into() });
+        }
+        match bytes[i] {
+            b'"' => return Ok((s, i + 1)),
+            b'\n' => return Err(LexError { line, msg: "newline in string literal".into() }),
+            b'\\' => {
+                i += 1;
+                if i >= n {
+                    return Err(LexError { line, msg: "unterminated escape".into() });
+                }
+                match bytes[i] {
+                    b'n' => s.push('\n'),
+                    b't' => s.push('\t'),
+                    b'\\' => s.push('\\'),
+                    b'"' => s.push('"'),
+                    b'0' => s.push('\0'),
+                    other => {
+                        return Err(LexError {
+                            line,
+                            msg: format!("unknown escape: \\{}", other as char),
+                        })
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                // Pass raw bytes through as-is (UTF-8 preserved).
+                let start = i;
+                while i < n && bytes[i] != b'"' && bytes[i] != b'\\' && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                s.push_str(std::str::from_utf8(&bytes[start..i]).map_err(|_| LexError {
+                    line,
+                    msg: "invalid UTF-8 in string literal".into(),
+                })?);
+            }
+        }
+    }
+}

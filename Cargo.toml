@@ -1,0 +1,12 @@
+# OpenEPL Cargo workspace.
+# Phase 0 vertical slice: ir (IR + text parser) -> backend (IR -> LLVM IR text)
+# -> cli (openepl build/run). See docs/decisions/0001-phase0-spike.md.
+[workspace]
+resolver = "2"
+members = ["ir", "backend", "cli"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR BSD-3-Clause"
+repository = "https://github.com/openepl/openepl"

@@ -1,0 +1,13 @@
+[package]
+name = "openepl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openepl"
+path = "src/main.rs"
+
+[dependencies]
+openepl-ir = { path = "../ir" }
+openepl-backend = { path = "../backend" }

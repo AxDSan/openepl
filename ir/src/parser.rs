@@ -1,0 +1,231 @@
+//! Recursive-descent parser: `.oir` text -> `Module`.
+//!
+//! Grammar (v0):
+//! ```text
+//! module  := "module" IDENT NEWLINE item*
+//! item    := sub
+//! sub     := "sub" IDENT NEWLINE stmt* "end" NEWLINE
+//! stmt    := let | call
+//! let     := "let" IDENT ":" type "=" expr NEWLINE
+//! call    := "call" IDENT "(" (expr ("," expr)*)? ")" NEWLINE
+//! type    := "int" | "text"
+//! expr    := term (("+" | "-") term)*
+//! term    := factor (("*" | "/") factor)*
+//! factor  := INT | STRING | IDENT | "(" expr ")"
+//! ```
+
+use crate::lexer::{lex, Spanned, Tok};
+use crate::{BinOp, Expr, Item, Module, Stmt, Sub, Ty};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParseError {
+    pub line: usize,
+    pub msg: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "parse error (line {}): {}", self.line, self.msg)
+    }
+}
+impl std::error::Error for ParseError {}
+
+pub fn parse(src: &str) -> Result<Module, ParseError> {
+    let toks = lex(src).map_err(|e| ParseError { line: e.line, msg: e.msg })?;
+    Parser { toks, pos: 0 }.module()
+}
+
+struct Parser {
+    toks: Vec<Spanned>,
+    pos: usize,
+}
+
+impl Parser {
+    fn peek(&self) -> &Tok {
+        &self.toks[self.pos].tok
+    }
+    fn line(&self) -> usize {
+        self.toks[self.pos].line
+    }
+    fn bump(&mut self) -> Tok {
+        let t = self.toks[self.pos].tok.clone();
+        if self.pos + 1 < self.toks.len() {
+            self.pos += 1;
+        }
+        t
+    }
+    fn err<T>(&self, msg: impl Into<String>) -> Result<T, ParseError> {
+        Err(ParseError { line: self.line(), msg: msg.into() })
+    }
+    fn expect(&mut self, want: &Tok, what: &str) -> Result<(), ParseError> {
+        if self.peek() == want {
+            self.bump();
+            Ok(())
+        } else {
+            self.err(format!("expected {what}, found {:?}", self.peek()))
+        }
+    }
+    /// Consume zero or more newline separators.
+    fn skip_newlines(&mut self) {
+        while matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+    }
+    fn ident(&mut self, what: &str) -> Result<String, ParseError> {
+        match self.bump() {
+            Tok::Ident(s) => Ok(s),
+            other => self.err(format!("expected {what}, found {other:?}")),
+        }
+    }
+
+    fn module(&mut self) -> Result<Module, ParseError> {
+        self.skip_newlines();
+        self.expect(&Tok::Module, "`module`")?;
+        let name = self.ident("module name")?;
+        self.expect(&Tok::Newline, "newline after module name")?;
+
+        let mut items = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::Sub => items.push(Item::Sub(self.sub()?)),
+                Tok::Eof => break,
+                other => return self.err(format!("expected `sub` or end of file, found {other:?}")),
+            }
+        }
+        Ok(Module { name, items })
+    }
+
+    fn sub(&mut self) -> Result<Sub, ParseError> {
+        self.expect(&Tok::Sub, "`sub`")?;
+        let name = self.ident("subroutine name")?;
+        self.expect(&Tok::Newline, "newline after subroutine name")?;
+
+        let mut body = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::End => {
+                    self.bump();
+                    break;
+                }
+                Tok::Let => body.push(self.stmt_let()?),
+                Tok::Call => body.push(self.stmt_call()?),
+                Tok::Eof => return self.err("unexpected end of file inside `sub` (missing `end`)"),
+                other => return self.err(format!("expected statement or `end`, found {other:?}")),
+            }
+        }
+        // Trailing newline after `end` is optional (EOF is fine).
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(Sub { name, body })
+    }
+
+    fn stmt_let(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(&Tok::Let, "`let`")?;
+        let name = self.ident("variable name")?;
+        self.expect(&Tok::Colon, "`:` after variable name")?;
+        let ty = match self.bump() {
+            Tok::KwInt => Ty::Int,
+            Tok::KwText => Ty::Text,
+            other => return self.err(format!("expected type (`int`/`text`), found {other:?}")),
+        };
+        self.expect(&Tok::Eq, "`=`")?;
+        let value = self.expr()?;
+        self.expect(&Tok::Newline, "newline after `let`")?;
+        Ok(Stmt::Let { name, ty, value })
+    }
+
+    fn stmt_call(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(&Tok::Call, "`call`")?;
+        let cmd = self.ident("command name")?;
+        self.expect(&Tok::LParen, "`(`")?;
+        let mut args = Vec::new();
+        if !matches!(self.peek(), Tok::RParen) {
+            loop {
+                args.push(self.expr()?);
+                match self.peek() {
+                    Tok::Comma => {
+                        self.bump();
+                    }
+                    Tok::RParen => break,
+                    other => return self.err(format!("expected `,` or `)`, found {other:?}")),
+                }
+            }
+        }
+        self.expect(&Tok::RParen, "`)`")?;
+        self.expect(&Tok::Newline, "newline after call")?;
+        Ok(Stmt::Call { cmd, args })
+    }
+
+    fn expr(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.term()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Plus => BinOp::Add,
+                Tok::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.bump();
+            let rhs = self.term()?;
+            lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn term(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.factor()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Star => BinOp::Mul,
+                Tok::Slash => BinOp::Div,
+                _ => break,
+            };
+            self.bump();
+            let rhs = self.factor()?;
+            lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn factor(&mut self) -> Result<Expr, ParseError> {
+        match self.bump() {
+            Tok::Int(v) => Ok(Expr::IntLit(v)),
+            Tok::Str(s) => Ok(Expr::TextLit(s)),
+            Tok::Ident(name) => Ok(Expr::Var(name)),
+            Tok::LParen => {
+                let e = self.expr()?;
+                self.expect(&Tok::RParen, "`)`")?;
+                Ok(e)
+            }
+            other => self.err(format!("expected expression, found {other:?}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hello() {
+        let src = "module m\nsub main\n  let x: int = 6 * 7\n  call print_int(x)\nend\n";
+        let m = parse(src).unwrap();
+        assert_eq!(m.name, "m");
+        assert_eq!(m.subs().count(), 1);
+    }
+
+    #[test]
+    fn precedence() {
+        // 2 + 3 * 4 == 2 + (3*4)
+        let m = parse("module m\nsub main\n  let x: int = 2 + 3 * 4\nend\n").unwrap();
+        let Item::Sub(s) = &m.items[0];
+        match &s.body[0] {
+            Stmt::Let { value: Expr::Bin(BinOp::Add, _, r), .. } => {
+                assert!(matches!(**r, Expr::Bin(BinOp::Mul, _, _)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+}

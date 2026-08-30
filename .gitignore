@@ -27,3 +27,7 @@
 # Scratch
 /scratch/
 /tmp/
+
+# CodeDB / CodeGraph index artifacts
+codedb.snapshot
+.codegraph/
