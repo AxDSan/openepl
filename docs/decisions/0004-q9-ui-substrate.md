@@ -1,6 +1,6 @@
 # ADR 0004 — Q9: the UI substrate for the RAD environment
 
-**Status:** ⚠️ **PROPOSED — owner decision required.** Nothing here is committed.
+**Status:** ✅ **Decided** — accepted 2026-08-30; the calls are recorded in [ADR 0005](0005-ui-stack-and-policy.md). This document remains the *evidence and survey* behind them.
 **Spike outcome:** ✅ **RmlUi passed all four kill-risks** — see [`spikes/q9-rmlui/RESULTS.md`](../../spikes/q9-rmlui/RESULTS.md).
 **Date:** 2026-08-30 · **Blocks:** PRD Phase 2 (component/event runtime) and Phase 3 (RAD vertical slice)
 

@@ -4,7 +4,11 @@ OpenEPL is an open-source, cross-platform, **RAD-first** application development
 VB/Delphi/EPL lineage, with a **BlackMoon-style native compiler** backend. A reimagining of **EPL
 (易语言)** + the **BlackMoon (黑月)** compiler — English-first, radically easy, cross-platform.
 
-**Status:** pre-code. The PRD and primary-source research are written; no implementation yet.
+**Status:** Phases 0–2 (ABI half) implemented and committed; UI substrate decided.
+Working toolchain: `.oir` IR → LLVM IR → native binary, with an IR validator, ~45 core commands,
+proven dead-stripping, and the support-library ABI (slot calling convention + `NRS_*` notification
+channel + build-time `LibInfo` introspection). Next up is the RAD/component half of Phase 2 →
+Phase 3. See `docs/decisions/` for the decision log and `docs/spec/` for the frozen specs.
 
 ## Read first
 - `PRD.md` — the full product requirements (the main artifact). Start here.
@@ -37,7 +41,23 @@ ABI descended from `GetNewInf`/`LIB_INFO` (incl. the UI-component interface func
 `ide/`★ `designer/`★ `components/`★ `ir/` `frontend/` `backend/` `runtime/` `abi/` `libs/` `tools/`
 `docs/` `tests/`
 
+## Decisions already made (don't re-litigate — see `docs/decisions/`)
+- **Compiler:** Rust, emitting textual LLVM IR; `clang` as assembler/linker driver (ADR 0001).
+- **Runtime:** C core (`libopenepl_core`), slot ABI `void cmd(Slot*, i32, Slot*)`, runtime-owned
+  memory via the `NRS_*` channel; `LibInfo` metadata lives in a `.so`-only TU so `--gc-sections`
+  still strips unused commands (ADR 0003).
+- **UI substrate:** **RmlUi** (MIT), behind a swappable backend interface (ADR 0004/0005,
+  spike-verified in `spikes/q9-rmlui/`). Visual target is **FireMonkey-class** — custom-drawn,
+  styled, animated; native-widget fidelity is explicitly not a goal.
+- **Licence policy:** accept MIT/BSD/Apache-2.0/Zlib/ISC; reject GPL/LGPL without a static-link
+  exception, non-OSI grants, and proprietary (ADR 0005/D15).
+- **Languages:** C core · C++ UI layer · Rust compiler, joined by the C ABI (ADR 0005/D19).
+- **Strings:** UTF-8 everywhere (ADR 0005/D20).
+- **Accessibility is day-one structural**, not deferred (ADR 0005/D16).
+
 ## Next step
-Phase 0 (PRD §7): freeze IR v0 (incl. component/property/event model) + ABI headers; pick the portable
-UI toolkit (open question Q9) and backend language (Rust+inkwell vs C++); compile a hand-written IR
-"print + arithmetic" to a native binary on Linux x64.
+The RAD half of Phase 2 → Phase 3 (PRD §7): extend the `LibInfo` ABI with the component
+descriptor (properties + events + **a11y role/name/state**), build the RmlUi backend behind the
+D10 interface, then the minimal designer. Two rules from the spike: always instantiate forms into
+a **stylesheet-seeded** document (D21), and never let RmlUi types leak through the D10 interface —
+that leak is what would make the substrate choice irreversible.

@@ -3,7 +3,7 @@
 An open-source, cross-platform reimplementation of **EPL (易语言 / E-Programming-Language)** and a
 **BlackMoon-style static native compiler** for it.
 
-- **Status:** Draft v1.0
+- **Status:** Draft v1.1 (amended 2026-08-30 by ADRs 0004/0005 — see `docs/decisions/`)
 - **Date:** 2026-08-30
 - **Owner:** abdi.moya@gmail.com
 - **Repo home:** `/home/aj/Documents/DevStuff/openepl`
@@ -353,6 +353,15 @@ This makes the **designer, component model, and integrated IDE part of the core 
 alongside the backend rather than after it (see revised Milestones, §7). The non-goal (N2) is only
 *cloning EPL's exact IDE/forms format* — not RAD itself.
 
+**Visual target: FireMonkey-class (amended, ADR 0005/D14).** The reference model is
+**Embarcadero RAD Studio**, and specifically its **FireMonkey (FMX)** side, not VCL:
+every pixel is drawn by the framework, GPU-accelerated, deeply styleable, animated.
+Users must be able to build **visually stunning** GUIs — a styling engine, property
+animation, and effects (shadow/blur/gradient/shader) are *requirements*, not polish.
+The consequence is deliberate and accepted: **native-widget fidelity is explicitly
+not a goal**, and with custom drawing we own platform fidelity and accessibility
+ourselves (hence R8 and D16). Substrate: **RmlUi** (ADR 0005/D14).
+
 **RAD here is a general desktop toolsmith, not just an app builder (G12).** The same visual project can
 be built into *any* desktop artifact, for *any* supported platform — a GUI or console **executable**, a
 **dynamic library** (`.dll`/`.so`/`.dylib`), a **static library**, a **kernel driver/module**
@@ -518,6 +527,17 @@ framework absorbs the plumbing and guards the rules* — not that ring-0 stops b
 | D7 | **IR is build-time only; never embedded. Two build profiles: `dev` (symbols/debug) vs `release` (stripped + hardened).** | Native LLVM codegen already erases the AST; not shipping e-code/metadata + stripping + opt-in obfuscation is what stops the EPL/.NET clean-decompile. Debuggability and hardening are opposite ends of one knob, chosen per profile — never both in one artifact. |
 | D8 | **Difficulty lives in libraries + backend profiles + optimizer, never in the surface language.** The language stays small, uniform, and abstract (G9); hard capabilities (kernel/systems, C/asm interop, SIMD) arrive as support libraries and a `freestanding` backend profile behind the *same* easy call syntax. | Keeps "easy for everyone" and "can do hard things" from fighting: the user never pays syntax cost for power they aren't using. This is exactly BlackMoon's proven move (link C/MASM32 `.lib` behind EPL commands, D5) generalized. |
 | D9 | **One component model (properties/methods/events), first-class in both IR and ABI, shared by designer and runtime. Build the designer/widgets on a portable retained-mode UI layer, not per-OS native forms or an EPL-forms clone.** | RAD-first (G0) needs the *same* component the designer manipulates to be the one the runtime instantiates — a single model in the IR + the EPL-style UI interface-function ABI (EDK digest §9). A portable widget layer is what makes "draw once, run on Linux/macOS/Windows" real; native per-OS forms would fracture the RAD promise. Ties to Q5/Q9. |
+| D10 | **Lazarus-style widgetset abstraction: OpenEPL owns the component model over a thin, swappable widget-backend interface.** | Makes the substrate reversible. Validated pattern — Lazarus runs one component model over Win32/GTK/Qt/Cocoa/custom-drawn backends. **Load-bearing:** if the interface leaks substrate types, D14 becomes irreversible. |
+| D11 | **The reflective component table (properties + events, by string name) is first-class in the IR and the ABI.** | Delphi's entire RAD loop falls out of one primitive: `published` ⇒ RTTI, which then generates form streaming, the Object Inspector, and event binding. `LibInfo` already does this for commands; components extend it. |
+| D12 | **Runtime/design-time split: implementations link into the program, the metadata catalogue never does.** | Embarcadero's runtime-vs-design-time package split, and EPL's `.fne`/`.fnr` split. Already implemented (`core_libinfo.c`, ADR 0003) — it is also what keeps `--gc-sections` effective (D3) and metadata out of release output (G8). |
+| D14 | **UI substrate: RmlUi (MIT), behind the D10 interface.** | Only candidate clearing licence + closed static linking + native string-keyed component introspection + FMX-class visuals. Spike-verified (`spikes/q9-rmlui/`). Closes Q9. |
+| D15 | **Licence policy: accept MIT/BSD/Apache-2.0/Zlib/ISC; reject GPL/LGPL absent a static-link exception, non-OSI grants, and proprietary.** | Stops per-dependency re-litigation. Decisive in practice against Slint, Qt, GTK4 and Ultralight. Apache-2.0's patent grant is a benefit; §9's "MIT/BSD" was shorthand for *permissive*. |
+| D16 | **Accessibility is structural and day-one: role/name/state travel in the component descriptor; the AccessKit bridge ships with the first widgets.** | Custom drawing gives zero free a11y, and FMX shows retrofitting does not happen (still an add-on after 14 years). Also a procurement gate. This is the decision that hardens fastest if deferred. |
+| D17 | **Data binding: VCL-style data-aware components as the default surface, over a general binding engine.** | FMX shipped binding-expressions-only (LiveBindings) and it is a persistent friction point; G9 + "batteries included" point the other way. Architectural consequence lands now: the component model carries a data-source concept. |
+| D18 | **The IDE dogfoods RmlUi.** | One stack, and the designer canvas then manipulates *real* components — what D9 requires for WYSIWYG. Godot proves the pattern. Caveat: native menus/dialogs/IME are budgeted separately regardless. |
+| D19 | **Language split: C core runtime, C++ UI layer, Rust compiler, joined by the existing C ABI.** | Forced by the goals, not chosen: the G10 freestanding/kernel profile cannot link a C++ UI stack, so the core stays C (no exceptions/RTTI); RmlUi is C++; the compiler is Rust (ADR 0001). Closes the runtime half of D6. |
+| D20 | **Strings are UTF-8 everywhere.** | The whole toolchain (RmlUi/FreeType/HarfBuzz/AccessKit) is UTF-8; fidelity to a 32-bit-Windows codepage buys nothing cross-platform. An EPL importer converts at its boundary. Closes Q3. |
+| D21 | **Forms are instantiated into a stylesheet-seeded document, never a bare one.** | Spike finding: decorators silently no-op without a stylesheet context while `SetProperty` still returns true. Encoded in the runtime API so it cannot be got wrong. |
 
 ## 7. Milestones
 
@@ -556,7 +576,16 @@ first end-to-end demo that matters is *design a form, wire a button event, run i
   and lines-hand-written (target: near zero for the UI).
 - M1. A non-trivial program builds to a standard native binary on all 5 targets, runs identically.
 - M2. Unused-command program is **measurably smaller** than all-commands build (proves fragment extraction).
+  **Qualified (ADR 0004):** this holds for the *core-command* dead-strip story (verified: a
+  console binary's `.text` is ~6 KiB). **GUI output carries a multi-MiB substrate floor** —
+  measured hello-worlds: RmlUi 2,576 KiB, egui 6,113 KiB, iced 8,610 KiB. State this plainly
+  rather than implying GUI binaries inherit the console figures.
 - M3. **0 detections** on a clean "hello" and a mid-size sample across a multi-engine AV scan.
+  **Qualified (ADR 0004):** *not achievable by architecture alone.* The same Defender
+  `Wacatac.H!ml` heuristics fire on GitHub's own `gh` CLI and on an empty, EV-signed app —
+  the trigger is **unsigned, low-prevalence native binaries**, which is exactly what freshly
+  compiled OpenEPL output is. BlackMoon's real win was **no runtime unpacking**, which we keep;
+  the rest needs code signing, reputation, and preferring MSI over NSIS.
 - M4. **Dev-profile** output loads in a standard debugger with source-level symbols (gdb/lldb/WinDbg).
 - M4b. **Release-profile** output ships **no** e-code/IR, no debug symbols, and no command/type
   name strings; a decompiler (Ghidra/IDA/.NET-style tools) recovers no structured source — verified in CI.
@@ -585,6 +614,12 @@ first end-to-end demo that matters is *design a form, wire a button event, run i
   component model (D9) so designer and runtime aren't built twice; (c) Phase 3 ships a deliberately
   *minimal* designer (toolbox, drag-drop, properties, event wiring) — real but small — then grows;
   (d) the RAD vertical slice is the forcing function that keeps the toolchain honest and integrated.
+- **R8 (Accessibility debt — new, ADR 0005/D16).** Custom-drawn UI (D14) yields **zero** free
+  accessibility, and the reference model demonstrates the failure: FireMonkey still ships a11y
+  as a separate add-on package 14 years on. Retrofitting an accessibility tree onto a mature
+  widget set is brutal, and inaccessibility is a procurement blocker in public-sector and
+  enterprise markets. **Mitigation:** D16 — role/name/state travel in the component descriptor
+  from day one, and the AccessKit bridge ships with the *first* widgets, not later.
 - **R6 (Ease vs power tension — central).** "Insanely easy" and "can write kernel drivers" pull against
   each other; over-abstracting hides needed control, under-abstracting leaks C-level complexity.
   **Mitigation:** D8 — the surface language stays easy and uniform; power arrives via libraries + a
@@ -595,16 +630,32 @@ first end-to-end demo that matters is *design a form, wire a button event, run i
   disappears — documented plainly, not hand-waved.
 
 ## 10. Open Questions
-- Q1. Backend host language — Rust+inkwell vs C++? (Phase 0 spike decides.)
+
+> Decision log: `docs/decisions/` (ADR 0001 spike · 0002 Phase 1 · 0003 ABI · 0004 Q9 survey ·
+> 0005 UI stack & policy). Specs: `docs/spec/{ir,abi,commands}.md`.
+> **Resolved questions are kept, struck through, with the ADR that closed them — the reasoning
+> is worth more than a tidy list.**
+
+- ~~Q1. Backend host language — Rust+inkwell vs C++?~~ **CLOSED (ADR 0001):** Rust, emitting
+  textual LLVM IR with `clang` as assembler/linker driver. `inkwell` deferred, not rejected —
+  the `.ll` boundary is where it slots in.
 - Q2. Do we ship an EPL `.e`/binary importer in v1 or defer? (Big interop win, big effort.)
-- Q3. Runtime string model — keep GBK-era single-byte `char*` semantics, or move to UTF-8 with a compat
-  shim? (Portability vs EPL fidelity.)
+- ~~Q3. Runtime string model — GBK-era `char*` vs UTF-8?~~ **CLOSED (ADR 0005/D20):** UTF-8
+  everywhere; no GBK in the core. The whole toolchain is UTF-8; an EPL importer converts at its
+  boundary.
 - Q4. How much Chinese localization (pinyin/lunar/RMB) is core vs an optional module?
-- Q5. *(now core, not "when we get there")* Component/UI strategy — resolved in direction by D9 (one
-  shared model, portable layer); open detail is exactly which layer (see Q9).
-- Q9. **Which portable UI toolkit underpins the designer + runtime widgets** (the RAD foundation, Phase
-  0 decision)? Candidates span native-wrapping toolkits and portable retained-mode/GPU layers; the pick
-  drives look-and-feel, binary size, licensing, and how cleanly the EPL-style component ABI maps onto it.
+- ~~Q5. Component/UI strategy.~~ **CLOSED (ADR 0005):** direction by D9, substrate by D14
+  (RmlUi), reversibility by D10, and the component model itself by D11/D16/D17.
+- ~~Q9. **Which portable UI toolkit underpins the designer + runtime widgets?**~~ **CLOSED
+  (ADR 0004 + 0005/D14): RmlUi (MIT)**, spike-verified (`spikes/q9-rmlui/`). Chosen for native
+  string-keyed component introspection (`CreateElement(tag)` / `SetProperty(name,…)` /
+  `RegisterElementInstancer(name,…)` — the `LibInfo` analogue), FMX-class visuals through the
+  unmodified reference backend, and the smallest measured binary (2,576 KiB). Rejected on
+  licence: **Slint** (non-OSI grant forbidding apps that re-expose its APIs), **Qt** (LGPLv3
+  static relink duty — *and* free `qmlcachegen` emitting interpretable bytecode, failing G8
+  independently), **GTK4** (LGPLv2, no linking exception — retained as a *design oracle*),
+  **Ultralight** (static linking contractually forbidden). Rejected on visual ceiling:
+  wxWidgets, FLTK, libui. Rejected on G8/system dependency: all webview stacks.
 - Q6. How far does release hardening go by default vs opt-in — is stripping + no-embedded-IR the floor,
   and where do control-flow flattening / packing / anti-debug sit on the level dial without tripping AV (M3)?
 - Q7. Where exactly is the ease/power line drawn — what stays in the core easy language vs a library vs
