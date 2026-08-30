@@ -327,7 +327,6 @@ fn accessibility_adapter_activates_on_a_real_bus() {
         // The bus exists but no AT attached; that is an environment fact, not a
         // product defect, so report rather than fail.
         eprintln!("accessibility bus present but no AT attached; adapter stayed idle");
-        return;
     }
 }
 
