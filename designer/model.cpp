@@ -20,27 +20,20 @@ std::vector<std::string> split_words(const std::string& line, int max_parts) {
     return out;
 }
 
-/// Property values are re-emitted as text literals unless they look numeric —
-/// the descriptor's declared type is authoritative, but the designer only sees
-/// strings, and quoting a number would be a type error at compile time.
-bool looks_numeric(const std::string& v) {
-    if (v.empty()) return false;
-    size_t start = (v[0] == '-') ? 1 : 0;
-    if (start >= v.size()) return false;
-    for (size_t i = start; i < v.size(); i++) {
-        if (!isdigit((unsigned char)v[i])) return false;
-    }
-    return true;
-}
-
 std::string quote(const std::string& v) {
-    if (looks_numeric(v)) return v;
     std::string out = "\"";
     for (char c : v) {
         if (c == '"' || c == '\\') out += '\\';
         out += c;
     }
     return out + "\"";
+}
+
+/// Write a property value as the declared type requires: quoted for text,
+/// bare for numbers and booleans.
+std::string render_value(const std::string& type_name, const std::string& property,
+                         const std::string& value, const NeedsQuotes& needs_quotes) {
+    return needs_quotes(type_name, property) ? quote(value) : value;
 }
 
 } // namespace
@@ -110,11 +103,12 @@ bool load_model(const std::string& openepl_bin, const std::string& path, Model& 
     return true;
 }
 
-std::string emit_form(const Model& m) {
+std::string emit_form(const Model& m, const NeedsQuotes& needs_quotes) {
     std::ostringstream o;
     o << "form " << m.form_name << "\n";
     for (const auto& p : m.form.properties) {
-        o << "  " << p.first << " = " << quote(p.second) << "\n";
+        o << "  " << p.first << " = " << render_value("form", p.first, p.second, needs_quotes)
+          << "\n";
     }
     for (const auto& h : m.form.handlers) {
         o << "  on " << h.first << ": " << h.second << "\n";
@@ -122,7 +116,8 @@ std::string emit_form(const Model& m) {
     for (const auto& c : m.children) {
         o << "\n  " << c.type_name << " " << c.id << "\n";
         for (const auto& p : c.properties) {
-            o << "    " << p.first << " = " << quote(p.second) << "\n";
+            o << "    " << p.first << " = "
+              << render_value(c.type_name, p.first, p.second, needs_quotes) << "\n";
         }
         for (const auto& h : c.handlers) {
             o << "    on " << h.first << ": " << h.second << "\n";
@@ -133,7 +128,8 @@ std::string emit_form(const Model& m) {
     return o.str();
 }
 
-bool save_model(const Model& m, const std::vector<std::string>& new_subs, std::string& error) {
+bool save_model(const Model& m, const std::vector<std::string>& new_subs,
+                const NeedsQuotes& needs_quotes, std::string& error) {
     std::ifstream in(m.path);
     if (!in) { error = "cannot read " + m.path; return false; }
     std::vector<std::string> lines;
@@ -151,7 +147,7 @@ bool save_model(const Model& m, const std::vector<std::string>& new_subs, std::s
     // Everything before the form, verbatim.
     for (int i = 0; i < m.form_first_line - 1; i++) out << lines[i] << "\n";
     // The regenerated form.
-    out << emit_form(m);
+    out << emit_form(m, needs_quotes);
     // Everything after the form, verbatim — this is what protects hand-written
     // subroutine bodies from being clobbered by a designer save.
     for (size_t i = (size_t)m.form_last_line; i < lines.size(); i++) out << lines[i] << "\n";

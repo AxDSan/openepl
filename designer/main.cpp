@@ -663,9 +663,25 @@ void add_component(const std::string& type_name) {
     select(c.id);
 }
 
+/// Only the descriptor's declared type can say whether a value needs quotes:
+/// `text = "true"` and `checked = true` look identical as strings.
+bool property_needs_quotes(const std::string& type_name, const std::string& property) {
+    const OpenEPL_ComponentDesc* desc = describe(type_name.c_str());
+    if (!desc) return true;
+    for (int i = 0; i < desc->property_count; i++) {
+        if (property == desc->properties[i].name) {
+            return desc->properties[i].tag == OE_SDT_TEXT;
+        }
+    }
+    return true;
+}
+
 void save() {
     std::string err;
-    if (!save_model(g.model, g.pending_subs, err)) { set_status("save failed: " + err); return; }
+    if (!save_model(g.model, g.pending_subs, property_needs_quotes, err)) {
+        set_status("save failed: " + err);
+        return;
+    }
     g.pending_subs.clear();
     g.dirty = false;
     set_status("saved " + g.model.path);

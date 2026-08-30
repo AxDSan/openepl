@@ -585,3 +585,54 @@ fn all_components_are_real_controls() {
         "expected form + 6 components in the a11y tree, got {nodes}:\n{stdout}"
     );
 }
+
+/// Whatever the designer saves MUST compile. It once quoted a bool as text
+/// (`checked = "true"`), so every Run after touching a checkbox failed — the
+/// designer looked fine and produced uncompilable source.
+///
+/// Guards the general rule: only the descriptor's declared type can decide
+/// quoting, because `text = "true"` and `checked = true` are identical strings.
+#[test]
+fn designer_output_always_compiles() {
+    let repo = repo();
+    let designer = repo.join("designer/openepl-designer");
+    if !designer.exists() {
+        eprintln!("designer not built; skipping");
+        return;
+    }
+    let project = std::env::temp_dir().join("openepl_roundtrip.oir");
+    std::fs::copy(repo.join("examples/controls.oir"), &project).expect("seed project");
+
+    let out = Command::new(&designer)
+        .arg(&project)
+        .arg(repo.join("target/debug/openepl"))
+        .env(
+            "OPENEPL_DESIGNER_SCRIPT",
+            "add:checkbox;add:progressbar;add:image;add:groupbox;add:editbox;save",
+        )
+        .output()
+        .expect("run designer");
+    assert!(out.status.success(), "designer session failed");
+
+    let src = std::fs::read_to_string(&project).expect("read saved");
+    assert!(
+        src.contains("checked = true"),
+        "bool was quoted as text:\n{src}"
+    );
+
+    let bin = std::env::temp_dir().join("openepl_roundtrip_app");
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args([
+            "build",
+            project.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+        ])
+        .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+        .status()
+        .expect("compile");
+    assert!(
+        status.success(),
+        "the designer saved a file the compiler rejects"
+    );
+}

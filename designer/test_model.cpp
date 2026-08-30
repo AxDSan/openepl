@@ -66,7 +66,8 @@ int main(int argc, char** argv) {
 
     // Edit one property, exactly as the designer would.
     m.find("go")->set_property("left", "42");
-    check("save", save_model(m, {}, err));
+    auto quoted = [](const std::string&, const std::string& p) { return p == "text"; };
+    check("save", save_model(m, {}, quoted, err));
 
     const std::string saved = slurp(fixture);
     // THE test that matters: the hand-written body survives byte-identical.
@@ -96,7 +97,7 @@ int main(int argc, char** argv) {
     c.set_property("top", "60");
     m2.children.push_back(c);
     m2.find("go")->set_handler("click", "on_go_click2");
-    check("save with a new sub", save_model(m2, {"on_go_click2"}, err));
+    check("save with a new sub", save_model(m2, {"on_go_click2"}, quoted, err));
     const std::string saved2 = slurp(fixture);
     check("stub subroutine appended", saved2.find("sub on_go_click2") != std::string::npos);
     check("original body still intact", saved2.find(body) != std::string::npos);

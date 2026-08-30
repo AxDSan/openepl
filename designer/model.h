@@ -6,6 +6,7 @@
 #ifndef OPENEPL_DESIGNER_MODEL_H
 #define OPENEPL_DESIGNER_MODEL_H
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -84,13 +85,21 @@ struct Model {
 bool load_model(const std::string& openepl_bin, const std::string& path, Model& out,
                 std::string& error);
 
+/// Decides whether a property value must be written as a quoted text literal.
+/// The designer supplies this from the component descriptors, because only the
+/// declared type can tell `text = "true"` from `checked = true` — guessing from
+/// the value's shape writes uncompilable source.
+using NeedsQuotes =
+    std::function<bool(const std::string& type_name, const std::string& property)>;
+
 /// Render the model's `form … end` block as .oir source.
-std::string emit_form(const Model& m);
+std::string emit_form(const Model& m, const NeedsQuotes& needs_quotes);
 
 /// Save by SPLICING the emitted form over the original file's form lines,
 /// leaving everything else — every hand-written subroutine body — byte-identical.
 /// Newly wired handlers are appended as stub subroutines.
-bool save_model(const Model& m, const std::vector<std::string>& new_subs, std::string& error);
+bool save_model(const Model& m, const std::vector<std::string>& new_subs,
+                const NeedsQuotes& needs_quotes, std::string& error);
 
 } // namespace openepl::designer
 #endif
