@@ -13,6 +13,14 @@ pub enum Tok {
     Let,
     Var,
     Call,
+    If,
+    Else,
+    While,
+    And,
+    Or,
+    Not,
+    True,
+    False,
     Use,
     Form,
     On,
@@ -32,6 +40,11 @@ pub enum Tok {
     Minus,
     Star,
     Slash,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Ne,
     Newline,
     Eof,
 }
@@ -105,6 +118,28 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                 push(&mut out, Tok::Eq, line);
                 i += 1;
             }
+            b'<' => {
+                // `<=` and `<>` before bare `<`.
+                if i + 1 < n && bytes[i + 1] == b'=' {
+                    push(&mut out, Tok::Le, line);
+                    i += 2;
+                } else if i + 1 < n && bytes[i + 1] == b'>' {
+                    push(&mut out, Tok::Ne, line);
+                    i += 2;
+                } else {
+                    push(&mut out, Tok::Lt, line);
+                    i += 1;
+                }
+            }
+            b'>' => {
+                if i + 1 < n && bytes[i + 1] == b'=' {
+                    push(&mut out, Tok::Ge, line);
+                    i += 2;
+                } else {
+                    push(&mut out, Tok::Gt, line);
+                    i += 1;
+                }
+            }
             b'+' => {
                 push(&mut out, Tok::Plus, line);
                 i += 1;
@@ -165,6 +200,14 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     "end" => Tok::End,
                     "let" => Tok::Let,
                     "var" => Tok::Var,
+                    "if" => Tok::If,
+                    "else" => Tok::Else,
+                    "while" => Tok::While,
+                    "and" => Tok::And,
+                    "or" => Tok::Or,
+                    "not" => Tok::Not,
+                    "true" => Tok::True,
+                    "false" => Tok::False,
                     "call" => Tok::Call,
                     "use" => Tok::Use,
                     "form" => Tok::Form,

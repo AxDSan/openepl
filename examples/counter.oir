@@ -35,6 +35,15 @@ end
 
 sub on_add
   count = count + 1
-  count_label.text = int_to_text(count)
+
+  if count >= 10
+    count_label.text = concat(int_to_text(count), " — that's enough!")
+    add_button.text = "Done"
+  else if count = 1
+    count_label.text = "1 (first click)"
+  else
+    count_label.text = int_to_text(count)
+  end
+
   call print_text(concat("count = ", int_to_text(count)))
 end

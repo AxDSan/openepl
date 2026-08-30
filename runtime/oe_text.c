@@ -6,6 +6,15 @@
 static const char *nz(const char *s){ return s?s:""; }
 static char *astr(long len){ return (char*)oe_malloc(len+1); }
 
+/* Text equality compares CONTENT, not pointers: two separately-built strings
+ * with the same characters must be equal. Returns SDT_BOOL. */
+void oe_text_eq(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c;
+    const char *a = nz(oe_arg_text(argv, 0)), *b = nz(oe_arg_text(argv, 1));
+    r->tag = OE_SDT_BOOL;
+    r->v.i32 = (strcmp(a, b) == 0) ? 1 : 0;
+}
+
 void oe_length(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){ (void)c; oe_ret_int(r,(int)strlen(nz(oe_arg_text(argv,0)))); }
 
 void oe_uppercase(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){

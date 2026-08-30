@@ -1,0 +1,32 @@
+# Control flow: if / else if / else, while, comparisons and logical operators.
+module fizzbuzz
+
+sub main
+  var n: int = 1
+  while n <= 20
+    if mod_int(n, 15) = 0
+      call print_text("FizzBuzz")
+    else if mod_int(n, 3) = 0
+      call print_text("Fizz")
+    else if mod_int(n, 5) = 0
+      call print_text("Buzz")
+    else
+      call print_int(n)
+    end
+    n = n + 1
+  end
+
+  # Short-circuit `and`: the right side is not evaluated when n is 0, so the
+  # division is safe.
+  let zero: int = 0
+  if zero <> 0 and mod_int(100, zero) = 0
+    call print_text("unreachable")
+  else
+    call print_text("short-circuit ok")
+  end
+
+  # Text equality compares content, not pointers.
+  if concat("fizz", "buzz") = "fizzbuzz"
+    call print_text("text equality ok")
+  end
+end

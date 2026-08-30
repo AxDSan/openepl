@@ -63,6 +63,7 @@ static const OpenEPL_CommandDesc CORE_COMMANDS[] = {
     CMD("text_to_int",   oe_text_to_int,   OE_SDT_INT,    1, P_T),
     CMD("text_to_double",oe_text_to_double,OE_SDT_DOUBLE, 1, P_T),
     /* text */
+    CMD("text_eq",   oe_text_eq,   OE_SDT_BOOL, 2, P_TT),
     CMD("length",    oe_length,    OE_SDT_INT,  1, P_T),
     CMD("uppercase", oe_uppercase, OE_SDT_TEXT, 1, P_T),
     CMD("lowercase", oe_lowercase, OE_SDT_TEXT, 1, P_T),

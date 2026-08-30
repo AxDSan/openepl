@@ -379,12 +379,15 @@ fn property_access_updates_a_component() {
         "handler did not update the label:\n{stdout}"
     );
     // The accessible name must track the live text, not the construction-time
-    // value — otherwise a screen reader announces stale content.
+    // value — otherwise a screen reader announces stale content. After one
+    // click the label shows the text from the `count = 1` branch.
+    let label_row = stdout
+        .lines()
+        .find(|l| l.starts_with("a11y: id=2"))
+        .expect("a label node in the a11y tree");
     assert!(
-        stdout
-            .lines()
-            .any(|l| l.starts_with("a11y: id=2") && l.contains("name=\"1\"")),
-        "accessible name is stale:\n{stdout}"
+        label_row.contains("name=\"1 (first click)\""),
+        "accessible name is stale (it must mirror the label's current text): {label_row}"
     );
 }
 
@@ -408,4 +411,24 @@ fn main_may_touch_components_before_the_loop_starts() {
         String::from_utf8_lossy(&out.stdout).contains("main saw: set from main"),
         "main could not read back the property it set"
     );
+}
+
+/// Control flow end to end: if / else if / else, while, comparisons,
+/// short-circuit `and`, and content-based text equality (ADR 0010).
+///
+/// This also serves as the SSA verifier for branch codegen — clang rejects
+/// malformed basic blocks, so a passing build proves the emitted IR is sound.
+#[test]
+fn control_flow_runs_correctly() {
+    let stdout = run(&build_as("fizzbuzz", "cf"));
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 22, "unexpected output:\n{stdout}");
+    assert_eq!(&lines[..5], &["1", "2", "Fizz", "4", "Buzz"]);
+    assert_eq!(lines[14], "FizzBuzz", "15 should be FizzBuzz");
+    assert_eq!(lines[19], "Buzz", "20 should be Buzz");
+    // The right side of `and` must not be evaluated when the left is false,
+    // or this would have divided by zero.
+    assert_eq!(lines[20], "short-circuit ok");
+    // Two separately-built strings with the same characters must compare equal.
+    assert_eq!(lines[21], "text equality ok");
 }

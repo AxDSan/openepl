@@ -41,7 +41,7 @@ OE_CMD(oe_int_to_double); OE_CMD(oe_double_to_int); OE_CMD(oe_int_to_int64); OE_
 OE_CMD(oe_int_to_text); OE_CMD(oe_int64_to_text); OE_CMD(oe_double_to_text);
 OE_CMD(oe_text_to_int); OE_CMD(oe_text_to_double);
 /* text */
-OE_CMD(oe_length); OE_CMD(oe_uppercase); OE_CMD(oe_lowercase); OE_CMD(oe_trim); OE_CMD(oe_substr);
+OE_CMD(oe_text_eq); OE_CMD(oe_length); OE_CMD(oe_uppercase); OE_CMD(oe_lowercase); OE_CMD(oe_trim); OE_CMD(oe_substr);
 OE_CMD(oe_find); OE_CMD(oe_replace); OE_CMD(oe_concat); OE_CMD(oe_repeat); OE_CMD(oe_reverse);
 /* datetime */
 OE_CMD(oe_now); OE_CMD(oe_year); OE_CMD(oe_format_time);

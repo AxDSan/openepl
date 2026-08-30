@@ -16,7 +16,9 @@
 //! ```
 
 use crate::lexer::{lex, Spanned, Tok};
-use crate::{BinOp, Component, Expr, Form, GlobalVar, Item, Module, Stmt, Sub, Ty};
+use crate::{
+    BinOp, CmpOp, Component, Expr, Form, GlobalVar, Item, LogicalOp, Module, Stmt, Sub, Ty,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -137,6 +139,8 @@ impl Parser {
                 Tok::Let => body.push(self.stmt_let(false)?),
                 Tok::Var => body.push(self.stmt_let(true)?),
                 Tok::Call => body.push(self.stmt_call()?),
+                Tok::If => body.push(self.stmt_if()?),
+                Tok::While => body.push(self.stmt_while()?),
                 // Either `name = expr` or `component.property = expr`; one
                 // token of lookahead past the identifier tells them apart.
                 Tok::Ident(_) => body.push(self.stmt_ident()?),
@@ -332,6 +336,78 @@ impl Parser {
         })
     }
 
+    /// Statements until one of `terminators`, which is not consumed.
+    fn block(&mut self, terminators: &[Tok]) -> Result<Vec<Stmt>, ParseError> {
+        let mut body = Vec::new();
+        loop {
+            self.skip_newlines();
+            if terminators.contains(self.peek()) {
+                return Ok(body);
+            }
+            match self.peek().clone() {
+                Tok::Let => body.push(self.stmt_let(false)?),
+                Tok::Var => body.push(self.stmt_let(true)?),
+                Tok::Call => body.push(self.stmt_call()?),
+                Tok::If => body.push(self.stmt_if()?),
+                Tok::While => body.push(self.stmt_while()?),
+                Tok::Ident(_) => body.push(self.stmt_ident()?),
+                Tok::Eof => return self.err("unexpected end of file (missing `end`)"),
+                other => {
+                    return self.err(format!("expected a statement or `end`, found {other:?}"))
+                }
+            }
+        }
+    }
+
+    /// `if COND NEWLINE ... (else if COND NEWLINE ...)* (else NEWLINE ...)? end`
+    fn stmt_if(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(&Tok::If, "`if`")?;
+        let mut arms = Vec::new();
+        let mut otherwise = None;
+        loop {
+            let cond = self.expr()?;
+            self.expect(&Tok::Newline, "newline after the condition")?;
+            let body = self.block(&[Tok::Else, Tok::End])?;
+            arms.push((cond, body));
+
+            match self.peek() {
+                Tok::Else => {
+                    self.bump();
+                    if matches!(self.peek(), Tok::If) {
+                        self.bump();
+                        continue; // `else if`
+                    }
+                    self.expect(&Tok::Newline, "newline after `else`")?;
+                    otherwise = Some(self.block(&[Tok::End])?);
+                    self.expect(&Tok::End, "`end`")?;
+                    break;
+                }
+                Tok::End => {
+                    self.bump();
+                    break;
+                }
+                other => return self.err(format!("expected `else` or `end`, found {other:?}")),
+            }
+        }
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(Stmt::If { arms, otherwise })
+    }
+
+    /// `while COND NEWLINE ... end`
+    fn stmt_while(&mut self) -> Result<Stmt, ParseError> {
+        self.expect(&Tok::While, "`while`")?;
+        let cond = self.expr()?;
+        self.expect(&Tok::Newline, "newline after the condition")?;
+        let body = self.block(&[Tok::End])?;
+        self.expect(&Tok::End, "`end`")?;
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(Stmt::While { cond, body })
+    }
+
     fn stmt_call(&mut self) -> Result<Stmt, ParseError> {
         self.expect(&Tok::Call, "`call`")?;
         let cmd = self.ident("command name")?;
@@ -362,6 +438,65 @@ impl Parser {
     }
 
     fn expr(&mut self) -> Result<Expr, ParseError> {
+        self.or_expr()
+    }
+
+    fn or_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.and_expr()?;
+        while matches!(self.peek(), Tok::Or) {
+            self.bump();
+            let rhs = self.and_expr()?;
+            lhs = Expr::Logical(LogicalOp::Or, Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn and_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.not_expr()?;
+        while matches!(self.peek(), Tok::And) {
+            self.bump();
+            let rhs = self.not_expr()?;
+            lhs = Expr::Logical(LogicalOp::And, Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn not_expr(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek(), Tok::Not) {
+            self.bump();
+            return Ok(Expr::Not(Box::new(self.not_expr()?)));
+        }
+        self.cmp_expr()
+    }
+
+    /// Comparisons are **non-associative**: `a < b < c` is a compile error
+    /// rather than `(a < b) < c`, which would silently compare a bool to a
+    /// number and give a confidently wrong answer.
+    fn cmp_expr(&mut self) -> Result<Expr, ParseError> {
+        let lhs = self.sum()?;
+        let op = match self.peek() {
+            Tok::Eq => CmpOp::Eq,
+            Tok::Ne => CmpOp::Ne,
+            Tok::Lt => CmpOp::Lt,
+            Tok::Le => CmpOp::Le,
+            Tok::Gt => CmpOp::Gt,
+            Tok::Ge => CmpOp::Ge,
+            _ => return Ok(lhs),
+        };
+        self.bump();
+        let rhs = self.sum()?;
+        if matches!(
+            self.peek(),
+            Tok::Eq | Tok::Ne | Tok::Lt | Tok::Le | Tok::Gt | Tok::Ge
+        ) {
+            return self.err(
+                "comparisons cannot be chained; write `a < b and b < c` instead of `a < b < c`",
+            );
+        }
+        Ok(Expr::Cmp(op, Box::new(lhs), Box::new(rhs)))
+    }
+
+    fn sum(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.term()?;
         loop {
             let op = match self.peek() {
@@ -393,6 +528,8 @@ impl Parser {
 
     fn factor(&mut self) -> Result<Expr, ParseError> {
         match self.bump() {
+            Tok::True => Ok(Expr::BoolLit(true)),
+            Tok::False => Ok(Expr::BoolLit(false)),
             Tok::Int(v) => Ok(Expr::IntLit(v)),
             Tok::Float(v) => Ok(Expr::DoubleLit(v)),
             Tok::Str(s) => Ok(Expr::TextLit(s)),

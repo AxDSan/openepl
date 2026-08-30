@@ -16,7 +16,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
-use openepl_ir::{BinOp, Expr, Module, Registry, Ty};
+use openepl_ir::{BinOp, CmpOp, Expr, LogicalOp, Module, Registry, Ty};
 
 /// Accessibility role for a form root (`OE_ROLE_WINDOW`, abi/openepl_abi.h).
 fn form_role() -> i32 {
@@ -44,6 +44,9 @@ fn llvm_ty(t: Ty) -> &'static str {
         Ty::Int64 => "i64",
         Ty::Double => "double",
         Ty::Text => "ptr",
+        // Bool is int-sized, matching the ABI's BOOL: `icmp` yields i1, which we
+        // widen immediately so slot marshaling has one less width to handle.
+        Ty::Bool => "i32",
     }
 }
 
@@ -78,6 +81,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         handles: HashMap::new(),
         component_types: HashMap::new(),
         tmp: 0,
+        label: 0,
     };
     for g in m.globals() {
         lo.globals.insert(g.name.clone(), g.ty);
@@ -96,6 +100,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         lo.body.clear();
         lo.vars.clear();
         lo.allocas.clear();
+        lo.label = 0;
         for stmt in &sub.body {
             lo.stmt(stmt)?;
         }
@@ -177,6 +182,8 @@ struct Lowerer<'a> {
     /// Component id -> component type name, for resolving property types.
     component_types: HashMap<String, String>,
     tmp: usize,
+    /// Basic-block label counter. Labels must be unique within a function.
+    label: usize,
 }
 
 impl Lowerer<'_> {
@@ -352,6 +359,35 @@ impl Lowerer<'_> {
         }
     }
 
+    fn fresh_label(&mut self, kind: &str) -> String {
+        let l = format!("bb_{kind}_{}", self.label);
+        self.label += 1;
+        l
+    }
+
+    /// Evaluate a condition and branch. LLVM needs an `i1`, and bools are held
+    /// as `i32`, so compare against zero at the branch.
+    fn branch_on(&mut self, cond: &Expr, yes: &str, no: &str) -> Result<(), LowerError> {
+        let v = self.eval(cond)?;
+        if v.ty != Ty::Bool {
+            return err(format!(
+                "condition must be a truth value, got {}",
+                v.ty.as_str()
+            ));
+        }
+        let t = self.fresh();
+        writeln!(self.body, "  {t} = icmp ne i32 {}, 0", v.operand).unwrap();
+        writeln!(self.body, "  br i1 {t}, label %{yes}, label %{no}").unwrap();
+        Ok(())
+    }
+
+    fn block(&mut self, stmts: &[openepl_ir::Stmt]) -> Result<(), LowerError> {
+        for s in stmts {
+            self.stmt(s)?;
+        }
+        Ok(())
+    }
+
     /// Reserve a stack slot, emitted at the top of the function.
     fn alloca(&mut self, ty: Ty) -> String {
         let slot = format!("%v{}", self.allocas.len());
@@ -424,6 +460,37 @@ impl Lowerer<'_> {
                 self.eval_call(cmd, args)?; // any return value discarded
                 Ok(())
             }
+            Stmt::If { arms, otherwise } => {
+                let done = self.fresh_label("endif");
+                for (cond, body) in arms {
+                    let then = self.fresh_label("then");
+                    let next = self.fresh_label("elif");
+                    self.branch_on(cond, &then, &next)?;
+                    writeln!(self.body, "{then}:").unwrap();
+                    self.block(body)?;
+                    writeln!(self.body, "  br label %{done}").unwrap();
+                    writeln!(self.body, "{next}:").unwrap();
+                }
+                if let Some(body) = otherwise {
+                    self.block(body)?;
+                }
+                writeln!(self.body, "  br label %{done}").unwrap();
+                writeln!(self.body, "{done}:").unwrap();
+                Ok(())
+            }
+            Stmt::While { cond, body } => {
+                let head = self.fresh_label("while");
+                let inner = self.fresh_label("do");
+                let done = self.fresh_label("done");
+                writeln!(self.body, "  br label %{head}").unwrap();
+                writeln!(self.body, "{head}:").unwrap();
+                self.branch_on(cond, &inner, &done)?;
+                writeln!(self.body, "{inner}:").unwrap();
+                self.block(body)?;
+                writeln!(self.body, "  br label %{head}").unwrap();
+                writeln!(self.body, "{done}:").unwrap();
+                Ok(())
+            }
             Stmt::SetProperty {
                 component,
                 property,
@@ -456,6 +523,7 @@ impl Lowerer<'_> {
     fn value_as_text(&mut self, v: &Val) -> Result<String, LowerError> {
         match v.ty {
             Ty::Text => Ok(v.operand.clone()),
+            Ty::Bool => err("cannot use a truth value where text is expected"),
             Ty::Int | Ty::Int64 | Ty::Double => {
                 let sym = match v.ty {
                     Ty::Int => "oe_int_to_text",
@@ -466,6 +534,60 @@ impl Lowerer<'_> {
                 Ok(converted)
             }
         }
+    }
+
+    /// Compare two text values by content via the runtime, yielding i32 0/1.
+    fn call_text_eq(&mut self, a: &Val, b: &Val) -> Result<String, LowerError> {
+        let argv = self.fresh();
+        writeln!(self.body, "  {argv} = alloca [2 x %Slot]").unwrap();
+        for (i, v) in [a, b].iter().enumerate() {
+            let raw = self.emit_arg_i64(v);
+            let slot = self.fresh();
+            writeln!(
+                self.body,
+                "  {slot} = getelementptr [2 x %Slot], ptr {argv}, i64 0, i64 {i}"
+            )
+            .unwrap();
+            let tagp = self.fresh();
+            writeln!(
+                self.body,
+                "  {tagp} = getelementptr %Slot, ptr {slot}, i32 0, i32 0"
+            )
+            .unwrap();
+            writeln!(self.body, "  store i32 {}, ptr {tagp}", Ty::Text.sdt_tag()).unwrap();
+            let valp = self.fresh();
+            writeln!(
+                self.body,
+                "  {valp} = getelementptr %Slot, ptr {slot}, i32 0, i32 2"
+            )
+            .unwrap();
+            writeln!(self.body, "  store i64 {raw}, ptr {valp}").unwrap();
+        }
+        let base = self.fresh();
+        writeln!(
+            self.body,
+            "  {base} = getelementptr [2 x %Slot], ptr {argv}, i64 0, i64 0"
+        )
+        .unwrap();
+        let ret = self.fresh();
+        writeln!(self.body, "  {ret} = alloca %Slot").unwrap();
+        self.used.insert("oe_text_eq".to_string());
+        writeln!(
+            self.body,
+            "  call void @oe_text_eq(ptr {ret}, i32 2, ptr {base})"
+        )
+        .unwrap();
+        let valp = self.fresh();
+        writeln!(
+            self.body,
+            "  {valp} = getelementptr %Slot, ptr {ret}, i32 0, i32 2"
+        )
+        .unwrap();
+        let raw = self.fresh();
+        writeln!(self.body, "  {raw} = load i64, ptr {valp}").unwrap();
+        let t = self.fresh();
+        writeln!(self.body, "  {t} = trunc i64 {raw} to i32").unwrap();
+        Ok(t)
     }
 
     /// Call a one-argument slot-ABI runtime command and return its text result.
@@ -599,6 +721,103 @@ impl Lowerer<'_> {
                     msg: format!("command `{cmd}` returns nothing and cannot be used as a value"),
                 })
             }
+            Expr::BoolLit(b) => Ok(Val {
+                ty: Ty::Bool,
+                operand: (*b as i32).to_string(),
+            }),
+            Expr::Not(e) => {
+                let v = self.eval(e)?;
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = xor i32 {}, 1", v.operand).unwrap();
+                Ok(Val {
+                    ty: Ty::Bool,
+                    operand: t,
+                })
+            }
+            Expr::Cmp(op, l, r) => {
+                let lv = self.eval(l)?;
+                let rv = self.eval(r)?;
+                if lv.ty == Ty::Text {
+                    // Text comparison must compare CONTENT, not pointers.
+                    let eq = self.call_text_eq(&lv, &rv)?;
+                    return match op {
+                        CmpOp::Eq => Ok(Val {
+                            ty: Ty::Bool,
+                            operand: eq,
+                        }),
+                        CmpOp::Ne => {
+                            let t = self.fresh();
+                            writeln!(self.body, "  {t} = xor i32 {eq}, 1").unwrap();
+                            Ok(Val {
+                                ty: Ty::Bool,
+                                operand: t,
+                            })
+                        }
+                        _ => err("text values support only `=` and `<>`"),
+                    };
+                }
+                let pred = match (op, lv.ty) {
+                    (CmpOp::Eq, Ty::Double) => "fcmp oeq",
+                    (CmpOp::Ne, Ty::Double) => "fcmp one",
+                    (CmpOp::Lt, Ty::Double) => "fcmp olt",
+                    (CmpOp::Le, Ty::Double) => "fcmp ole",
+                    (CmpOp::Gt, Ty::Double) => "fcmp ogt",
+                    (CmpOp::Ge, Ty::Double) => "fcmp oge",
+                    (CmpOp::Eq, _) => "icmp eq",
+                    (CmpOp::Ne, _) => "icmp ne",
+                    (CmpOp::Lt, _) => "icmp slt",
+                    (CmpOp::Le, _) => "icmp sle",
+                    (CmpOp::Gt, _) => "icmp sgt",
+                    (CmpOp::Ge, _) => "icmp sge",
+                };
+                let bit = self.fresh();
+                writeln!(
+                    self.body,
+                    "  {bit} = {pred} {} {}, {}",
+                    llvm_ty(lv.ty),
+                    lv.operand,
+                    rv.operand
+                )
+                .unwrap();
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = zext i1 {bit} to i32").unwrap();
+                Ok(Val {
+                    ty: Ty::Bool,
+                    operand: t,
+                })
+            }
+            Expr::Logical(op, l, r) => {
+                // Short-circuit: the right side is evaluated only when needed,
+                // so `x > 0 and 100 / x > 2` is safe.
+                let slot = self.alloca(Ty::Bool);
+                let rhs_label = self.fresh_label("rhs");
+                let done = self.fresh_label("logic");
+                let lv = self.eval(l)?;
+                writeln!(self.body, "  store i32 {}, ptr {slot}", lv.operand).unwrap();
+                let c = self.fresh();
+                writeln!(self.body, "  {c} = icmp ne i32 {}, 0", lv.operand).unwrap();
+                match op {
+                    LogicalOp::And => {
+                        writeln!(self.body, "  br i1 {c}, label %{rhs_label}, label %{done}")
+                            .unwrap()
+                    }
+                    LogicalOp::Or => {
+                        writeln!(self.body, "  br i1 {c}, label %{done}, label %{rhs_label}")
+                            .unwrap()
+                    }
+                }
+                writeln!(self.body, "{rhs_label}:").unwrap();
+                let rv = self.eval(r)?;
+                writeln!(self.body, "  store i32 {}, ptr {slot}", rv.operand).unwrap();
+                writeln!(self.body, "  br label %{done}").unwrap();
+                writeln!(self.body, "{done}:").unwrap();
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = load i32, ptr {slot}").unwrap();
+                Ok(Val {
+                    ty: Ty::Bool,
+                    operand: t,
+                })
+            }
             Expr::GetProperty {
                 component,
                 property,
@@ -661,7 +880,7 @@ impl Lowerer<'_> {
     fn emit_arg_i64(&mut self, v: &Val) -> String {
         match v.ty {
             Ty::Int64 => v.operand.clone(),
-            Ty::Int => {
+            Ty::Int | Ty::Bool => {
                 let t = self.fresh();
                 writeln!(self.body, "  {t} = sext i32 {} to i64", v.operand).unwrap();
                 t
@@ -683,7 +902,7 @@ impl Lowerer<'_> {
     fn emit_ret_from_i64(&mut self, ty: Ty, raw: &str) -> String {
         match ty {
             Ty::Int64 => raw.to_string(),
-            Ty::Int => {
+            Ty::Int | Ty::Bool => {
                 let t = self.fresh();
                 writeln!(self.body, "  {t} = trunc i64 {raw} to i32").unwrap();
                 t

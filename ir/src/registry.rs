@@ -192,6 +192,7 @@ impl Registry {
             cmd("text_to_double", "oe_text_to_double", &[Text], Some(Double));
 
             // --- Text --------------------------------------------------------
+            cmd("text_eq", "oe_text_eq", &[Text, Text], Some(Bool));
             cmd("length", "oe_length", &[Text], Some(Int));
             cmd("uppercase", "oe_uppercase", &[Text], Some(Text));
             cmd("lowercase", "oe_lowercase", &[Text], Some(Text));

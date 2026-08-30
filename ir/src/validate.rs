@@ -150,99 +150,118 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         // with the globals so they resolve, but they are not locals and the
         // immutability rule differs.
         let mut local_names: HashSet<String> = HashSet::new();
-        for stmt in &sub.body {
-            match stmt {
-                Stmt::Let {
-                    name,
-                    ty,
-                    value,
-                    mutable,
-                } => {
-                    match type_of_expr_in(value, &vars, reg, &components) {
-                        Ok(got) if got == *ty => {}
-                        Ok(got) => push(format!(
-                            "in `{}`: `let {name}` declared {} but expression is {}",
-                            sub.name,
-                            ty.as_str(),
-                            got.as_str()
-                        )),
-                        Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+        // Walk nested blocks. Locals are **function-scoped** in v0.3: a `let`
+        // inside an `if` is visible after it, matching the alloca-at-top
+        // lowering. Block scoping is a later refinement.
+        let mut stack: Vec<&Vec<Stmt>> = vec![&sub.body];
+        while let Some(block) = stack.pop() {
+            for stmt in block {
+                match stmt {
+                    Stmt::Let {
+                        name,
+                        ty,
+                        value,
+                        mutable,
+                    } => {
+                        match type_of_expr_in(value, &vars, reg, &components) {
+                            Ok(got) if got == *ty => {}
+                            Ok(got) => push(format!(
+                                "in `{}`: `let {name}` declared {} but expression is {}",
+                                sub.name,
+                                ty.as_str(),
+                                got.as_str()
+                            )),
+                            Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                        }
+                        if vars.insert(name.clone(), *ty).is_some() {
+                            push(format!(
+                                "in `{}`: variable `{name}` is defined more than once",
+                                sub.name
+                            ));
+                        }
+                        local_names.insert(name.clone());
+                        if *mutable {
+                            mutable_locals.insert(name.clone());
+                        }
                     }
-                    if vars.insert(name.clone(), *ty).is_some() {
-                        push(format!(
-                            "in `{}`: variable `{name}` is defined more than once",
-                            sub.name
-                        ));
-                    }
-                    local_names.insert(name.clone());
-                    if *mutable {
-                        mutable_locals.insert(name.clone());
-                    }
-                }
-                Stmt::Assign { name, value } => {
-                    // Resolve against locals first, then module variables.
-                    let target = vars
-                        .get(name)
-                        .copied()
-                        .or_else(|| global_types.get(name).copied());
-                    match target {
-                        None => push(format!(
-                            "in `{}`: assignment to undefined variable `{name}`",
-                            sub.name
-                        )),
-                        Some(expected) => {
-                            let is_local = local_names.contains(name);
-                            let is_mutable = if is_local {
-                                mutable_locals.contains(name)
-                            } else {
-                                true // module variables are always `var`
-                            };
-                            if !is_mutable {
-                                push(format!(
+                    Stmt::Assign { name, value } => {
+                        // Resolve against locals first, then module variables.
+                        let target = vars
+                            .get(name)
+                            .copied()
+                            .or_else(|| global_types.get(name).copied());
+                        match target {
+                            None => push(format!(
+                                "in `{}`: assignment to undefined variable `{name}`",
+                                sub.name
+                            )),
+                            Some(expected) => {
+                                let is_local = local_names.contains(name);
+                                let is_mutable = if is_local {
+                                    mutable_locals.contains(name)
+                                } else {
+                                    true // module variables are always `var`
+                                };
+                                if !is_mutable {
+                                    push(format!(
                                     "in `{}`: `{name}` is immutable — declare it with `var` instead of `let` to allow assignment",
                                     sub.name
                                 ));
-                            }
-                            match type_of_expr_in(value, &vars, reg, &components) {
-                                Ok(got) if got == expected => {}
-                                Ok(got) => push(format!(
-                                    "in `{}`: `{name}` is {}, cannot assign {}",
-                                    sub.name,
-                                    expected.as_str(),
-                                    got.as_str()
-                                )),
-                                Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                                }
+                                match type_of_expr_in(value, &vars, reg, &components) {
+                                    Ok(got) if got == expected => {}
+                                    Ok(got) => push(format!(
+                                        "in `{}`: `{name}` is {}, cannot assign {}",
+                                        sub.name,
+                                        expected.as_str(),
+                                        got.as_str()
+                                    )),
+                                    Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                                }
                             }
                         }
                     }
-                }
-                Stmt::Call { cmd, args } => match reg.get(cmd) {
-                    None => push(format!("in `{}`: unknown command `{cmd}`", sub.name)),
-                    Some(c) => {
-                        if let Err(e) =
-                            check_args_in(cmd, &c.sig.params, args, &vars, reg, &components)
-                        {
-                            push(format!("in `{}`: {}", sub.name, e));
+                    Stmt::Call { cmd, args } => match reg.get(cmd) {
+                        None => push(format!("in `{}`: unknown command `{cmd}`", sub.name)),
+                        Some(c) => {
+                            if let Err(e) =
+                                check_args_in(cmd, &c.sig.params, args, &vars, reg, &components)
+                            {
+                                push(format!("in `{}`: {}", sub.name, e));
+                            }
                         }
-                    }
-                },
-                Stmt::SetProperty {
-                    component,
-                    property,
-                    value,
-                } => match property_type(component, property, reg, &components) {
-                    Err(e) => push(format!("in `{}`: {}", sub.name, e)),
-                    Ok(expected) => match type_of_expr_in(value, &vars, reg, &components) {
-                        Ok(got) if got == expected => {}
-                        Ok(got) => push(format!(
-                            "in `{}`: `{component}.{property}` expects {}, got {}",
-                            sub.name,
-                            expected.as_str(),
-                            got.as_str()
-                        )),
-                        Err(e) => push(format!("in `{}`: {}", sub.name, e)),
                     },
-                },
+                    Stmt::If { arms, otherwise } => {
+                        for (cond, body) in arms {
+                            check_condition(cond, &vars, reg, &components, &sub.name, &mut push);
+                            stack.push(body);
+                        }
+                        if let Some(body) = otherwise {
+                            stack.push(body);
+                        }
+                    }
+                    Stmt::While { cond, body } => {
+                        check_condition(cond, &vars, reg, &components, &sub.name, &mut push);
+                        stack.push(body);
+                    }
+                    Stmt::SetProperty {
+                        component,
+                        property,
+                        value,
+                    } => match property_type(component, property, reg, &components) {
+                        Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                        Ok(expected) => match type_of_expr_in(value, &vars, reg, &components) {
+                            Ok(got) if got == expected => {}
+                            Ok(got) => push(format!(
+                                "in `{}`: `{component}.{property}` expects {}, got {}",
+                                sub.name,
+                                expected.as_str(),
+                                got.as_str()
+                            )),
+                            Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                        },
+                    },
+                }
             }
         }
     }
@@ -251,6 +270,25 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         Ok(())
     } else {
         Err(errs)
+    }
+}
+
+/// A loop or branch condition must be a truth value.
+fn check_condition(
+    cond: &Expr,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+    sub: &str,
+    push: &mut impl FnMut(String),
+) {
+    match type_of_expr_in(cond, vars, reg, components) {
+        Ok(Ty::Bool) => {}
+        Ok(other) => push(format!(
+            "in `{sub}`: condition must be a truth value, found {}",
+            other.as_str()
+        )),
+        Err(e) => push(format!("in `{sub}`: {e}")),
     }
 }
 
@@ -450,6 +488,31 @@ mod tests {
         let m =
             parse("module m\nvar n: int = 5\nsub main\n  n = n + 1\n  call print_int(n)\nend\n")
                 .unwrap();
+        assert!(validate(&m, &reg()).is_ok(), "{:?}", validate(&m, &reg()));
+    }
+
+    #[test]
+    fn rejects_non_bool_condition() {
+        let m = parse("module m\nsub main\n  if 5\n    call print_int(1)\n  end\nend\n").unwrap();
+        let e = validate(&m, &reg()).unwrap_err();
+        assert!(e.iter().any(|e| e.msg.contains("truth value")), "{e:?}");
+    }
+
+    #[test]
+    fn rejects_ordering_on_text() {
+        let m = parse(
+            "module m\nsub main\n  let t: text = \"a\"\n  if t < \"b\"\n    call print_int(1)\n  end\nend\n",
+        )
+        .unwrap();
+        assert!(validate(&m, &reg()).is_err());
+    }
+
+    #[test]
+    fn accepts_text_equality_and_while() {
+        let m = parse(
+            "module m\nsub main\n  var n: int = 0\n  while n < 3\n    n = n + 1\n  end\n  if \"a\" = \"a\"\n    call print_int(n)\n  end\nend\n",
+        )
+        .unwrap();
         assert!(validate(&m, &reg()).is_ok(), "{:?}", validate(&m, &reg()));
     }
 

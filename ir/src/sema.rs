@@ -92,6 +92,50 @@ pub fn type_of_expr_in(
             component,
             property,
         } => property_type(component, property, reg, components),
+        Expr::BoolLit(_) => Ok(Ty::Bool),
+        Expr::Cmp(op, l, r) => {
+            let lt = type_of_expr_in(l, vars, reg, components)?;
+            let rt = type_of_expr_in(r, vars, reg, components)?;
+            if lt != rt {
+                return err(format!(
+                    "cannot compare {} with {} using `{}` (no implicit conversion)",
+                    lt.as_str(),
+                    rt.as_str(),
+                    op.symbol()
+                ));
+            }
+            if op.is_ordering() && !lt.is_numeric() {
+                return err(format!(
+                    "`{}` compares numbers; {} values support only `=` and `<>`",
+                    op.symbol(),
+                    lt.as_str()
+                ));
+            }
+            Ok(Ty::Bool)
+        }
+        Expr::Logical(op, l, r) => {
+            let word = match op {
+                crate::LogicalOp::And => "and",
+                crate::LogicalOp::Or => "or",
+            };
+            for (side, e) in [("left", l), ("right", r)] {
+                let t = type_of_expr_in(e, vars, reg, components)?;
+                if t != Ty::Bool {
+                    return err(format!(
+                        "`{word}` needs a truth value; its {side} side is {}",
+                        t.as_str()
+                    ));
+                }
+            }
+            Ok(Ty::Bool)
+        }
+        Expr::Not(e) => {
+            let t = type_of_expr_in(e, vars, reg, components)?;
+            if t != Ty::Bool {
+                return err(format!("`not` needs a truth value, got {}", t.as_str()));
+            }
+            Ok(Ty::Bool)
+        }
     }
 }
 

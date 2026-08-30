@@ -35,6 +35,9 @@ pub enum Ty {
     Double,
     /// `SDT_TEXT` — pointer to a NUL-terminated string; NULL = empty.
     Text,
+    /// `SDT_BOOL` — truth value. Carried as an int-sized value, matching the
+    /// ABI's `BOOL`, so slot marshaling has one less width to juggle.
+    Bool,
 }
 
 impl Ty {
@@ -45,6 +48,7 @@ impl Ty {
             Ty::Int64 => "int64",
             Ty::Double => "double",
             Ty::Text => "text",
+            Ty::Bool => "bool",
         }
     }
 
@@ -55,6 +59,7 @@ impl Ty {
             "int64" => Ty::Int64,
             "double" => Ty::Double,
             "text" => Ty::Text,
+            "bool" => Ty::Bool,
             _ => return None,
         })
     }
@@ -71,6 +76,7 @@ impl Ty {
             Ty::Int64 => 4,  // OE_SDT_INT64
             Ty::Double => 6, // OE_SDT_DOUBLE
             Ty::Text => 9,   // OE_SDT_TEXT
+            Ty::Bool => 8,   // OE_SDT_BOOL
         }
     }
 
@@ -82,6 +88,7 @@ impl Ty {
             4 => Ty::Int64,
             6 => Ty::Double,
             9 => Ty::Text,
+            8 => Ty::Bool,
             _ => return None,
         })
     }
@@ -93,6 +100,42 @@ impl Ty {
 pub struct Signature {
     pub params: Vec<Ty>,
     pub ret: Option<Ty>,
+}
+
+/// Comparison operators. `=` is equality *in expression position*; assignment
+/// exists only as a statement, so `if x = 5` cannot silently assign (the C
+/// footgun is structurally impossible here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CmpOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            CmpOp::Eq => "=",
+            CmpOp::Ne => "<>",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+        }
+    }
+    /// Ordering comparisons apply to numbers only; `=`/`<>` also apply to text.
+    pub fn is_ordering(self) -> bool {
+        !matches!(self, CmpOp::Eq | CmpOp::Ne)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalOp {
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +174,14 @@ pub enum Expr {
     Call { cmd: String, args: Vec<Expr> },
     /// Read a component's property: `ok_button.text`.
     GetProperty { component: String, property: String },
+    /// `true` / `false`.
+    BoolLit(bool),
+    /// A comparison; yields `bool`. Non-associative: `a < b < c` is rejected.
+    Cmp(CmpOp, Box<Expr>, Box<Expr>),
+    /// `and` / `or`, short-circuiting.
+    Logical(LogicalOp, Box<Expr>, Box<Expr>),
+    /// `not EXPR`.
+    Not(Box<Expr>),
 }
 
 /// A single statement inside a subroutine body.
@@ -154,6 +205,16 @@ pub enum Stmt {
         property: String,
         value: Expr,
     },
+    /// `if COND ... else if COND ... else ... end`.
+    ///
+    /// `arms` holds the `if`/`else if` conditions with their bodies, in order;
+    /// `otherwise` is the optional final `else`.
+    If {
+        arms: Vec<(Expr, Vec<Stmt>)>,
+        otherwise: Option<Vec<Stmt>>,
+    },
+    /// `while COND ... end`.
+    While { cond: Expr, body: Vec<Stmt> },
 }
 
 /// A subroutine (EPL 子程序).  v0.1 subs take no params and return nothing;
