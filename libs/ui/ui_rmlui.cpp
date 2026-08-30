@@ -22,6 +22,7 @@
 #include "RmlUi_Include_GL3.h"
 #include "openepl_abi.h"   /* oe_malloc — runtime-owned allocation (D4) */
 #include "a11y_bridge.h"
+#include "ui_mapping.h"
 #include "a11y_model.h"
 #include "openepl_ui.h"
 
@@ -101,27 +102,7 @@ Rml::String shade(const Rml::String& css, float factor) {
     return Rml::String(out);
 }
 
-/* Map an OpenEPL component type to the RmlUi tag that backs it. Keeping this
- * mapping here (rather than in the descriptors) means the component vocabulary
- * is ours, not the substrate's. */
-const char* tag_for(const char* type_name) {
-    if (std::strcmp(type_name, "button") == 0) return "button";
-    if (std::strcmp(type_name, "label") == 0)  return "div";
-    if (std::strcmp(type_name, "form") == 0)   return "div";
-    return "div";
-}
-
 /* Properties that are OpenEPL concepts rather than RCSS properties. */
-bool is_text_property(const char* p) { return std::strcmp(p, "text") == 0; }
-
-/* OpenEPL property names use underscores (`background_color`) to match the rest
- * of the language and keep the lexer free of hyphen ambiguity; RCSS uses
- * hyphens. Translate at this boundary — the substrate's spelling stops here. */
-std::string rcss_name(const char* p) {
-    std::string s(p);
-    for (char& c : s) if (c == '_') c = '-';
-    return s;
-}
 
 int env_int(const char* name, int fallback) {
     const char* v = std::getenv(name);
@@ -140,17 +121,13 @@ int oe_ui_init(const char* title, int width, int height) {
     Rml::Initialise();
 
     /* Fonts: try a few common paths so the spike works on a bare system. */
-    /* RmlUi has no CSS generic-family fallback: the stylesheet must name a
-     * family that was actually loaded, so we record the one we got. */
-    const char* fonts[][2] = {
-        { "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "DejaVu Sans" },
-        { "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVu Sans" },
-        { "/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf", "Adwaita Mono" },
-        { "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf", "Liberation Sans" },
-    };
+    /* Font list and family names come from the shared mapping, so the designer
+     * and the built app resolve the same font. */
+    int font_count = 0;
+    const auto* fonts = openepl::ui::font_candidates(&font_count);
     std::string family = "sans-serif";
-    for (auto& f : fonts) {
-        if (Rml::LoadFontFace(f[0])) { family = f[1]; break; }
+    for (int i = 0; i < font_count; i++) {
+        if (Rml::LoadFontFace(fonts[i].path)) { family = fonts[i].family; break; }
     }
 
     g.context = Rml::CreateContext("main", Rml::Vector2i(width, height));
@@ -159,13 +136,7 @@ int oe_ui_init(const char* title, int width, int height) {
     /* D21: forms are ALWAYS instantiated into a stylesheet-seeded document.
      * A bare CreateDocument() silently drops decorators while SetProperty still
      * returns true — the spike's most expensive finding. */
-    char seed[1024];
-    std::snprintf(seed, sizeof seed,
-        "<rml><head><style>"
-        "body { width: %dpx; height: %dpx; font-family: '%s'; font-size: 16px; }"
-        "button { display: block; position: absolute; text-align: center; padding-top: 8px; }"
-        "div { display: block; position: absolute; }"
-        "</style></head><body/></rml>", width, height, family.c_str());
+    const std::string seed = openepl::ui::seed_document(width, height, family);
     g.document = g.context->LoadDocumentFromMemory(seed);
     if (!g.document) return 1;
     g.document->Show();
@@ -182,7 +153,7 @@ OpenEPL_Widget oe_ui_create(OpenEPL_Widget parent, const char* type_name) {
     if (!g.initialised || !type_name) return 0;
     Rml::Element* p = parent ? resolve(parent) : g.document;
     if (!p) return 0;
-    Rml::ElementPtr child = g.document->CreateElement(tag_for(type_name));
+    Rml::ElementPtr child = g.document->CreateElement(openepl::ui::tag_for(type_name));
     if (!child) return 0;
     Rml::Element* raw = p->AppendChild(std::move(child));
     if (!raw) return 0;
@@ -198,7 +169,7 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
     Rml::Element* e = resolve(w);
     if (!e || !property || !value) return 1;
 
-    if (is_text_property(property)) {
+    if (openepl::ui::is_text_property(property)) {
         e->SetInnerRML(value);
         /* Keep the accessible name in step: a screen reader must announce the
          * current text, not whatever it was at construction. */
@@ -206,17 +177,11 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
         return 0;
     }
 
-    /* Bare integers are pixel lengths for geometry properties. */
-    std::string v = value;
-    bool numeric = !v.empty() && v.find_first_not_of("-0123456789") == std::string::npos;
-    if (numeric && (std::strcmp(property, "left") == 0 || std::strcmp(property, "top") == 0 ||
-                    std::strcmp(property, "width") == 0 || std::strcmp(property, "height") == 0 ||
-                    std::strcmp(property, "border_radius") == 0))
-        v += "px";
+    const std::string v = openepl::ui::rcss_value(property, value);
 
     if (w == 1 && std::strcmp(property, "title") == 0) return 0;  /* window title: set at init */
 
-    bool ok = e->SetProperty(rcss_name(property), v);
+    bool ok = e->SetProperty(openepl::ui::rcss_name(property), v);
 
     if (ok && std::strcmp(property, "background_color") == 0 && g.interactive.count(w)) {
         auto* st = new StateStyler(e, v, shade(v, 1.18f), shade(v, 0.82f));
@@ -232,10 +197,10 @@ const char* oe_ui_get(OpenEPL_Widget w, const char* property) {
     if (!e || !property) return nullptr;
 
     Rml::String value;
-    if (is_text_property(property)) {
+    if (openepl::ui::is_text_property(property)) {
         value = e->GetInnerRML();
     } else {
-        const Rml::Property* p = e->GetProperty(rcss_name(property));
+        const Rml::Property* p = e->GetProperty(openepl::ui::rcss_name(property));
         if (!p) return nullptr;
         value = p->ToString();
     }

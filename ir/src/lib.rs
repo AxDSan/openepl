@@ -245,6 +245,12 @@ pub struct Component {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Form {
     pub name: String,
+    /// 1-based `(first, last)` source lines of the whole `form … end` block.
+    ///
+    /// The designer rewrites **only** these lines when saving, splicing them
+    /// into the original file. Re-emitting the whole module would destroy every
+    /// hand-written subroutine body (ADR 0011).
+    pub line_span: (usize, usize),
     /// Properties of the form itself (title, size, …).
     pub properties: Vec<(String, Expr)>,
     pub handlers: Vec<(String, String)>,

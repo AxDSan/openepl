@@ -163,12 +163,14 @@ impl Parser {
     /// component := IDENT IDENT NEWLINE (property | binding)* "end" NEWLINE
     /// ```
     fn form(&mut self) -> Result<Form, ParseError> {
+        let first_line = self.line();
         self.expect(&Tok::Form, "`form`")?;
         let name = self.ident("form name")?;
         self.expect(&Tok::Newline, "newline after form name")?;
 
         let mut form = Form {
             name,
+            line_span: (first_line, first_line),
             properties: Vec::new(),
             handlers: Vec::new(),
             children: Vec::new(),
@@ -177,6 +179,7 @@ impl Parser {
             self.skip_newlines();
             match self.peek().clone() {
                 Tok::End => {
+                    form.line_span.1 = self.line();
                     self.bump();
                     break;
                 }

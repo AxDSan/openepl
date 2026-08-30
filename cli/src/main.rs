@@ -35,6 +35,7 @@ fn run(args: &[String]) -> i32 {
         "build" => cmd_build(rest, false),
         "run" => cmd_build(rest, true),
         "emit" => cmd_emit(rest),
+        "inspect" => cmd_inspect(rest),
         "-h" | "--help" | "help" => {
             usage();
             0
@@ -53,7 +54,8 @@ fn usage() {
          USAGE:\n  \
          openepl build <in.oir> [-o <out>]   compile to a native binary\n  \
          openepl run   <in.oir> [-o <out>]   compile and run\n  \
-         openepl emit  <in.oir>              print generated LLVM IR\n"
+         openepl emit  <in.oir>              print generated LLVM IR\n  \
+         openepl inspect <in.oir>            dump the form model (for the designer)\n"
     );
 }
 
@@ -100,6 +102,80 @@ fn cmd_emit(rest: &[String]) -> i32 {
             eprintln!("openepl: {e}");
             1
         }
+    }
+}
+
+/// Dump a module's form model as plain lines, for the designer to read.
+///
+/// This is the designer's ONLY way to learn a file's contents: the Rust parser
+/// stays the single reader of `.oir`. If the designer ever parsed the text
+/// itself there would be two grammars to keep in step, and they would drift
+/// (ADR 0011).
+///
+/// Line-based rather than JSON so neither side needs a serialisation library.
+fn cmd_inspect(rest: &[String]) -> i32 {
+    let (input, _) = match parse_io(rest) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("openepl: {e}");
+            return 2;
+        }
+    };
+    let src = match std::fs::read_to_string(&input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("openepl: cannot read {}: {e}", input.display());
+            return 1;
+        }
+    };
+    let module = match openepl_ir::parse(&src) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("openepl: {e}");
+            return 1;
+        }
+    };
+
+    println!("module: {}", module.name);
+    for u in &module.uses {
+        println!("use: {u}");
+    }
+    for sub in module.subs() {
+        println!("sub: {}", sub.name);
+    }
+    for form in module.forms() {
+        println!(
+            "form: {} span={}..{}",
+            form.name, form.line_span.0, form.line_span.1
+        );
+        for (name, value) in &form.properties {
+            println!("prop: {} {} {}", form.name, name, literal_text(value));
+        }
+        for (event, handler) in &form.handlers {
+            println!("handler: {} {} {}", form.name, event, handler);
+        }
+        for c in &form.children {
+            println!("component: {} {}", c.id, c.type_name);
+            for (name, value) in &c.properties {
+                println!("prop: {} {} {}", c.id, name, literal_text(value));
+            }
+            for (event, handler) in &c.handlers {
+                println!("handler: {} {} {}", c.id, event, handler);
+            }
+        }
+    }
+    0
+}
+
+/// Render a property literal as the designer should display and re-emit it.
+fn literal_text(e: &openepl_ir::Expr) -> String {
+    use openepl_ir::Expr;
+    match e {
+        Expr::TextLit(s) => s.clone(),
+        Expr::IntLit(v) => v.to_string(),
+        Expr::DoubleLit(v) => v.to_string(),
+        Expr::BoolLit(b) => b.to_string(),
+        _ => String::new(),
     }
 }
 
