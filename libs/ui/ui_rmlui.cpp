@@ -15,9 +15,13 @@
 #include <unordered_map>
 #include <vector>
 
+#include <SDL.h>
+
 #include "RmlUi_Backend.h"
 #include "RmlUi_Renderer_GL3.h"
 #include "RmlUi_Include_GL3.h"
+#include "a11y_bridge.h"
+#include "a11y_model.h"
 #include "openepl_ui.h"
 
 namespace {
@@ -25,6 +29,7 @@ namespace {
 struct UiState {
     Rml::Context* context = nullptr;
     std::unordered_map<uint64_t, bool> interactive;   /* handle -> wants hover states */
+    std::unordered_map<uint64_t, uint64_t> parent_of;  /* handle -> parent handle */
     Rml::ElementDocument* document = nullptr;
     std::vector<Rml::Element*> widgets;   // index+1 == OpenEPL_Widget handle
     std::string get_scratch;
@@ -184,6 +189,7 @@ OpenEPL_Widget oe_ui_create(OpenEPL_Widget parent, const char* type_name) {
     /* Buttons get interaction feedback; a control that does not visibly respond
      * to the mouse reads as broken regardless of whether its event fires. */
     if (std::strcmp(type_name, "button") == 0) g.interactive[h] = true;
+    g.parent_of[h] = parent ? parent : 1;
     return h;
 }
 
@@ -236,11 +242,15 @@ int oe_ui_on(OpenEPL_Widget w, const char* event, OpenEPL_EventFn handler) {
 int oe_ui_set_a11y(OpenEPL_Widget w, int32_t role, const char* name) {
     Rml::Element* e = resolve(w);
     if (!e) return 1;
-    /* Recorded as attributes now; the AccessKit bridge (Phase 3) walks the tree
-     * and reads these. Capturing them at construction is the point of D16 —
-     * the information exists before the bridge does. */
-    e->SetAttribute("oe-role", (int)role);
-    if (name) e->SetAttribute("oe-a11y-name", Rml::String(name));
+    /* Publish into the substrate-free model the AccessKit bridge serves. The
+     * model is the thread boundary: adapter callbacks read it, never widgets. */
+    openepl::a11y::Node n;
+    n.id = w;
+    n.parent = (w == 1) ? 0 : (g.parent_of.count(w) ? g.parent_of[w] : 1);
+    n.role = role;
+    n.label = name ? name : "";
+    n.clickable = g.interactive.count(w) > 0;
+    openepl::a11y::put_node(n);
     return 0;
 }
 
@@ -270,15 +280,68 @@ int oe_ui_run(void) {
             g.context->ProcessMouseMove(mx, my, 0);
     }
 
+    openepl::a11y::bridge_init();
+    {
+        /* Report the window's screen position so ATs can map node bounds to
+         * screen coordinates. Returns 0,0 under Wayland, where a client cannot
+         * know its own position — accessible bounds stay window-relative there. */
+        int wx = 0, wy = 0, ww = 0, wh = 0;
+        /* The backend owns the SDL window privately; recover it from the
+         * current GL context rather than reaching into backend internals. */
+        if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
+            SDL_GetWindowPosition(win, &wx, &wy);
+            SDL_GetWindowSize(win, &ww, &wh);
+        }
+        openepl::a11y::bridge_set_window_bounds((float)wx, (float)wy, (float)ww, (float)wh);
+    }
+
     int frames = 0;
     bool running = true;
     while (running) {
         if (max_frames == 0) running = Backend::ProcessEvents(g.context, nullptr, true);
         g.context->Update();
+
+        /* Refresh accessible bounds from the laid-out widgets, then publish.
+         * Cheap: update_if_active does nothing until an AT connects. */
+        for (size_t i = 0; i < g.widgets.size(); i++) {
+            if (Rml::Element* e = g.widgets[i]) {
+                auto off = e->GetAbsoluteOffset();
+                auto size = e->GetBox().GetSize();
+                openepl::a11y::set_bounds((uint64_t)i + 1, off.x, off.y, size.x, size.y);
+            }
+        }
+        openepl::a11y::bridge_publish();
+
+        /* An assistive technology may have asked to activate a control. The
+         * request arrived on the adapter thread and was queued; dispatch it
+         * here, on the main thread, where touching widgets is safe. */
+        for (uint64_t id : openepl::a11y::take_actions()) {
+            if (Rml::Element* target = resolve(id)) {
+                if (std::getenv("OPENEPL_A11Y_TRACE"))
+                    std::fprintf(stderr, "openepl-a11y: dispatching click to widget %llu\n",
+                                 (unsigned long long)id);
+                openepl::a11y::set_focus(id);
+                target->DispatchEvent("click", Rml::Dictionary());
+            }
+        }
+
         Backend::BeginFrame();
         g.context->Render();
 
         if (max_frames > 0 && ++frames >= max_frames) {
+            /* Test hook: print the accessibility tree. Substrate-independent
+             * and needs no accessibility bus, so it works in CI. */
+            if (const char* d = std::getenv("OPENEPL_UI_DUMP_A11Y")) {
+                if (*d && d[0] != '0') {
+                    for (const auto& n : openepl::a11y::snapshot()) {
+                        std::printf("a11y: id=%llu parent=%llu role=%d bounds=%.0f,%.0f,%.0fx%.0f name=\"%s\"%s\n",
+                                    (unsigned long long)n.id, (unsigned long long)n.parent,
+                                    n.role, n.x, n.y, n.w, n.h, n.label.c_str(),
+                                    n.clickable ? " clickable" : "");
+                    }
+                    std::printf("a11y: adapter_active=%d\n", (int)openepl::a11y::bridge_active());
+                }
+            }
             auto* gl3 = static_cast<RenderInterface_GL3*>(Backend::GetRenderInterface());
             gl3->EndFrame();
             if (dump_path) {
@@ -300,6 +363,8 @@ int oe_ui_run(void) {
 
 void oe_ui_shutdown(void) {
     if (!g.initialised) return;
+    openepl::a11y::bridge_shutdown();
+    openepl::a11y::clear();
     Rml::Shutdown();
     Backend::Shutdown();
     for (auto* b : g_bridges) delete b;

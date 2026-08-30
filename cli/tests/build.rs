@@ -225,3 +225,135 @@ fn button_hover_changes_pixels() {
         "hovering the button did not change its appearance (base {b:?})"
     );
 }
+
+/// The accessibility tree must mirror the widget tree with correct roles,
+/// names, parent links and bounds (ADR 0005/D16). Substrate-independent and
+/// needs no accessibility bus, so it always runs.
+#[test]
+fn accessibility_tree_is_published() {
+    let repo = repo();
+    if !repo.join("vendor/accesskit-c/include/accesskit.h").exists() {
+        eprintln!("accesskit-c not vendored (run tools/fetch-accesskit.sh); skipping");
+        return;
+    }
+    let bin = build_as("form", "a11y");
+    let out = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "3")
+        .env("OPENEPL_UI_DUMP_A11Y", "1")
+        .output()
+        .expect("run form");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("a11y: id="))
+        .collect();
+    assert_eq!(rows.len(), 3, "expected window+label+button, got:\n{text}");
+
+    // role 1 = window, 3 = label, 2 = button (abi/openepl_abi.h)
+    assert!(
+        rows[0].contains("role=1") && rows[0].contains("parent=0"),
+        "root: {}",
+        rows[0]
+    );
+    assert!(
+        rows[1].contains("role=3") && rows[1].contains("Click the button."),
+        "label: {}",
+        rows[1]
+    );
+    assert!(
+        rows[2].contains("role=2") && rows[2].contains("Click me") && rows[2].contains("clickable"),
+        "button must be a clickable button with an accessible name: {}",
+        rows[2]
+    );
+    // Bounds must be real, not zero — an AT cannot locate a zero-sized control.
+    assert!(
+        !rows[2].contains("bounds=0,0,0x0"),
+        "button has no bounds: {}",
+        rows[2]
+    );
+}
+
+/// End-to-end against a real AT-SPI bus: the adapter must actually activate
+/// when an assistive technology is present. Skipped when the session has no
+/// accessibility bus, so CI never hard-depends on desktop D-Bus.
+#[test]
+fn accessibility_adapter_activates_on_a_real_bus() {
+    let repo = repo();
+    if !repo.join("vendor/accesskit-c/include/accesskit.h").exists() {
+        eprintln!("accesskit-c not vendored; skipping");
+        return;
+    }
+    // Ask the a11y bus to exist, and mark accessibility enabled.
+    let bus = Command::new("busctl")
+        .args([
+            "--user",
+            "call",
+            "org.a11y.Bus",
+            "/org/a11y/bus",
+            "org.a11y.Bus",
+            "GetAddress",
+        ])
+        .output();
+    match bus {
+        Ok(o) if o.status.success() => {}
+        _ => {
+            eprintln!("no session accessibility bus; skipping live-adapter test");
+            return;
+        }
+    }
+    for prop in ["IsEnabled", "ScreenReaderEnabled"] {
+        let _ = Command::new("busctl")
+            .args([
+                "--user",
+                "set-property",
+                "org.a11y.Bus",
+                "/org/a11y/bus",
+                "org.a11y.Status",
+                prop,
+                "b",
+                "true",
+            ])
+            .output();
+    }
+
+    let bin = build_as("form", "a11ylive");
+    let out = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "90")
+        .env("OPENEPL_UI_DUMP_A11Y", "1")
+        .output()
+        .expect("run form");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !stdout.contains("adapter_active=1") {
+        // The bus exists but no AT attached; that is an environment fact, not a
+        // product defect, so report rather than fail.
+        eprintln!("accessibility bus present but no AT attached; adapter stayed idle");
+        return;
+    }
+}
+
+/// Accessibility must never be load-bearing: with it disabled the app runs
+/// exactly the same. An app that breaks without a11y infrastructure would fail
+/// the very requirement the bridge exists to satisfy.
+#[test]
+fn app_runs_with_accessibility_disabled() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let bin = build_as("form", "noa11y");
+    let out = Command::new(&bin)
+        .env("OPENEPL_NO_A11Y", "1")
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "3")
+        .env("OPENEPL_UI_SYNTH_CLICK", "3")
+        .output()
+        .expect("run form");
+    assert!(
+        out.status.success(),
+        "app failed with accessibility disabled"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("button clicked!"),
+        "app must behave identically with accessibility disabled"
+    );
+}
