@@ -85,6 +85,26 @@ retrofit.
 the alternative was no GUI test at all. They cost nothing when unset. Replace
 with a proper harness when one is warranted.
 
+## Two defects found by actually using it
+
+Both surfaced when the window was driven by hand rather than by the test hooks,
+and neither would have been caught by asserting on stdout alone.
+
+1. **Output was invisible.** `printf` to a pipe is fully buffered, so a GUI
+   program's output only appeared at exit — clicks fired correctly but produced
+   no visible feedback, which is indistinguishable from a dead event handler.
+   `E_Init` now sets line buffering on stdout.
+2. **Hover could never have worked.** Component properties are applied as
+   *inline* properties, and inline styles outrank any `:hover` stylesheet rule —
+   so no amount of stylesheet work could have produced hover feedback. The
+   backend now drives interaction states itself, deriving lightened/darkened
+   shades from the authored colour. Guarded by `button_hover_changes_pixels`,
+   which compares rendered pixels with and without the mouse over the button.
+
+The lesson worth keeping: a control that does not visibly respond to the mouse
+reads as broken *even when its event fires correctly*. Interaction feedback is
+part of "the component works", not polish on top of it.
+
 ## Consequences
 
 - **PRD Phase 2 is complete.** `examples/form.oir` → native GUI binary; a

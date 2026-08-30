@@ -167,3 +167,61 @@ fn console_programs_do_not_link_the_ui() {
         );
     }
 }
+
+/// A button must visibly respond to the mouse. Hover feedback can't come from a
+/// `:hover` stylesheet rule because component properties are applied INLINE and
+/// inline styles outrank stylesheet rules — so the backend drives the states,
+/// and this test guards that it actually changes rendered pixels.
+#[test]
+fn button_hover_changes_pixels() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let bin = build_as("form", "hover");
+    let dir = std::env::temp_dir();
+    let base = dir.join("openepl_base.ppm");
+    let hover = dir.join("openepl_hover.ppm");
+
+    let render = |dump: &std::path::Path, mouse: Option<&str>| {
+        let mut c = Command::new(&bin);
+        c.env("OPENEPL_UI_EXIT_AFTER_FRAMES", "3")
+            .env("OPENEPL_UI_DUMP", dump);
+        if let Some(m) = mouse {
+            c.env("OPENEPL_UI_MOUSE", m);
+        }
+        assert!(c.output().expect("render").status.success());
+    };
+    render(&base, None);
+    render(&hover, Some("120,132")); // centre of the button
+
+    // Sample the same pixel from each frame.
+    let sample = |p: &std::path::Path| -> [u8; 3] {
+        let bytes = std::fs::read(p).expect("read ppm");
+        // PPM header is three newline-terminated lines; the second holds the width.
+        let mut nl = 0;
+        let mut i = 0;
+        let (mut w, mut hdr) = (0usize, String::new());
+        while nl < 3 && i < bytes.len() {
+            if bytes[i] == b'\n' {
+                nl += 1;
+                if nl == 2 {
+                    w = hdr.split_whitespace().next().unwrap().parse().unwrap();
+                }
+                hdr.clear();
+            } else {
+                hdr.push(bytes[i] as char);
+            }
+            i += 1;
+        }
+        let (x, y) = (120usize, 132usize);
+        let off = i + (y * w + x) * 3;
+        [bytes[off], bytes[off + 1], bytes[off + 2]]
+    };
+    let (b, h) = (sample(&base), sample(&hover));
+    assert_ne!(
+        b, h,
+        "hovering the button did not change its appearance (base {b:?})"
+    );
+}

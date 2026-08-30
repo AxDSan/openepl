@@ -63,6 +63,7 @@ int oe_ui_set_a11y(OpenEPL_Widget w, int32_t role, const char *name);
  *   OPENEPL_UI_SYNTH_CLICK=<handle>    dispatch a synthetic click to that widget
  *                                      (a handle, not an id — ids never ship)
  *   OPENEPL_UI_DUMP=<path.ppm>         write the framebuffer before exiting
+ *   OPENEPL_UI_MOUSE=<x,y>             place the mouse (drives hover states)
  * These make the GUI testable headlessly in CI; see libs/ui/README.md. */
 int oe_ui_run(void);
 

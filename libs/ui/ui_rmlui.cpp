@@ -24,6 +24,7 @@ namespace {
 
 struct UiState {
     Rml::Context* context = nullptr;
+    std::unordered_map<uint64_t, bool> interactive;   /* handle -> wants hover states */
     Rml::ElementDocument* document = nullptr;
     std::vector<Rml::Element*> widgets;   // index+1 == OpenEPL_Widget handle
     std::string get_scratch;
@@ -49,6 +50,50 @@ struct HandlerBridge : Rml::EventListener {
     void ProcessEvent(Rml::Event&) override { if (fn) fn(); }
 };
 std::vector<HandlerBridge*> g_bridges;   // owned; freed at shutdown
+
+/* Interactive visual states.
+ *
+ * Component properties are applied as INLINE properties, which outrank any
+ * `:hover`/`:active` stylesheet rule — so a stylesheet cannot provide hover
+ * feedback here. The backend therefore drives the states itself: it remembers
+ * the base colour and swaps in derived shades on mouse over/down. Keeping this
+ * in the backend also means every substrate gets to implement interaction the
+ * way its own system prefers. */
+struct StateStyler : Rml::EventListener {
+    Rml::Element* element;
+    Rml::String base;      /* colour as authored            */
+    Rml::String hover;     /* lightened                     */
+    Rml::String active;    /* darkened                      */
+
+    StateStyler(Rml::Element* e, Rml::String b, Rml::String h, Rml::String a)
+        : element(e), base(std::move(b)), hover(std::move(h)), active(std::move(a)) {}
+
+    void ProcessEvent(Rml::Event& ev) override {
+        const Rml::String& t = ev.GetType();
+        if (t == "mouseover")      element->SetProperty("background-color", hover);
+        else if (t == "mouseout")  element->SetProperty("background-color", base);
+        else if (t == "mousedown") element->SetProperty("background-color", active);
+        else if (t == "mouseup")   element->SetProperty("background-color", hover);
+    }
+};
+std::vector<StateStyler*> g_stylers;   /* owned; freed at shutdown */
+
+/* Scale an #rgb/#rrggbb colour by `factor`, clamped. */
+Rml::String shade(const Rml::String& css, float factor) {
+    if (css.size() < 4 || css[0] != '#') return css;
+    Rml::String hex = css.substr(1);
+    if (hex.size() == 3) hex = Rml::String{hex[0],hex[0],hex[1],hex[1],hex[2],hex[2]};
+    if (hex.size() < 6) return css;
+    char out[8];
+    int v[3];
+    for (int i = 0; i < 3; i++) {
+        int c = (int)std::strtol(hex.substr((size_t)i * 2, 2).c_str(), nullptr, 16);
+        c = (int)(c * factor);
+        v[i] = c < 0 ? 0 : (c > 255 ? 255 : c);
+    }
+    std::snprintf(out, sizeof out, "#%02x%02x%02x", v[0], v[1], v[2]);
+    return Rml::String(out);
+}
 
 /* Map an OpenEPL component type to the RmlUi tag that backs it. Keeping this
  * mapping here (rather than in the descriptors) means the component vocabulary
@@ -134,7 +179,12 @@ OpenEPL_Widget oe_ui_create(OpenEPL_Widget parent, const char* type_name) {
     Rml::ElementPtr child = g.document->CreateElement(tag_for(type_name));
     if (!child) return 0;
     Rml::Element* raw = p->AppendChild(std::move(child));
-    return raw ? publish(raw) : 0;
+    if (!raw) return 0;
+    OpenEPL_Widget h = publish(raw);
+    /* Buttons get interaction feedback; a control that does not visibly respond
+     * to the mouse reads as broken regardless of whether its event fires. */
+    if (std::strcmp(type_name, "button") == 0) g.interactive[h] = true;
+    return h;
 }
 
 int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
@@ -152,7 +202,16 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
         v += "px";
 
     if (w == 1 && std::strcmp(property, "title") == 0) return 0;  /* window title: set at init */
-    return e->SetProperty(rcss_name(property), v) ? 0 : 1;
+
+    bool ok = e->SetProperty(rcss_name(property), v);
+
+    if (ok && std::strcmp(property, "background_color") == 0 && g.interactive.count(w)) {
+        auto* st = new StateStyler(e, v, shade(v, 1.18f), shade(v, 0.82f));
+        g_stylers.push_back(st);
+        for (const char* ev : {"mouseover", "mouseout", "mousedown", "mouseup"})
+            e->AddEventListener(ev, st);
+    }
+    return ok ? 0 : 1;
 }
 
 const char* oe_ui_get(OpenEPL_Widget w, const char* property) {
@@ -191,6 +250,7 @@ int oe_ui_run(void) {
     const int max_frames = env_int("OPENEPL_UI_EXIT_AFTER_FRAMES", 0);
     const char* synth_click = std::getenv("OPENEPL_UI_SYNTH_CLICK");
     const char* dump_path = std::getenv("OPENEPL_UI_DUMP");
+    const char* mouse_at = std::getenv("OPENEPL_UI_MOUSE");   /* "x,y" — drives hover */
 
     if (synth_click) {
         /* Targets a widget HANDLE, not an element id — component ids are
@@ -202,6 +262,12 @@ int oe_ui_run(void) {
             e->DispatchEvent("click", Rml::Dictionary());
         else
             std::fprintf(stderr, "openepl-ui: no widget handle %s to click\n", synth_click);
+    }
+
+    if (mouse_at) {
+        int mx = 0, my = 0;
+        if (std::sscanf(mouse_at, "%d,%d", &mx, &my) == 2)
+            g.context->ProcessMouseMove(mx, my, 0);
     }
 
     int frames = 0;
@@ -238,6 +304,9 @@ void oe_ui_shutdown(void) {
     Backend::Shutdown();
     for (auto* b : g_bridges) delete b;
     g_bridges.clear();
+    for (auto* s : g_stylers) delete s;
+    g_stylers.clear();
+    g.interactive.clear();
     g.widgets.clear();
     g.initialised = false;
 }
