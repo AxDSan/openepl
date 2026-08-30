@@ -16,7 +16,12 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
-use openepl_ir::{BinOp, Expr, Item, Module, Registry, Ty};
+use openepl_ir::{BinOp, Expr, Module, Registry, Ty};
+
+/// Accessibility role for a form root (`OE_ROLE_WINDOW`, abi/openepl_abi.h).
+fn form_role() -> i32 {
+    1
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LowerError {
@@ -43,10 +48,22 @@ fn llvm_ty(t: Ty) -> &'static str {
 }
 
 /// Lower a whole module to a `.ll` string using the given command registry.
+///
+/// Two entry shapes (ADR 0006):
+///  * **console** — `main` is lowered into `ECodeStart` as before.
+///  * **GUI** — the module declares a form; `ECodeStart` becomes the generated
+///    form constructor: init the UI, create components, set properties, bind
+///    handlers by function pointer, run the loop. `main`, if present, runs
+///    first as start-up code.
+///
+/// User subroutines each lower to their own `@oe_user_<name>` function so an
+/// event handler can be bound by pointer. Handler names never appear as data —
+/// there is no name-based dispatch at runtime (G8).
 pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     let subs: Vec<_> = m.subs().collect();
-    if !subs.iter().any(|s| s.name == "main") {
-        return err("module has no `main` subroutine");
+    let forms: Vec<_> = m.forms().collect();
+    if forms.is_empty() && !subs.iter().any(|s| s.name == "main") {
+        return err("module has no `main` subroutine and no form");
     }
 
     let mut lo = Lowerer {
@@ -55,20 +72,42 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         body: String::new(),
         vars: HashMap::new(),
         used: BTreeSet::new(),
+        ui_used: BTreeSet::new(),
         tmp: 0,
     };
 
-    for item in &m.items {
-        let Item::Sub(sub) = item;
-        if sub.name != "main" {
-            return err("v0.1 lowers only `main`");
-        }
+    // Each subroutine becomes its own function.
+    let mut functions = String::new();
+    for sub in &subs {
+        lo.body.clear();
+        lo.vars.clear();
         for stmt in &sub.body {
             lo.stmt(stmt)?;
         }
+        functions.push_str(&format!(
+            "define void @{}() {{\nentry:\n{}  ret void\n}}\n\n",
+            user_symbol(&sub.name),
+            lo.body
+        ));
     }
 
-    Ok(lo.finish(&m.name))
+    // The entry function.
+    lo.body.clear();
+    lo.vars.clear();
+    if subs.iter().any(|s| s.name == "main") {
+        writeln!(lo.body, "  call void @{}()", user_symbol("main")).unwrap();
+    }
+    if let Some(form) = forms.first() {
+        lo.form(form)?;
+    }
+
+    Ok(lo.finish(&m.name, &functions))
+}
+
+/// Symbol for a user subroutine. Prefixed so user names can never collide with
+/// runtime symbols.
+fn user_symbol(name: &str) -> String {
+    format!("oe_user_{name}")
 }
 
 /// A lowered value: its slot type plus its LLVM operand (a literal or `%tN`).
@@ -85,6 +124,8 @@ struct Lowerer<'a> {
     vars: HashMap<String, Val>,
     /// Runtime command symbols actually referenced (drives declarations).
     used: BTreeSet<String>,
+    /// UI-interface symbols referenced (declared separately; see finish()).
+    ui_used: BTreeSet<&'static str>,
     tmp: usize,
 }
 
@@ -93,6 +134,153 @@ impl Lowerer<'_> {
         let t = format!("%t{}", self.tmp);
         self.tmp += 1;
         t
+    }
+
+    /// Emit a string constant and return an operand pointing at it.
+    fn cstr(&mut self, text: &str) -> String {
+        let id = self.strings.len();
+        self.strings.push(text.to_string());
+        let bytes = text.len() + 1;
+        format!("getelementptr inbounds ([{bytes} x i8], ptr @.str{id}, i64 0, i64 0)")
+    }
+
+    /// Render a property value literal as the text the UI layer expects.
+    /// Values are textual at the D10 boundary in v0 (see abi/openepl_ui.h).
+    fn property_text(&self, e: &Expr) -> Result<String, LowerError> {
+        Ok(match e {
+            Expr::TextLit(s) => s.clone(),
+            Expr::IntLit(v) => v.to_string(),
+            Expr::DoubleLit(v) => format!("{v}"),
+            _ => return err("component property values must be literals in v0.2"),
+        })
+    }
+
+    /// Lower a form into the calls that build it at run time.
+    fn form(&mut self, form: &openepl_ir::Form) -> Result<(), LowerError> {
+        // Window geometry/title come from the form's own properties.
+        let mut title = "OpenEPL Application".to_string();
+        let (mut width, mut height) = (800i64, 600i64);
+        for (name, value) in &form.properties {
+            match name.as_str() {
+                "title" => title = self.property_text(value)?,
+                "width" => width = self.property_text(value)?.parse().unwrap_or(800),
+                "height" => height = self.property_text(value)?.parse().unwrap_or(600),
+                _ => {}
+            }
+        }
+
+        let title_op = self.cstr(&title);
+        self.ui_used.insert("oe_ui_init");
+        writeln!(
+            self.body,
+            "  call i32 @oe_ui_init(ptr {title_op}, i32 {width}, i32 {height})"
+        )
+        .unwrap();
+
+        self.ui_used.insert("oe_ui_root");
+        let root = self.fresh();
+        writeln!(self.body, "  {root} = call i64 @oe_ui_root()").unwrap();
+
+        // Root properties (skip the window-level ones already consumed).
+        for (name, value) in &form.properties {
+            if matches!(name.as_str(), "title" | "width" | "height") {
+                continue;
+            }
+            self.set_property(&root, name, &self.property_text(value)?);
+        }
+        // The accessible name is user-facing TEXT (the title), never the form's
+        // identifier — identifiers must not reach the binary (G8).
+        self.a11y(&root, form_role(), &title);
+        self.bind_handlers(&root, &form.handlers);
+
+        // Children.
+        for child in &form.children {
+            let desc = self
+                .reg
+                .component(&child.type_name)
+                .ok_or_else(|| LowerError {
+                    msg: format!("unknown component type `{}`", child.type_name),
+                })?;
+            let role = desc.a11y_role;
+            let type_op = self.cstr(&child.type_name);
+            self.ui_used.insert("oe_ui_create");
+            let handle = self.fresh();
+            writeln!(
+                self.body,
+                "  {handle} = call i64 @oe_ui_create(i64 {root}, ptr {type_op})"
+            )
+            .unwrap();
+
+            for (name, value) in &child.properties {
+                let text = self.property_text(value)?;
+                self.set_property(&handle, name, &text);
+            }
+            // The accessible name comes from user-facing text. If a component
+            // has none, we emit the role only rather than falling back to the
+            // instance id: ids are compile-time and must not ship (G8).
+            // A future designer should prompt for an explicit accessible name
+            // when a component has no text (D16).
+            match child.properties.iter().find(|(n, _)| n == "text") {
+                Some((_, v)) => {
+                    let name = self.property_text(v)?;
+                    self.a11y(&handle, role, &name);
+                }
+                None => self.a11y_role_only(&handle, role),
+            }
+            self.bind_handlers(&handle, &child.handlers);
+        }
+
+        self.ui_used.insert("oe_ui_run");
+        let rc = self.fresh();
+        writeln!(self.body, "  {rc} = call i32 @oe_ui_run()").unwrap();
+        self.ui_used.insert("oe_ui_shutdown");
+        writeln!(self.body, "  call void @oe_ui_shutdown()").unwrap();
+        Ok(())
+    }
+
+    fn set_property(&mut self, handle: &str, name: &str, value: &str) {
+        let n = self.cstr(name);
+        let v = self.cstr(value);
+        self.ui_used.insert("oe_ui_set");
+        writeln!(
+            self.body,
+            "  call i32 @oe_ui_set(i64 {handle}, ptr {n}, ptr {v})"
+        )
+        .unwrap();
+    }
+
+    /// Record the a11y role with no accessible name (see the G8 note above).
+    fn a11y_role_only(&mut self, handle: &str, role: i32) {
+        self.ui_used.insert("oe_ui_set_a11y");
+        writeln!(
+            self.body,
+            "  call i32 @oe_ui_set_a11y(i64 {handle}, i32 {role}, ptr null)"
+        )
+        .unwrap();
+    }
+
+    fn a11y(&mut self, handle: &str, role: i32, name: &str) {
+        let n = self.cstr(name);
+        self.ui_used.insert("oe_ui_set_a11y");
+        writeln!(
+            self.body,
+            "  call i32 @oe_ui_set_a11y(i64 {handle}, i32 {role}, ptr {n})"
+        )
+        .unwrap();
+    }
+
+    /// Bind events to handler FUNCTION POINTERS (never names — G8).
+    fn bind_handlers(&mut self, handle: &str, handlers: &[(String, String)]) {
+        for (event, sub) in handlers {
+            let ev = self.cstr(event);
+            self.ui_used.insert("oe_ui_on");
+            writeln!(
+                self.body,
+                "  call i32 @oe_ui_on(i64 {handle}, ptr {ev}, ptr @{})",
+                user_symbol(sub)
+            )
+            .unwrap();
+        }
     }
 
     fn stmt(&mut self, s: &openepl_ir::Stmt) -> Result<(), LowerError> {
@@ -335,7 +523,7 @@ impl Lowerer<'_> {
         }
     }
 
-    fn finish(self, module_name: &str) -> String {
+    fn finish(self, module_name: &str, functions: &str) -> String {
         let mut out = String::new();
         writeln!(
             out,
@@ -367,6 +555,27 @@ impl Lowerer<'_> {
         if !self.used.is_empty() {
             out.push('\n');
         }
+
+        // UI interface declarations (abi/openepl_ui.h), only when referenced.
+        for sym in &self.ui_used {
+            let decl = match *sym {
+                "oe_ui_init" => "declare i32 @oe_ui_init(ptr, i32, i32)",
+                "oe_ui_shutdown" => "declare void @oe_ui_shutdown()",
+                "oe_ui_root" => "declare i64 @oe_ui_root()",
+                "oe_ui_create" => "declare i64 @oe_ui_create(i64, ptr)",
+                "oe_ui_set" => "declare i32 @oe_ui_set(i64, ptr, ptr)",
+                "oe_ui_on" => "declare i32 @oe_ui_on(i64, ptr, ptr)",
+                "oe_ui_set_a11y" => "declare i32 @oe_ui_set_a11y(i64, i32, ptr)",
+                "oe_ui_run" => "declare i32 @oe_ui_run()",
+                other => panic!("undeclared UI symbol {other}"),
+            };
+            writeln!(out, "{decl}").unwrap();
+        }
+        if !self.ui_used.is_empty() {
+            out.push('\n');
+        }
+
+        out.push_str(functions);
 
         writeln!(out, "define i32 @ECodeStart() {{").unwrap();
         writeln!(out, "entry:").unwrap();

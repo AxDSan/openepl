@@ -9,6 +9,33 @@ use std::collections::HashMap;
 
 use crate::{Signature, Ty};
 
+/// A component property, as declared in a library's `ComponentDesc`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyDesc {
+    pub name: String,
+    pub ty: Ty,
+}
+
+/// A visual component type contributed by a support library (PRD D9/D11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentDesc {
+    pub name: String,
+    /// Accessibility role (`OE_ROLE_*`) — carried from the descriptor so a11y
+    /// data exists from the start (ADR 0005/D16).
+    pub a11y_role: i32,
+    pub properties: Vec<PropertyDesc>,
+    pub events: Vec<String>,
+}
+
+impl ComponentDesc {
+    pub fn property(&self, name: &str) -> Option<&PropertyDesc> {
+        self.properties.iter().find(|p| p.name == name)
+    }
+    pub fn has_event(&self, name: &str) -> bool {
+        self.events.iter().any(|e| e == name)
+    }
+}
+
 /// One registered command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
@@ -23,13 +50,34 @@ pub struct Command {
 #[derive(Debug, Clone, Default)]
 pub struct Registry {
     map: HashMap<String, Command>,
+    components: HashMap<String, ComponentDesc>,
 }
 
 impl Registry {
     pub fn new() -> Registry {
         Registry {
             map: HashMap::new(),
+            components: HashMap::new(),
         }
+    }
+
+    /// Look up a component type by its surface name.
+    pub fn component(&self, name: &str) -> Option<&ComponentDesc> {
+        self.components.get(name)
+    }
+
+    /// Register a component type; `false` if the name was already taken.
+    pub fn insert_component(&mut self, desc: ComponentDesc) -> bool {
+        if self.components.contains_key(&desc.name) {
+            return false;
+        }
+        self.components.insert(desc.name.clone(), desc);
+        true
+    }
+
+    /// Known component type names, for diagnostics.
+    pub fn component_names(&self) -> impl Iterator<Item = &str> {
+        self.components.keys().map(|s| s.as_str())
     }
 
     pub fn get(&self, name: &str) -> Option<&Command> {

@@ -1,0 +1,18 @@
+{
+  "name": "ui",
+  "comment": "Visual component library. Sources are split so the metadata TU never reaches a shipped program (ADR 0003/D12), and the UI stack links only into modules that actually declare a form.",
+  "libinfo_sources": ["ui_libinfo.c"],
+  "impl_sources": ["ui_rmlui.cpp"],
+  "cxx": true,
+  "include_dirs": ["vendor/RmlUi/Include", "vendor/RmlUi/Backends"],
+  "extra_sources": [
+    "vendor/RmlUi/Backends/RmlUi_Backend_SDL_GL3.cpp",
+    "vendor/RmlUi/Backends/RmlUi_Platform_SDL.cpp",
+    "vendor/RmlUi/Backends/RmlUi_Renderer_GL3.cpp"
+  ],
+  "defines": ["RMLUI_SDL_VERSION_MAJOR=2", "SDL_VIDEO_RENDER_OGL=1"],
+  "pkg_config": ["sdl2", "SDL2_image", "freetype2"],
+  "link_args": ["-Lvendor/RmlUi/build", "-lrmlui", "-lGL", "-ldl", "-lfreetype"],
+  "requires": ["vendor/RmlUi/build/librmlui.a"],
+  "requires_hint": "RmlUi is not vendored yet — run tools/fetch-rmlui.sh"
+}

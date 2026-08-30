@@ -86,6 +86,7 @@ static const OpenEPL_LibInfo CORE_INFO = {
     0, 2, 0,
     (int32_t)(sizeof(CORE_COMMANDS) / sizeof(CORE_COMMANDS[0])),
     CORE_COMMANDS,
+    0, NULL,   /* the core library contributes no visual components */
 };
 
 const OpenEPL_LibInfo *openepl_get_lib_info(void) {

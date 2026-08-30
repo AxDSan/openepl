@@ -99,6 +99,48 @@ static inline void  oe_runtime_error(const char *m) { oe_notify(OE_NRS_RUNTIME_E
  * into a shipped program — the compiler resolves symbols at link time.  This is
  * EPL's `.fne` (design-time) vs `.fnr` (runtime) split, and the G8 "no metadata
  * in release output" story. */
+/* --- Visual components (PRD G0/D9/D11; EDK digest §9). -----------------
+ * A library contributes visual components through the SAME LibInfo mechanism
+ * that carries commands.  A component declares its properties and events by
+ * NAME, which is what makes the Object Inspector, form streaming, and the
+ * designer generic — one primitive, exactly as Delphi's `published` RTTI does
+ * (ADR 0005/D11).
+ *
+ * Accessibility is part of the descriptor, not an afterthought (ADR 0005/D16):
+ * every component states its a11y role here, and per-instance name/state travel
+ * with the properties below. */
+
+/* Accessibility roles (subset of the AccessKit/platform role vocabulary). */
+enum {
+    OE_ROLE_UNKNOWN = 0,
+    OE_ROLE_WINDOW  = 1,
+    OE_ROLE_BUTTON  = 2,
+    OE_ROLE_LABEL   = 3,
+    OE_ROLE_TEXTBOX = 4,
+    OE_ROLE_CHECKBOX= 5,
+    OE_ROLE_LIST    = 6,
+    OE_ROLE_GROUP   = 7
+};
+
+typedef struct OpenEPL_PropertyDesc {
+    const char *name;          /* surface property name, e.g. "text"        */
+    int32_t     tag;           /* OE_SDT_* value type                       */
+    const char *default_value; /* textual default; NULL = none              */
+} OpenEPL_PropertyDesc;
+
+typedef struct OpenEPL_EventDesc {
+    const char *name;          /* surface event name, e.g. "click"          */
+} OpenEPL_EventDesc;
+
+typedef struct OpenEPL_ComponentDesc {
+    const char                 *name;        /* surface type name, e.g. "button" */
+    int32_t                     a11y_role;   /* OE_ROLE_* (D16)                  */
+    int32_t                     property_count;
+    const OpenEPL_PropertyDesc *properties;
+    int32_t                     event_count;
+    const OpenEPL_EventDesc    *events;
+} OpenEPL_ComponentDesc;
+
 typedef struct OpenEPL_CommandDesc {
     const char    *name;      /* surface command name (English)             */
     const char    *symbol;    /* link symbol of the OpenEPL_CommandFn impl   */
@@ -116,6 +158,9 @@ typedef struct OpenEPL_LibInfo {
     int32_t                     ver_build;
     int32_t                     command_count;
     const OpenEPL_CommandDesc  *commands;
+    /* Visual components contributed by this library (may be 0 / NULL). */
+    int32_t                       component_count;
+    const OpenEPL_ComponentDesc  *components;
 } OpenEPL_LibInfo;
 
 /* THE single required export (EPL: GetNewInf). */

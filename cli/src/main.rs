@@ -92,7 +92,7 @@ fn cmd_emit(rest: &[String]) -> i32 {
         }
     };
     match compile(&input) {
-        Ok((ll, _)) => {
+        Ok((ll, _plan)) => {
             print!("{ll}");
             0
         }
@@ -113,7 +113,7 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
     };
     let out_bin = output.unwrap_or_else(|| default_output(&input));
 
-    let (ll, impl_sources) = match compile(&input) {
+    let (ll, plan) = match compile(&input) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
@@ -128,7 +128,7 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
     }
 
     let repo_root = find_repo_root().expect("runtime located during compile()");
-    if let Err(code) = clang_link(&ll_path, &repo_root, &impl_sources, &out_bin) {
+    if let Err(code) = clang_link(&ll_path, &repo_root, &plan, &out_bin) {
         return code;
     }
     eprintln!("openepl: wrote {}", out_bin.display());
@@ -149,7 +149,7 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
 
 /// Parse, introspect libraries, validate, and lower to LLVM IR.
 /// Returns the `.ll` text and the implementation sources to static-link.
-fn compile(input: &Path) -> Result<(String, Vec<PathBuf>), String> {
+fn compile(input: &Path) -> Result<(String, libload::LibPlan), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let module = parse(&src).map_err(|e| e.to_string())?;
@@ -177,7 +177,7 @@ fn compile(input: &Path) -> Result<(String, Vec<PathBuf>), String> {
         ));
     }
     let ll = lower_module(&module, &plan.registry).map_err(|e| e.to_string())?;
-    Ok((ll, plan.impl_sources))
+    Ok((ll, plan))
 }
 
 fn default_output(input: &Path) -> PathBuf {
@@ -190,10 +190,13 @@ fn default_output(input: &Path) -> PathBuf {
 fn clang_link(
     ll_path: &Path,
     repo_root: &Path,
-    impl_sources: &[PathBuf],
+    plan: &libload::LibPlan,
     out_bin: &Path,
 ) -> Result<(), i32> {
-    let mut cmd = Command::new("clang");
+    let cfg = &plan.build;
+    // C++ is only needed when a library that requires it is actually used, so a
+    // console program never drags in the UI stack or libstdc++ (ADR 0006).
+    let mut cmd = Command::new(if cfg.needs_cxx { "clang++" } else { "clang" });
     cmd.arg("-O0")
         .arg("-ffunction-sections")
         .arg("-fdata-sections")
@@ -204,8 +207,49 @@ fn clang_link(
         .arg("-I")
         .arg(repo_root.join("runtime"))
         .arg(ll_path);
-    for s in impl_sources {
+    for d in &cfg.include_dirs {
+        cmd.arg("-I").arg(d);
+    }
+    for d in &cfg.defines {
+        cmd.arg(format!("-D{d}"));
+    }
+    match libload::pkg_config_flags(&cfg.pkg_config, "--cflags") {
+        Ok(flags) => {
+            for f in flags {
+                cmd.arg(f);
+            }
+        }
+        Err(e) => {
+            eprintln!("openepl: {e}");
+            return Err(1);
+        }
+    }
+    // When any library needs C++ the driver is clang++, which would otherwise
+    // compile our .c files as C++ and mangle their symbols (breaking the C ABI
+    // the emitted IR calls). Mark each source's language explicitly.
+    for s in &plan.impl_sources {
+        let is_cxx = matches!(
+            s.extension().and_then(|e| e.to_str()),
+            Some("cpp") | Some("cc") | Some("cxx")
+        );
+        if cfg.needs_cxx {
+            cmd.arg("-x").arg(if is_cxx { "c++" } else { "c" });
+        }
         cmd.arg(s);
+    }
+    for a in &cfg.link_args {
+        cmd.arg(a);
+    }
+    match libload::pkg_config_flags(&cfg.pkg_config, "--libs") {
+        Ok(flags) => {
+            for f in flags {
+                cmd.arg(f);
+            }
+        }
+        Err(e) => {
+            eprintln!("openepl: {e}");
+            return Err(1);
+        }
     }
     cmd.arg("-lm"); // libm for the floating-point commands
     cmd.arg("-o").arg(out_bin);

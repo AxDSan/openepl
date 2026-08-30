@@ -13,6 +13,8 @@ pub enum Tok {
     Let,
     Call,
     Use,
+    Form,
+    On,
     // Literals / identifiers
     Ident(String),
     Int(i64),
@@ -158,6 +160,8 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     "let" => Tok::Let,
                     "call" => Tok::Call,
                     "use" => Tok::Use,
+                    "form" => Tok::Form,
+                    "on" => Tok::On,
                     _ => Tok::Ident(word.to_string()),
                 };
                 push(&mut out, tok, line);

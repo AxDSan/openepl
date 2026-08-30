@@ -16,7 +16,7 @@
 //! ```
 
 use crate::lexer::{lex, Spanned, Tok};
-use crate::{BinOp, Expr, Item, Module, Stmt, Sub, Ty};
+use crate::{BinOp, Component, Expr, Form, Item, Module, Stmt, Sub, Ty};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -110,6 +110,7 @@ impl Parser {
             self.skip_newlines();
             match self.peek() {
                 Tok::Sub => items.push(Item::Sub(self.sub()?)),
+                Tok::Form => items.push(Item::Form(self.form()?)),
                 Tok::Eof => break,
                 other => {
                     return self.err(format!("expected `sub` or end of file, found {other:?}"))
@@ -143,6 +144,116 @@ impl Parser {
             self.bump();
         }
         Ok(Sub { name, body })
+    }
+
+    /// ```text
+    /// form      := "form" IDENT NEWLINE member* "end" NEWLINE
+    /// member    := property | binding | component
+    /// property  := IDENT "=" expr NEWLINE
+    /// binding   := "on" IDENT ":" IDENT NEWLINE
+    /// component := IDENT IDENT NEWLINE (property | binding)* "end" NEWLINE
+    /// ```
+    fn form(&mut self) -> Result<Form, ParseError> {
+        self.expect(&Tok::Form, "`form`")?;
+        let name = self.ident("form name")?;
+        self.expect(&Tok::Newline, "newline after form name")?;
+
+        let mut form = Form {
+            name,
+            properties: Vec::new(),
+            handlers: Vec::new(),
+            children: Vec::new(),
+        };
+        loop {
+            self.skip_newlines();
+            match self.peek().clone() {
+                Tok::End => {
+                    self.bump();
+                    break;
+                }
+                Tok::On => {
+                    let (event, handler) = self.binding()?;
+                    form.handlers.push((event, handler));
+                }
+                Tok::Ident(first) => {
+                    self.bump();
+                    if matches!(self.peek(), Tok::Eq) {
+                        self.bump();
+                        let value = self.expr()?;
+                        self.expect(&Tok::Newline, "newline after property")?;
+                        form.properties.push((first, value));
+                    } else {
+                        form.children.push(self.component(first)?);
+                    }
+                }
+                Tok::Eof => {
+                    return self.err("unexpected end of file inside `form` (missing `end`)")
+                }
+                other => {
+                    return self.err(format!(
+                        "expected a property, component, `on`, or `end`, found {other:?}"
+                    ))
+                }
+            }
+        }
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(form)
+    }
+
+    /// A component instance; `type_name` has already been consumed.
+    fn component(&mut self, type_name: String) -> Result<Component, ParseError> {
+        let id = self.ident("component id")?;
+        self.expect(&Tok::Newline, "newline after component id")?;
+        let mut c = Component {
+            type_name,
+            id,
+            properties: Vec::new(),
+            handlers: Vec::new(),
+        };
+        loop {
+            self.skip_newlines();
+            match self.peek().clone() {
+                Tok::End => {
+                    self.bump();
+                    break;
+                }
+                Tok::On => {
+                    let (event, handler) = self.binding()?;
+                    c.handlers.push((event, handler));
+                }
+                Tok::Ident(name) => {
+                    self.bump();
+                    self.expect(&Tok::Eq, "`=` after property name")?;
+                    let value = self.expr()?;
+                    self.expect(&Tok::Newline, "newline after property")?;
+                    c.properties.push((name, value));
+                }
+                Tok::Eof => {
+                    return self.err("unexpected end of file inside component (missing `end`)")
+                }
+                other => {
+                    return self.err(format!(
+                        "expected a property, `on`, or `end`, found {other:?}"
+                    ))
+                }
+            }
+        }
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(c)
+    }
+
+    /// `on <event>: <subroutine>`
+    fn binding(&mut self) -> Result<(String, String), ParseError> {
+        self.expect(&Tok::On, "`on`")?;
+        let event = self.ident("event name")?;
+        self.expect(&Tok::Colon, "`:` after event name")?;
+        let handler = self.ident("handler subroutine name")?;
+        self.expect(&Tok::Newline, "newline after event binding")?;
+        Ok((event, handler))
     }
 
     fn stmt_let(&mut self) -> Result<Stmt, ParseError> {
@@ -263,10 +374,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_form_with_component_and_binding() {
+        let src = "module m\nuse ui\nform win\n  title = \"Hi\"\n  width = 320\n  button ok\n    text = \"Go\"\n    on click: handler\n  end\nend\nsub handler\n  call print_text(\"hi\")\nend\n";
+        let m = parse(src).unwrap();
+        assert_eq!(m.uses, vec!["ui"]);
+        let f = m.forms().next().expect("a form");
+        assert_eq!(f.name, "win");
+        assert_eq!(f.properties.len(), 2);
+        assert_eq!(f.children.len(), 1);
+        let c = &f.children[0];
+        assert_eq!((c.type_name.as_str(), c.id.as_str()), ("button", "ok"));
+        assert_eq!(
+            c.handlers,
+            vec![("click".to_string(), "handler".to_string())]
+        );
+        assert!(m.is_gui());
+    }
+
+    #[test]
     fn precedence() {
         // 2 + 3 * 4 == 2 + (3*4)
         let m = parse("module m\nsub main\n  let x: int = 2 + 3 * 4\nend\n").unwrap();
-        let Item::Sub(s) = &m.items[0];
+        let Item::Sub(s) = &m.items[0] else {
+            panic!("expected a subroutine")
+        };
         match &s.body[0] {
             Stmt::Let {
                 value: Expr::Bin(BinOp::Add, _, r),

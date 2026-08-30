@@ -34,3 +34,6 @@ codedb.snapshot
 
 # KDE folder metadata
 .directory
+
+# Vendored third-party sources (fetch with tools/fetch-rmlui.sh)
+/vendor/

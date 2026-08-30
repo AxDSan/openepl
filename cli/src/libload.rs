@@ -20,6 +20,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use openepl_ir::registry::{ComponentDesc, PropertyDesc};
 use openepl_ir::{Registry, Signature, Ty};
 
 extern "C" {
@@ -40,6 +41,28 @@ struct CommandDescC {
 }
 
 #[repr(C)]
+struct PropertyDescC {
+    name: *const c_char,
+    tag: i32,
+    default_value: *const c_char,
+}
+
+#[repr(C)]
+struct EventDescC {
+    name: *const c_char,
+}
+
+#[repr(C)]
+struct ComponentDescC {
+    name: *const c_char,
+    a11y_role: i32,
+    property_count: i32,
+    properties: *const PropertyDescC,
+    event_count: i32,
+    events: *const EventDescC,
+}
+
+#[repr(C)]
 struct LibInfoC {
     abi_version: i32,
     name: *const c_char,
@@ -49,22 +72,41 @@ struct LibInfoC {
     ver_build: i32,
     command_count: i32,
     commands: *const CommandDescC,
+    component_count: i32,
+    components: *const ComponentDescC,
 }
 
 const OPENEPL_ABI_VERSION: i32 = 1;
 
 /// The result of resolving a module's libraries.
 pub struct LibPlan {
-    /// Combined command registry across all loaded libraries.
+    /// Combined command + component registry across all loaded libraries.
     pub registry: Registry,
     /// Implementation sources to static-link into the program.
     pub impl_sources: Vec<PathBuf>,
+    /// Extra compiler/linker configuration contributed by libraries that need
+    /// it (the UI stack, for example). Only populated for libraries actually
+    /// used, so a console program never links the UI (ADR 0006).
+    pub build: BuildConfig,
+}
+
+/// Compiler/linker additions a library needs, from its `lib.json`.
+#[derive(Debug, Default, Clone)]
+pub struct BuildConfig {
+    pub include_dirs: Vec<PathBuf>,
+    pub extra_sources: Vec<PathBuf>,
+    pub defines: Vec<String>,
+    pub pkg_config: Vec<String>,
+    pub link_args: Vec<String>,
+    /// Any library needed C++, so the link step must use clang++.
+    pub needs_cxx: bool,
 }
 
 /// Resolve `core` + each `use`d library under `repo_root`.
 pub fn load(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
     let mut registry = Registry::new();
     let mut impl_sources = Vec::new();
+    let mut build = BuildConfig::default();
 
     // (library name, directory) — core is implicit and first.
     let mut libs: Vec<(String, PathBuf)> = vec![("core".into(), repo_root.join("runtime"))];
@@ -79,26 +121,48 @@ pub fn load(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
                 dir.display()
             ));
         }
-        let sources = c_sources(dir)?;
-        // Introspection .so: everything except the program entry.
-        let so_srcs: Vec<&PathBuf> = sources
+        let manifest = Manifest::load(dir, repo_root)?;
+        manifest
+            .check_requirements()
+            .map_err(|e| format!("library `{name}`: {e}"))?;
+
+        let mut sources = c_sources(dir)?;
+        sources.extend(manifest.extra_sources.iter().cloned());
+
+        // Introspection .so: the metadata TU alone. It references command
+        // implementations by symbol NAME, not by pointer, so it has no
+        // dependency on them — which keeps this .so tiny, quick to build, and
+        // free of the implementation's link requirements (a static RmlUi, for
+        // instance, is not position-independent and could not go in a .so).
+        let so_srcs: Vec<PathBuf> = sources
             .iter()
-            .filter(|p| filename(p) != "oe_start.c")
+            .filter(|p| filename(p).ends_with("_libinfo.c"))
+            .cloned()
             .collect();
-        // Impl sources to link: everything except the metadata TU.
+        if so_srcs.is_empty() {
+            return Err(format!(
+                "library `{name}`: no *_libinfo.c metadata source found in {}",
+                dir.display()
+            ));
+        }
+        // Impl sources to link: everything except the metadata TU, which must
+        // never reach a shipped program (ADR 0003/D12).
         for p in &sources {
             if !filename(p).ends_with("_libinfo.c") {
                 impl_sources.push(p.clone());
             }
         }
 
-        let so_path = build_introspection_so(repo_root, name, &so_srcs)?;
+        build.merge(&manifest);
+
+        let so_path = build_introspection_so(repo_root, name, &so_srcs, &manifest)?;
         introspect_into(&so_path, name, &mut registry)?;
     }
 
     Ok(LibPlan {
         registry,
         impl_sources,
+        build,
     })
 }
 
@@ -109,12 +173,15 @@ fn filename(p: &Path) -> String {
         .to_string()
 }
 
-/// All `.c` files directly in `dir`, sorted for determinism.
+/// All C/C++ sources directly in `dir`, sorted for determinism.
 fn c_sources(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
         let p = entry.map_err(|e| e.to_string())?.path();
-        if p.extension().and_then(|s| s.to_str()) == Some("c") {
+        if matches!(
+            p.extension().and_then(|s| s.to_str()),
+            Some("c") | Some("cpp") | Some("cc") | Some("cxx")
+        ) {
             out.push(p);
         }
     }
@@ -126,12 +193,14 @@ fn c_sources(dir: &Path) -> Result<Vec<PathBuf>, String> {
 fn build_introspection_so(
     repo_root: &Path,
     name: &str,
-    sources: &[&PathBuf],
+    sources: &[PathBuf],
+    manifest: &Manifest,
 ) -> Result<PathBuf, String> {
     let build_dir = std::env::temp_dir().join("openepl-build");
     std::fs::create_dir_all(&build_dir).map_err(|e| e.to_string())?;
     let so_path = build_dir.join(format!("lib{name}_introspect_{}.so", std::process::id()));
 
+    // Always plain C: the metadata TU has no implementation dependencies.
     let mut cmd = Command::new("clang");
     cmd.arg("-shared")
         .arg("-fPIC")
@@ -139,10 +208,16 @@ fn build_introspection_so(
         .arg(repo_root.join("abi"))
         .arg("-I")
         .arg(repo_root.join("runtime")); // for openepl_core.h
+    for d in &manifest.include_dirs {
+        cmd.arg("-I").arg(d);
+    }
+    for d in &manifest.defines {
+        cmd.arg(format!("-D{d}"));
+    }
     for s in sources {
         cmd.arg(s);
     }
-    cmd.arg("-lm").arg("-o").arg(&so_path);
+    cmd.arg("-o").arg(&so_path);
 
     let status = cmd.status().map_err(|e| format!("invoke clang: {e}"))?;
     if !status.success() {
@@ -229,6 +304,43 @@ unsafe fn register_commands(
             ));
         }
     }
+
+    // Visual components (PRD D9/D11) come through the same LibInfo mechanism.
+    let ccount = info.component_count.max(0) as isize;
+    for i in 0..ccount {
+        let cd = &*info.components.offset(i);
+        let name = CStr::from_ptr(cd.name).to_string_lossy().into_owned();
+
+        let mut properties = Vec::new();
+        for pi in 0..cd.property_count.max(0) as isize {
+            let pd = &*cd.properties.offset(pi);
+            let pname = CStr::from_ptr(pd.name).to_string_lossy().into_owned();
+            let ty = Ty::from_sdt_tag(pd.tag).ok_or_else(|| {
+                format!(
+                    "component `{name}` in `{lib}`: property `{pname}` has unsupported tag {}",
+                    pd.tag
+                )
+            })?;
+            properties.push(PropertyDesc { name: pname, ty });
+        }
+
+        let mut events = Vec::new();
+        for ei in 0..cd.event_count.max(0) as isize {
+            let ed = &*cd.events.offset(ei);
+            events.push(CStr::from_ptr(ed.name).to_string_lossy().into_owned());
+        }
+
+        if !registry.insert_component(ComponentDesc {
+            name: name.clone(),
+            a11y_role: cd.a11y_role,
+            properties,
+            events,
+        }) {
+            return Err(format!(
+                "component `{name}` (from `{lib}`) collides with an already-registered component"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -266,4 +378,168 @@ mod tests {
             );
         }
     }
+}
+
+/// A library's `lib.json`: the extra build configuration it needs.
+///
+/// Parsed with a small purpose-built reader rather than pulling in a JSON crate
+/// — the schema is fixed and tiny (flat string arrays plus one bool), and the
+/// compiler has no other runtime dependencies.
+#[derive(Debug, Default, Clone)]
+pub struct Manifest {
+    pub cxx: bool,
+    pub include_dirs: Vec<PathBuf>,
+    pub extra_sources: Vec<PathBuf>,
+    pub defines: Vec<String>,
+    pub pkg_config: Vec<String>,
+    pub link_args: Vec<String>,
+    pub requires: Vec<PathBuf>,
+    pub requires_hint: String,
+}
+
+impl Manifest {
+    /// Load `<dir>/lib.json` if present; an absent manifest is not an error
+    /// (plain C libraries like `core` need no configuration).
+    fn load(dir: &Path, repo_root: &Path) -> Result<Manifest, String> {
+        let path = dir.join("lib.json");
+        if !path.is_file() {
+            return Ok(Manifest::default());
+        }
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+
+        let mut m = Manifest {
+            cxx: json_bool(&text, "cxx"),
+            defines: json_array(&text, "defines"),
+            pkg_config: json_array(&text, "pkg_config"),
+            link_args: json_array(&text, "link_args"),
+            requires_hint: json_string(&text, "requires_hint"),
+            ..Default::default()
+        };
+        m.include_dirs = json_array(&text, "include_dirs")
+            .iter()
+            .map(|p| repo_root.join(p))
+            .collect();
+        m.extra_sources = json_array(&text, "extra_sources")
+            .iter()
+            .map(|p| repo_root.join(p))
+            .collect();
+        m.requires = json_array(&text, "requires")
+            .iter()
+            .map(|p| repo_root.join(p))
+            .collect();
+        m.link_args = m
+            .link_args
+            .iter()
+            .map(|a| absolutise(repo_root, a))
+            .collect();
+        Ok(m)
+    }
+
+    /// Fail with the library's own hint if a prerequisite (e.g. a vendored
+    /// dependency) is missing — a clear message beats a wall of linker errors.
+    fn check_requirements(&self) -> Result<(), String> {
+        for r in &self.requires {
+            if !r.exists() {
+                return Err(if self.requires_hint.is_empty() {
+                    format!("missing prerequisite: {}", r.display())
+                } else {
+                    format!("{} (missing: {})", self.requires_hint, r.display())
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BuildConfig {
+    fn merge(&mut self, m: &Manifest) {
+        self.needs_cxx |= m.cxx;
+        self.include_dirs.extend(m.include_dirs.iter().cloned());
+        self.extra_sources.extend(m.extra_sources.iter().cloned());
+        self.defines.extend(m.defines.iter().cloned());
+        self.pkg_config.extend(m.pkg_config.iter().cloned());
+        self.link_args.extend(m.link_args.iter().cloned()); // already absolutised
+    }
+}
+
+/// Resolve a repo-relative `-L` path in a link argument to an absolute one.
+fn absolutise(repo_root: &Path, arg: &str) -> String {
+    if let Some(rest) = arg.strip_prefix("-L") {
+        if !rest.starts_with('/') {
+            return format!("-L{}", repo_root.join(rest).display());
+        }
+    }
+    arg.to_string()
+}
+
+/// Run `pkg-config <mode> <packages...>` and return the flags.
+pub fn pkg_config_flags(packages: &[String], mode: &str) -> Result<Vec<String>, String> {
+    if packages.is_empty() {
+        return Ok(Vec::new());
+    }
+    let out = Command::new("pkg-config")
+        .arg(mode)
+        .args(packages)
+        .output()
+        .map_err(|e| format!("pkg-config: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "pkg-config {mode} {} failed: {}",
+            packages.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect())
+}
+
+// --- minimal JSON readers for the fixed lib.json schema -------------------
+
+fn json_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\"");
+    let start = text.find(&needle)? + needle.len();
+    let rest = text[start..].trim_start();
+    rest.strip_prefix(':').map(|r| r.trim_start())
+}
+
+fn json_bool(text: &str, key: &str) -> bool {
+    json_field(text, key).is_some_and(|r| r.starts_with("true"))
+}
+
+fn json_string(text: &str, key: &str) -> String {
+    json_field(text, key)
+        .and_then(|r| r.strip_prefix('"'))
+        .and_then(|r| r.find('"').map(|e| r[..e].to_string()))
+        .unwrap_or_default()
+}
+
+fn json_array(text: &str, key: &str) -> Vec<String> {
+    let Some(rest) = json_field(text, key) else {
+        return Vec::new();
+    };
+    let Some(rest) = rest.strip_prefix('[') else {
+        return Vec::new();
+    };
+    let Some(end) = rest.find(']') else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut chars = rest[..end].chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut item = String::new();
+        for c in chars.by_ref() {
+            if c == '"' {
+                break;
+            }
+            item.push(c);
+        }
+        out.push(item);
+    }
+    out
 }

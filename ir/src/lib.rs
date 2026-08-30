@@ -149,11 +149,38 @@ pub struct Sub {
     pub body: Vec<Stmt>,
 }
 
-/// A top-level module item.  The reserved seam for `Form`, `Component`,
-/// `UserType`, `Const`, `Enum` (PRD §5.1 / §4.5).
+/// One component instance inside a form: a type, an id, literal property
+/// values, and event bindings to subroutines.  This is the IR half of the
+/// component model (PRD D9/D11) — the designer will emit exactly this.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Component {
+    /// Registered component type name, e.g. `button`.
+    pub type_name: String,
+    /// Author-chosen instance id, e.g. `ok_button`.  **Compile-time only** in
+    /// v0: ids are not emitted into the binary (G8).
+    pub id: String,
+    /// Property assignments, in source order: `(name, literal)`.
+    pub properties: Vec<(String, Expr)>,
+    /// Event bindings: `(event name, handler subroutine name)`.
+    pub handlers: Vec<(String, String)>,
+}
+
+/// A form: the root component plus its children (PRD §4.5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Form {
+    pub name: String,
+    /// Properties of the form itself (title, size, …).
+    pub properties: Vec<(String, Expr)>,
+    pub handlers: Vec<(String, String)>,
+    pub children: Vec<Component>,
+}
+
+/// A top-level module item.  Remaining seam: `UserType`, `Const`, `Enum`
+/// (PRD §5.1 / §4.5).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Sub(Sub),
+    Form(Form),
 }
 
 /// A whole compilation unit.
@@ -169,11 +196,24 @@ pub struct Module {
 
 impl Module {
     /// Iterate the subroutines.
-    // filter_map (not map) so this stays correct when `Item` gains non-Sub variants.
-    #[allow(clippy::unnecessary_filter_map)]
     pub fn subs(&self) -> impl Iterator<Item = &Sub> {
         self.items.iter().filter_map(|i| match i {
             Item::Sub(s) => Some(s),
+            _ => None,
         })
+    }
+
+    /// Iterate the forms.
+    pub fn forms(&self) -> impl Iterator<Item = &Form> {
+        self.items.iter().filter_map(|i| match i {
+            Item::Form(f) => Some(f),
+            _ => None,
+        })
+    }
+
+    /// A GUI module (one that declares a form) links the UI stack and uses the
+    /// form entry; a console module keeps the original `main` path.
+    pub fn is_gui(&self) -> bool {
+        self.forms().next().is_some()
     }
 }

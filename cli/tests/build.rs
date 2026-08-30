@@ -11,10 +11,13 @@ fn repo() -> PathBuf {
 }
 
 /// Build `<repo>/examples/<name>.oir` to a temp binary; return its path.
-fn build(name: &str) -> PathBuf {
+///
+/// `tag` disambiguates the output path so tests that build the same example can
+/// run in parallel without clobbering each other's binary.
+fn build_as(name: &str, tag: &str) -> PathBuf {
     let repo = repo();
     let example = repo.join("examples").join(format!("{name}.oir"));
-    let out_bin = std::env::temp_dir().join(format!("openepl_{name}_test"));
+    let out_bin = std::env::temp_dir().join(format!("openepl_{name}_{tag}_test"));
     let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
         .args([
             "build",
@@ -27,6 +30,10 @@ fn build(name: &str) -> PathBuf {
         .expect("run openepl");
     assert!(status.success(), "openepl build {name} failed");
     out_bin
+}
+
+fn build(name: &str) -> PathBuf {
+    build_as(name, "main")
 }
 
 fn run(bin: &Path) -> String {
@@ -111,4 +118,52 @@ fn hello_library_via_abi() {
     let stdout = run(&build("hellolib"));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines, vec!["Hello, OpenEPL!", "HELLO, WORLD!"]);
+}
+
+/// PRD Phase 2 (RAD half): a form + button + handler authored in IR compiles to
+/// a native GUI binary, and a click reaches the handler subroutine.
+///
+/// Runs headlessly through the UI test hooks (see abi/openepl_ui.h): render a
+/// few frames, dispatch a synthetic click at widget handle 3 (the button), exit.
+#[test]
+fn form_builds_and_click_reaches_handler() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored (run tools/fetch-rmlui.sh); skipping GUI test");
+        return;
+    }
+    let bin = build("form");
+
+    let out = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "3")
+        .env("OPENEPL_UI_SYNTH_CLICK", "3")
+        .output()
+        .expect("run form binary");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("button clicked!"),
+        "click did not reach the handler; stdout was:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The UI stack must link ONLY into modules that declare a form. Without this,
+/// every console program would carry megabytes of widget toolkit (and the
+/// dead-strip guarantee, PRD M2/D3, would be meaningless).
+#[test]
+fn console_programs_do_not_link_the_ui() {
+    let bin = build_as("demo", "ldd");
+    let ldd = match Command::new("ldd").arg(&bin).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => {
+            eprintln!("ldd unavailable; skipping");
+            return;
+        }
+    };
+    for forbidden in ["libSDL2", "libGL.so", "libfreetype"] {
+        assert!(
+            !ldd.contains(forbidden),
+            "console binary links `{forbidden}` — the UI stack is leaking into non-GUI programs:\n{ldd}"
+        );
+    }
 }
