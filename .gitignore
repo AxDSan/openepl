@@ -1,0 +1,29 @@
+# Build output
+/build/
+/dist/
+/target/
+*.o
+*.obj
+*.lib
+*.a
+*.exe
+*.dll
+*.so
+*.dylib
+*.sys
+*.ko
+*.pdb
+
+# LLVM/toolchain scratch
+*.ll
+*.bc
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Scratch
+/scratch/
+/tmp/
