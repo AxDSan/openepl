@@ -91,13 +91,73 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         }
     }
 
+    // Module-level variables, and their types.
+    let globals: Vec<_> = m.globals().collect();
+    let mut global_types: HashMap<String, Ty> = HashMap::new();
+    for g in &globals {
+        // A global's initializer may call commands but must not read another
+        // global: order-dependent global initialisation is a swamp, and a clear
+        // error now beats a subtle one later.
+        if let Err(e) = check_initializer(&g.value, &global_types, reg) {
+            push(format!("in initializer of `{}`: {e}", g.name));
+        }
+        match type_of_expr_in(&g.value, &HashMap::new(), reg, &components) {
+            Ok(got) if got == g.ty => {}
+            Ok(got) => push(format!(
+                "`var {}` declared {} but its initializer is {}",
+                g.name,
+                g.ty.as_str(),
+                got.as_str()
+            )),
+            Err(e) => push(format!("in initializer of `{}`: {e}", g.name)),
+        }
+        if global_types.insert(g.name.clone(), g.ty).is_some() {
+            push(format!(
+                "module variable `{}` is declared more than once",
+                g.name
+            ));
+        }
+    }
+
+    // Module variables, component ids and subroutine names share ONE namespace.
+    // `count = 5` and `count.text = "x"` naming the same thing would be
+    // incoherent, so a collision is an error while it is still cheap to say so.
+    for name in global_types.keys() {
+        if components.contains_key(name) {
+            push(format!(
+                "`{name}` is both a module variable and a component id"
+            ));
+        }
+        if sub_names.contains(name.as_str()) {
+            push(format!(
+                "`{name}` is both a module variable and a subroutine"
+            ));
+        }
+    }
+    for id in components.keys() {
+        if sub_names.contains(id.as_str()) {
+            push(format!("`{id}` is both a component id and a subroutine"));
+        }
+    }
+
     // --- subroutine bodies -----------------------------------------------
     for item in &m.items {
         let Item::Sub(sub) = item else { continue };
-        let mut vars: HashMap<String, Ty> = HashMap::new();
+        // Module variables are in scope in every subroutine.
+        let mut vars: HashMap<String, Ty> = global_types.clone();
+        let mut mutable_locals: HashSet<String> = HashSet::new();
+        // Locals must be tracked apart from module variables: `vars` is seeded
+        // with the globals so they resolve, but they are not locals and the
+        // immutability rule differs.
+        let mut local_names: HashSet<String> = HashSet::new();
         for stmt in &sub.body {
             match stmt {
-                Stmt::Let { name, ty, value } => {
+                Stmt::Let {
+                    name,
+                    ty,
+                    value,
+                    mutable,
+                } => {
                     match type_of_expr_in(value, &vars, reg, &components) {
                         Ok(got) if got == *ty => {}
                         Ok(got) => push(format!(
@@ -113,6 +173,47 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                             "in `{}`: variable `{name}` is defined more than once",
                             sub.name
                         ));
+                    }
+                    local_names.insert(name.clone());
+                    if *mutable {
+                        mutable_locals.insert(name.clone());
+                    }
+                }
+                Stmt::Assign { name, value } => {
+                    // Resolve against locals first, then module variables.
+                    let target = vars
+                        .get(name)
+                        .copied()
+                        .or_else(|| global_types.get(name).copied());
+                    match target {
+                        None => push(format!(
+                            "in `{}`: assignment to undefined variable `{name}`",
+                            sub.name
+                        )),
+                        Some(expected) => {
+                            let is_local = local_names.contains(name);
+                            let is_mutable = if is_local {
+                                mutable_locals.contains(name)
+                            } else {
+                                true // module variables are always `var`
+                            };
+                            if !is_mutable {
+                                push(format!(
+                                    "in `{}`: `{name}` is immutable — declare it with `var` instead of `let` to allow assignment",
+                                    sub.name
+                                ));
+                            }
+                            match type_of_expr_in(value, &vars, reg, &components) {
+                                Ok(got) if got == expected => {}
+                                Ok(got) => push(format!(
+                                    "in `{}`: `{name}` is {}, cannot assign {}",
+                                    sub.name,
+                                    expected.as_str(),
+                                    got.as_str()
+                                )),
+                                Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                            }
+                        }
                     }
                 }
                 Stmt::Call { cmd, args } => match reg.get(cmd) {
@@ -150,6 +251,35 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         Ok(())
     } else {
         Err(errs)
+    }
+}
+
+/// A module variable's initializer may call commands but must not read another
+/// module variable (see the note where this is called).
+fn check_initializer(
+    e: &Expr,
+    globals: &HashMap<String, Ty>,
+    reg: &Registry,
+) -> Result<(), String> {
+    match e {
+        Expr::Var(name) if globals.contains_key(name) => Err(format!(
+            "cannot read module variable `{name}` here; module variable initializers may use literals and command calls only"
+        )),
+        Expr::Var(name) => Err(format!("unknown variable `{name}`")),
+        Expr::Bin(_, l, r) => {
+            check_initializer(l, globals, reg)?;
+            check_initializer(r, globals, reg)
+        }
+        Expr::Call { args, .. } => {
+            for a in args {
+                check_initializer(a, globals, reg)?;
+            }
+            Ok(())
+        }
+        Expr::GetProperty { .. } => {
+            Err("cannot read a component property before the form exists".to_string())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -286,6 +416,45 @@ mod tests {
     fn rejects_void_in_expression() {
         let m = parse("module m\nsub main\n  let x: int = print_int(1)\nend\n").unwrap();
         assert!(validate(&m, &reg()).is_err());
+    }
+
+    #[test]
+    fn rejects_reassigning_a_let() {
+        let m = parse("module m\nsub main\n  let x: int = 1\n  x = 2\nend\n").unwrap();
+        let e = validate(&m, &reg()).unwrap_err();
+        assert!(
+            e.iter()
+                .any(|e| e.msg.contains("immutable") && e.msg.contains("var")),
+            "the error should name the fix: {e:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_assigning_a_var() {
+        let m = parse("module m\nsub main\n  var x: int = 1\n  x = 2\nend\n").unwrap();
+        assert!(validate(&m, &reg()).is_ok());
+    }
+
+    #[test]
+    fn rejects_global_reading_another_global() {
+        let m =
+            parse("module m\nvar a: int = 1\nvar b: int = a\nsub main\n  call print_int(b)\nend\n")
+                .unwrap();
+        assert!(validate(&m, &reg()).is_err());
+    }
+
+    #[test]
+    fn rejects_assigning_undefined() {
+        let m = parse("module m\nsub main\n  nope = 1\nend\n").unwrap();
+        assert!(validate(&m, &reg()).is_err());
+    }
+
+    #[test]
+    fn globals_are_visible_in_subs() {
+        let m =
+            parse("module m\nvar n: int = 5\nsub main\n  n = n + 1\n  call print_int(n)\nend\n")
+                .unwrap();
+        assert!(validate(&m, &reg()).is_ok(), "{:?}", validate(&m, &reg()));
     }
 
     #[test]

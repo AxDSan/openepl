@@ -73,10 +73,15 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         vars: HashMap::new(),
         used: BTreeSet::new(),
         ui_used: BTreeSet::new(),
+        globals: HashMap::new(),
+        allocas: Vec::new(),
         handles: HashMap::new(),
         component_types: HashMap::new(),
         tmp: 0,
     };
+    for g in m.globals() {
+        lo.globals.insert(g.name.clone(), g.ty);
+    }
 
     // Assign component handles BEFORE lowering subroutines: a handler may
     // address a component, and handles are compile-time constants derived from
@@ -90,12 +95,14 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     for sub in &subs {
         lo.body.clear();
         lo.vars.clear();
+        lo.allocas.clear();
         for stmt in &sub.body {
             lo.stmt(stmt)?;
         }
         functions.push_str(&format!(
-            "define void @{}() {{\nentry:\n{}  ret void\n}}\n\n",
+            "define void @{}() {{\nentry:\n{}{}  ret void\n}}\n\n",
             user_symbol(&sub.name),
+            lo.allocas.join(""),
             lo.body
         ));
     }
@@ -106,6 +113,12 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     // loop starts last, after start-up code has had its say.
     lo.body.clear();
     lo.vars.clear();
+    lo.allocas.clear();
+    // Module variables are initialised before anything else can observe them.
+    for g in m.globals() {
+        let v = lo.eval(&g.value)?;
+        lo.store_global(&g.name, &v);
+    }
     if let Some(form) = forms.first() {
         lo.form_build(form)?;
     }
@@ -125,6 +138,12 @@ fn user_symbol(name: &str) -> String {
     format!("oe_user_{name}")
 }
 
+/// Symbol for a module variable. `internal` linkage, so it is not exported and
+/// the name is dropped by `strip` in release builds (G8).
+fn global_symbol(name: &str) -> String {
+    format!("oe_g_{name}")
+}
+
 /// A lowered value: its slot type plus its LLVM operand (a literal or `%tN`).
 #[derive(Clone)]
 struct Val {
@@ -136,7 +155,14 @@ struct Lowerer<'a> {
     reg: &'a Registry,
     strings: Vec<String>,
     body: String,
-    vars: HashMap<String, Val>,
+    /// Local variables: name -> (alloca pointer, type). Every local is
+    /// alloca-backed, `let` and `var` alike — one lowering path, and `opt`'s
+    /// mem2reg reconstructs SSA for free when optimisation is enabled.
+    vars: HashMap<String, (String, Ty)>,
+    /// Module-level variables: name -> type. Storage is an LLVM global.
+    globals: HashMap<String, Ty>,
+    /// Allocas to emit at the top of the current function.
+    allocas: Vec<String>,
     /// Runtime command symbols actually referenced (drives declarations).
     used: BTreeSet<String>,
     /// UI-interface symbols referenced (declared separately; see finish()).
@@ -326,10 +352,34 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Reserve a stack slot, emitted at the top of the function.
+    fn alloca(&mut self, ty: Ty) -> String {
+        let slot = format!("%v{}", self.allocas.len());
+        self.allocas
+            .push(format!("  {slot} = alloca {}\n", llvm_ty(ty)));
+        slot
+    }
+
+    fn store_global(&mut self, name: &str, v: &Val) {
+        writeln!(
+            self.body,
+            "  store {} {}, ptr @{}",
+            llvm_ty(v.ty),
+            v.operand,
+            global_symbol(name)
+        )
+        .unwrap();
+    }
+
     fn stmt(&mut self, s: &openepl_ir::Stmt) -> Result<(), LowerError> {
         use openepl_ir::Stmt;
         match s {
-            Stmt::Let { name, ty, value } => {
+            Stmt::Let {
+                name,
+                ty,
+                value,
+                mutable: _,
+            } => {
                 let v = self.eval(value)?;
                 if v.ty != *ty {
                     return err(format!(
@@ -338,8 +388,37 @@ impl Lowerer<'_> {
                         v.ty.as_str()
                     ));
                 }
-                self.vars.insert(name.clone(), v);
+                let slot = self.alloca(*ty);
+                writeln!(
+                    self.body,
+                    "  store {} {}, ptr {slot}",
+                    llvm_ty(*ty),
+                    v.operand
+                )
+                .unwrap();
+                self.vars.insert(name.clone(), (slot, *ty));
                 Ok(())
+            }
+            Stmt::Assign { name, value } => {
+                let v = self.eval(value)?;
+                if let Some((slot, ty)) = self.vars.get(name).cloned() {
+                    if v.ty != ty {
+                        return err(format!("cannot assign {} to `{name}`", v.ty.as_str()));
+                    }
+                    writeln!(
+                        self.body,
+                        "  store {} {}, ptr {slot}",
+                        llvm_ty(ty),
+                        v.operand
+                    )
+                    .unwrap();
+                    Ok(())
+                } else if self.globals.contains_key(name) {
+                    self.store_global(name, &v);
+                    Ok(())
+                } else {
+                    err(format!("assignment to undefined variable `{name}`"))
+                }
             }
             Stmt::Call { cmd, args } => {
                 self.eval_call(cmd, args)?; // any return value discarded
@@ -463,9 +542,27 @@ impl Lowerer<'_> {
                     ),
                 })
             }
-            Expr::Var(name) => self.vars.get(name).cloned().ok_or_else(|| LowerError {
-                msg: format!("use of undefined variable `{name}`"),
-            }),
+            Expr::Var(name) => {
+                if let Some((slot, ty)) = self.vars.get(name).cloned() {
+                    let t = self.fresh();
+                    writeln!(self.body, "  {t} = load {}, ptr {slot}", llvm_ty(ty)).unwrap();
+                    Ok(Val { ty, operand: t })
+                } else if let Some(ty) = self.globals.get(name).copied() {
+                    let t = self.fresh();
+                    writeln!(
+                        self.body,
+                        "  {t} = load {}, ptr @{}",
+                        llvm_ty(ty),
+                        global_symbol(name)
+                    )
+                    .unwrap();
+                    Ok(Val { ty, operand: t })
+                } else {
+                    Err(LowerError {
+                        msg: format!("use of undefined variable `{name}`"),
+                    })
+                }
+            }
             Expr::Bin(op, l, r) => {
                 let lv = self.eval(l)?;
                 let rv = self.eval(r)?;
@@ -717,6 +814,28 @@ impl Lowerer<'_> {
         // The slot type mirrors OpenEPL_Slot (abi/openepl_abi.h): {tag, pad, value}.
         writeln!(out, "%Slot = type {{ i32, i32, i64 }}\n").unwrap();
 
+        // Module variables. Zero-initialised here; their declared initializers
+        // run at entry, so a `var` may call a command (`var t: int64 = now()`).
+        let mut gnames: Vec<(&String, &Ty)> = self.globals.iter().collect();
+        gnames.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, ty) in gnames {
+            let zero = match ty {
+                Ty::Double => "0.0",
+                Ty::Text => "null",
+                _ => "0",
+            };
+            writeln!(
+                out,
+                "@{} = internal global {} {zero}",
+                global_symbol(name),
+                llvm_ty(*ty)
+            )
+            .unwrap();
+        }
+        if !self.globals.is_empty() {
+            out.push('\n');
+        }
+
         for (id, s) in self.strings.iter().enumerate() {
             let encoded = encode_llvm_string(s);
             let bytes = s.len() + 1;
@@ -763,6 +882,7 @@ impl Lowerer<'_> {
 
         writeln!(out, "define i32 @ECodeStart() {{").unwrap();
         writeln!(out, "entry:").unwrap();
+        out.push_str(&self.allocas.join(""));
         out.push_str(&self.body);
         writeln!(out, "  ret i32 0").unwrap();
         writeln!(out, "}}").unwrap();

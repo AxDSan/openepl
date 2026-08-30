@@ -136,8 +136,15 @@ pub enum Expr {
 /// A single statement inside a subroutine body.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// `let NAME: TY = EXPR` — bind a local (immutable in v0.1).
-    Let { name: String, ty: Ty, value: Expr },
+    /// `let NAME: TY = EXPR` (immutable) or `var NAME: TY = EXPR` (mutable).
+    Let {
+        name: String,
+        ty: Ty,
+        value: Expr,
+        mutable: bool,
+    },
+    /// `NAME = EXPR` — assign to a mutable variable (local or module-level).
+    Assign { name: String, value: Expr },
     /// `call CMD(args...)` — a call in statement position; a non-void return is
     /// discarded.
     Call { cmd: String, args: Vec<Expr> },
@@ -189,6 +196,21 @@ pub struct Form {
 pub enum Item {
     Sub(Sub),
     Form(Form),
+    /// A module-level mutable variable: `var count: int = 0`.
+    ///
+    /// This is where state that must outlive a single event handler lives —
+    /// without it, an app has nowhere to keep a counter but the UI itself.
+    Var(GlobalVar),
+}
+
+/// A module-level variable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalVar {
+    pub name: String,
+    pub ty: Ty,
+    /// Initializer. A literal becomes a static initializer; anything else is
+    /// evaluated at program entry, in declaration order.
+    pub value: Expr,
 }
 
 /// A whole compilation unit.
@@ -207,6 +229,14 @@ impl Module {
     pub fn subs(&self) -> impl Iterator<Item = &Sub> {
         self.items.iter().filter_map(|i| match i {
             Item::Sub(s) => Some(s),
+            _ => None,
+        })
+    }
+
+    /// Iterate the module-level variables, in declaration order.
+    pub fn globals(&self) -> impl Iterator<Item = &GlobalVar> {
+        self.items.iter().filter_map(|i| match i {
+            Item::Var(v) => Some(v),
             _ => None,
         })
     }

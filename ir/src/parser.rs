@@ -16,7 +16,7 @@
 //! ```
 
 use crate::lexer::{lex, Spanned, Tok};
-use crate::{BinOp, Component, Expr, Form, Item, Module, Stmt, Sub, Ty};
+use crate::{BinOp, Component, Expr, Form, GlobalVar, Item, Module, Stmt, Sub, Ty};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -111,6 +111,7 @@ impl Parser {
             match self.peek() {
                 Tok::Sub => items.push(Item::Sub(self.sub()?)),
                 Tok::Form => items.push(Item::Form(self.form()?)),
+                Tok::Var => items.push(Item::Var(self.global_var()?)),
                 Tok::Eof => break,
                 other => {
                     return self.err(format!("expected `sub` or end of file, found {other:?}"))
@@ -133,10 +134,12 @@ impl Parser {
                     self.bump();
                     break;
                 }
-                Tok::Let => body.push(self.stmt_let()?),
+                Tok::Let => body.push(self.stmt_let(false)?),
+                Tok::Var => body.push(self.stmt_let(true)?),
                 Tok::Call => body.push(self.stmt_call()?),
-                // `component.property = expr`
-                Tok::Ident(_) => body.push(self.stmt_set_property()?),
+                // Either `name = expr` or `component.property = expr`; one
+                // token of lookahead past the identifier tells them apart.
+                Tok::Ident(_) => body.push(self.stmt_ident()?),
                 Tok::Eof => return self.err("unexpected end of file inside `sub` (missing `end`)"),
                 other => return self.err(format!("expected statement or `end`, found {other:?}")),
             }
@@ -248,21 +251,6 @@ impl Parser {
         Ok(c)
     }
 
-    /// `component.property = expr`
-    fn stmt_set_property(&mut self) -> Result<Stmt, ParseError> {
-        let component = self.ident("component name")?;
-        self.expect(&Tok::Dot, "`.` after component name")?;
-        let property = self.ident("property name")?;
-        self.expect(&Tok::Eq, "`=` in property assignment")?;
-        let value = self.expr()?;
-        self.expect(&Tok::Newline, "newline after property assignment")?;
-        Ok(Stmt::SetProperty {
-            component,
-            property,
-            value,
-        })
-    }
-
     /// `on <event>: <subroutine>`
     fn binding(&mut self) -> Result<(String, String), ParseError> {
         self.expect(&Tok::On, "`on`")?;
@@ -273,25 +261,75 @@ impl Parser {
         Ok((event, handler))
     }
 
-    fn stmt_let(&mut self) -> Result<Stmt, ParseError> {
-        self.expect(&Tok::Let, "`let`")?;
+    /// A module-level `var NAME: TY = EXPR`.
+    fn global_var(&mut self) -> Result<GlobalVar, ParseError> {
+        self.expect(&Tok::Var, "`var`")?;
         let name = self.ident("variable name")?;
         self.expect(&Tok::Colon, "`:` after variable name")?;
-        let ty = match self.bump() {
+        let ty = self.type_keyword()?;
+        self.expect(&Tok::Eq, "`=`")?;
+        let value = self.expr()?;
+        self.expect(&Tok::Newline, "newline after `var`")?;
+        Ok(GlobalVar { name, ty, value })
+    }
+
+    fn type_keyword(&mut self) -> Result<Ty, ParseError> {
+        match self.bump() {
             Tok::Ident(w) => match Ty::from_keyword(&w) {
-                Some(t) => t,
-                None => {
-                    return self.err(format!(
-                        "expected a type (int/int64/double/text), found `{w}`"
-                    ))
-                }
+                Some(t) => Ok(t),
+                None => self.err(format!(
+                    "expected a type (int/int64/double/text), found `{w}`"
+                )),
             },
-            other => return self.err(format!("expected a type, found {other:?}")),
-        };
+            other => self.err(format!("expected a type, found {other:?}")),
+        }
+    }
+
+    /// A statement starting with an identifier: assignment or property-set.
+    fn stmt_ident(&mut self) -> Result<Stmt, ParseError> {
+        let name = self.ident("variable or component name")?;
+        match self.peek() {
+            Tok::Eq => {
+                self.bump();
+                let value = self.expr()?;
+                self.expect(&Tok::Newline, "newline after assignment")?;
+                Ok(Stmt::Assign { name, value })
+            }
+            Tok::Dot => {
+                self.bump();
+                let property = self.ident("property name")?;
+                self.expect(&Tok::Eq, "`=` in property assignment")?;
+                let value = self.expr()?;
+                self.expect(&Tok::Newline, "newline after property assignment")?;
+                Ok(Stmt::SetProperty {
+                    component: name,
+                    property,
+                    value,
+                })
+            }
+            other => self.err(format!(
+                "expected `=` (assignment) or `.` (property) after `{name}`, found {other:?}"
+            )),
+        }
+    }
+
+    fn stmt_let(&mut self, mutable: bool) -> Result<Stmt, ParseError> {
+        self.expect(
+            if mutable { &Tok::Var } else { &Tok::Let },
+            "`let` or `var`",
+        )?;
+        let name = self.ident("variable name")?;
+        self.expect(&Tok::Colon, "`:` after variable name")?;
+        let ty = self.type_keyword()?;
         self.expect(&Tok::Eq, "`=`")?;
         let value = self.expr()?;
         self.expect(&Tok::Newline, "newline after `let`")?;
-        Ok(Stmt::Let { name, ty, value })
+        Ok(Stmt::Let {
+            name,
+            ty,
+            value,
+            mutable,
+        })
     }
 
     fn stmt_call(&mut self) -> Result<Stmt, ParseError> {

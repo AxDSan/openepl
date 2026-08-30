@@ -1,10 +1,11 @@
 # An app that changes at run time: clicking increments a counter.
-# Demonstrates reading and writing component properties from code.
 #
-# There are no mutable globals yet, so the count lives in the label's own text —
-# read it, add one, write it back.
+# The count lives in a module variable — state that outlives any single event
+# handler — rather than being read back out of the UI.
 module counter
 use ui
+
+var count: int = 0
 
 form main_window
   title  = "OpenEPL — counter"
@@ -33,7 +34,7 @@ form main_window
 end
 
 sub on_add
-  let current: int = text_to_int(count_label.text)
-  count_label.text = int_to_text(current + 1)
-  call print_text(concat("count = ", count_label.text))
+  count = count + 1
+  count_label.text = int_to_text(count)
+  call print_text(concat("count = ", int_to_text(count)))
 end
