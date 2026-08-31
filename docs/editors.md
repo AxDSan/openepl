@@ -8,11 +8,18 @@ this is why the toolchain does not ship an editor widget of its own (ADR 0012).
 
 | Feature | Status |
 | --- | --- |
-| Diagnostics (parse + type/semantic errors, on type) | ✅ |
-| Completion | planned |
-| Hover | planned |
-| Go to definition / find references | planned |
-| Formatting | planned |
+| Diagnostics (parse + type/semantic errors, as you type) | ✅ |
+| Completion (commands, components, `id.` properties and events, locals, keywords) | ✅ |
+| Hover (command signatures, declaration sites) | ✅ |
+| Go to definition | ✅ |
+| Find references (shadowing-aware) | ✅ |
+| Document symbols (outline) | ✅ |
+| Syntax highlighting | ✅ (VS Code grammar in `editors/vscode`) |
+| Rename, formatting, signature help | planned |
+
+Navigation is backed by a token-level index rather than the AST, so completion
+and go-to-definition keep working while the file is half-typed and does not
+parse — which is most of the time you are actually editing.
 
 Diagnostics cover the full front end: unknown commands, argument-count and type
 mismatches, assignment to a `let`, undefined variables, non-boolean conditions,
@@ -45,9 +52,20 @@ vim.api.nvim_create_autocmd("FileType", {
 
 ## VS Code
 
-There is no marketplace extension yet. Any generic LSP bridge extension works;
-point it at `openepl lsp` with `documentSelector: ["openepl"]` and map `.oir` to
-the `openepl` language id.
+`editors/vscode/` is a working extension: syntax highlighting, `.oir` file
+association, and an LSP client that launches `openepl lsp`. It is not published
+to the marketplace, so install it locally:
+
+```sh
+cd editors/vscode
+npm install
+# then either symlink it into your extensions folder…
+ln -s "$PWD" ~/.vscode/extensions/openepl
+# …or package it
+npx @vscode/vsce package && code --install-extension openepl-0.1.0.vsix
+```
+
+Set `openepl.serverPath` if `openepl` is not on your `PATH`.
 
 ## Helix
 

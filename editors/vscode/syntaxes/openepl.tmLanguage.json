@@ -1,0 +1,134 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "OpenEPL",
+  "scopeName": "source.openepl",
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#declaration"
+    },
+    {
+      "include": "#member"
+    },
+    {
+      "include": "#assignment"
+    },
+    {
+      "include": "#keyword"
+    },
+    {
+      "include": "#type"
+    },
+    {
+      "include": "#constant"
+    },
+    {
+      "include": "#call"
+    },
+    {
+      "include": "#operator"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.openepl"
+    },
+    "string": {
+      "name": "string.quoted.double.openepl",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "match": "\\\\.",
+          "name": "constant.character.escape.openepl"
+        }
+      ]
+    },
+    "number": {
+      "match": "\\b\\d+(\\.\\d+)?\\b",
+      "name": "constant.numeric.openepl"
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "comment": "The name being declared is highlighted as an entity, not as a plain identifier — it is what the outline and go-to-definition target.",
+          "match": "\\b(module|sub|form)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.openepl"
+            },
+            "2": {
+              "name": "entity.name.function.openepl"
+            }
+          }
+        },
+        {
+          "match": "\\b(let|var)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.openepl"
+            },
+            "2": {
+              "name": "variable.other.openepl"
+            }
+          }
+        },
+        {
+          "comment": "`on click do handler` binds an event to a subroutine.",
+          "match": "\\b(on)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.openepl"
+            },
+            "2": {
+              "name": "entity.name.tag.openepl"
+            }
+          }
+        }
+      ]
+    },
+    "keyword": {
+      "match": "\\b(module|use|sub|end|let|var|call|if|else|while|form|on|and|or|not)\\b",
+      "name": "keyword.control.openepl"
+    },
+    "type": {
+      "match": "\\b(int|int64|double|bool|text)\\b",
+      "name": "support.type.openepl"
+    },
+    "constant": {
+      "match": "\\b(true|false)\\b",
+      "name": "constant.language.openepl"
+    },
+    "call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "name": "entity.name.function.call.openepl"
+    },
+    "member": {
+      "comment": "A name after `.` is a component property or event.",
+      "match": "(?<=\\.)([A-Za-z_][A-Za-z0-9_]*)",
+      "name": "variable.other.property.openepl"
+    },
+    "operator": {
+      "match": "(<=|>=|<>|[-+*/=<>])",
+      "name": "keyword.operator.openepl"
+    },
+    "assignment": {
+      "comment": "A name on the left of `=` is an assignment target or a form property, never a type — `text = \"hi\"` must not highlight as the `text` type.",
+      "match": "^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?==[^=])",
+      "captures": {
+        "1": {
+          "name": "variable.other.openepl"
+        }
+      }
+    }
+  }
+}

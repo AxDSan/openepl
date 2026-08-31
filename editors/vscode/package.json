@@ -1,0 +1,40 @@
+{
+  "name": "openepl",
+  "displayName": "OpenEPL",
+  "description": "OpenEPL language support: syntax highlighting plus the openepl language server (diagnostics, completion, hover, go-to-definition, references).",
+  "version": "0.1.0",
+  "publisher": "openepl",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:openepl"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "openepl",
+        "aliases": ["OpenEPL"],
+        "extensions": [".oir"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "openepl",
+        "scopeName": "source.openepl",
+        "path": "./syntaxes/openepl.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "OpenEPL",
+      "properties": {
+        "openepl.serverPath": {
+          "type": "string",
+          "default": "openepl",
+          "description": "Path to the openepl executable. The extension runs `<path> lsp`."
+        }
+      }
+    }
+  },
+  "dependencies": { "vscode-languageclient": "^9.0.1" }
+}

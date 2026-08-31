@@ -4,12 +4,17 @@
 //! widget. Any LSP client (VS Code, Neovim, Helix, Zed — and, later, Studio's
 //! own code pane) speaks to this over stdio and gets live diagnostics.
 //!
-//! v1 scope is deliberately one feature: `textDocument/publishDiagnostics`.
-//! Completion, hover and goto-definition are follow-ups; a squiggle under the
-//! actual mistake is the thing that makes an editor usable, and it is the thing
-//! that exercises the whole pipeline (framing, sync, position mapping).
+//! Implemented: diagnostics, completion, hover, go-to-definition, references
+//! and document symbols. Diagnostics came first on purpose — a squiggle under
+//! the actual mistake is what makes an editor usable, and getting it right
+//! forces the whole pipeline (framing, document sync, position mapping) to be
+//! correct before anything is layered on top.
 //!
-//! Two design points worth stating:
+//! Navigation is backed by `lsp_index`, a token-level index rather than an
+//! AST one, so it keeps working on the half-typed files it will spend most of
+//! its life looking at.
+//!
+//! Three design points worth stating:
 //!
 //! * **The registry is loaded once, at initialize.** Validation needs the
 //!   command/component registry, which comes from introspecting support
@@ -19,6 +24,9 @@
 //!   located, we still serve parse errors and report the degradation as a
 //!   diagnostic. An editor plugin that dies on open is worse than one that
 //!   does half the job.
+//! * **Positions cross a unit boundary.** LSP counts columns in UTF-16 code
+//!   units; the lexer counts bytes. They agree only for ASCII, so every
+//!   position is converted at the edge rather than passed through.
 
 use std::collections::HashMap;
 use std::error::Error;
