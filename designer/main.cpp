@@ -239,12 +239,15 @@ void relayout() {
     // widget writes its own layout properties onto the element, and an inline
     // property beats the stylesheet — so a `width:100%` rule in the CSS is
     // silently ignored and the editor collapses to its default column width.
-    place("codeview", 0, TABBAR_H, centre_w, content_h - TABBAR_H);
-    // Width only: the height comes from the document, and is set whenever the
-    // text changes so the container has something to scroll.
-    if (Rml::Element* e = by_id("fullcode")) {
-        e->SetProperty("width", Rml::String(std::to_string(centre_w - 2 * CODE_PAD_X) + "px"));
-    }
+    // The same height as the canvas area, not the whole centre column: the
+    // bottom dock sits below both. Sized without subtracting it, the code view
+    // ran on underneath the preview pane and its last lines could not be seen
+    // or scrolled to — they were behind it.
+    place("codeview", 0, TABBAR_H, centre_w, canvas_h);
+    // The editor fills the view: it scrolls its own text internally, and the
+    // highlight layer under it is redrawn to match.
+    place("fullcode", 0, 0, centre_w - 2 * CODE_PAD_X, canvas_h - 2 * CODE_PAD_Y);
+    place("codehl", 0, 0, centre_w - 2 * CODE_PAD_X, canvas_h - 2 * CODE_PAD_Y);
     place("inspectdock", g.toolbox_w + centre_w, content_y, g.inspect_w, content_h);
     place("bottom", g.toolbox_w, content_y + TABBAR_H + canvas_h, centre_w, g.bottom_h);
     place("splitleft", g.toolbox_w - 3, content_y, 6, content_h);
@@ -593,6 +596,10 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << "';font-size:13px;line-height:" << CODE_LINE_H << "px;padding:" << CODE_PAD_Y << "px "
       << CODE_PAD_X << "px;padding-top:0px;white-space:pre;color:" << TEXT << "}";
     s << "#codehl div{white-space:pre;height:" << CODE_LINE_H << "px}";
+    // Absolutely-positioned children ignore an ancestor's overflow in RmlUi
+    // unless told to respect it. Without this the editor keeps painting once
+    // scrolled — straight over the menu bar and toolbar.
+    s << "#codehl,#fullcode{clip:always}";
     // A bad line is tinted rather than underlined: the server reports whole
     // lines, so a squiggle would claim a precision the diagnostic does not have.
     s << "#codehl div.badline{background-color:#fff0f0;border-left:3px " << DANGER << "}";
@@ -605,7 +612,11 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // layer's scroll onto the other is a sync bug waiting to happen. Sizing
     // both layers to the content and scrolling their parent means they cannot
     // drift apart by construction.
-    s << "#codeview{background-color:" << PANEL << ";overflow-y:auto;overflow-x:auto}";
+    // hidden, not auto: Studio scrolls the editor itself by moving both layers,
+    // so RmlUi's own scrollbars are not wanted — but the clipping region very
+    // much is. Without it the layers keep drawing once their offset goes
+    // negative, painting the code straight over the menus and toolbar.
+    s << "#codeview{background-color:" << PANEL << ";overflow:hidden}";
     // Positioned, so it paints ABOVE the highlight layer. Left unpositioned it
     // sits below an absolutely-positioned sibling — taking the caret and the
     // selection with it, which is an editor you cannot see yourself typing in.
@@ -1179,36 +1190,45 @@ void refresh_highlight() {
     if (!layer || !ed) return;
 
     const std::string text = ed->GetValue();
-    static std::string painted;
-    static bool first = true;
-    if (!first && text == painted) return;   // repainting per frame would crawl
-    painted = text;
-    first = false;
 
-    std::string html;
+    // Split once; the slice we draw changes far more often than the text does.
+    std::vector<std::string> lines;
     size_t start = 0;
     while (start <= text.size()) {
         const size_t nl = text.find('\n', start);
-        const std::string line = text.substr(start, nl == std::string::npos ? std::string::npos
-                                                                            : nl - start);
-        // An empty div collapses, which would shift every following line up.
-        html += "<div>" + (line.empty() ? std::string("&nbsp;") : highlight_line(line)) + "</div>";
+        lines.push_back(text.substr(start, nl == std::string::npos ? std::string::npos
+                                                                   : nl - start));
         if (nl == std::string::npos) break;
         start = nl + 1;
     }
+    g.code_content_h = (int)lines.size() * theme::CODE_LINE_H;
+
+    // Draw ONLY the lines in view, starting at the top of the viewport.
+    //
+    // The obvious approach — lay out the whole document and slide it up by a
+    // negative offset — does not work here: RmlUi does not clip an absolutely
+    // positioned child against an ancestor's overflow, so a scrolled editor
+    // painted its code straight over the menu bar and toolbar. Nothing is ever
+    // positioned outside the view now, so there is nothing to clip.
+    Rml::Element* view = by_id("codeview");
+    const int viewport = view ? (int)view->GetBox().GetSize().y : 400;
+    const size_t rows = (size_t)(viewport / theme::CODE_LINE_H) + 1;
+    const size_t first_line = (size_t)(g.code_scroll / theme::CODE_LINE_H);
+
+    static std::string painted;
+    static size_t painted_first = (size_t)-1;
+    if (text == painted && first_line == painted_first) return;
+    painted = text;
+    painted_first = first_line;
+
+    std::string html;
+    for (size_t i = first_line; i < lines.size() && i < first_line + rows; i++) {
+        // An empty div collapses, which would shift every following line up.
+        html += "<div>" +
+                (lines[i].empty() ? std::string("&nbsp;") : highlight_line(lines[i])) + "</div>";
+    }
     layer->SetInnerRML(html);
 
-    // Size both layers to the text. That is what gives the container something
-    // to scroll, and what keeps the two layers the same height.
-    size_t lines = 1;
-    for (char c : text) {
-        if (c == '\n') lines++;
-    }
-    const int h = (int)lines * theme::CODE_LINE_H;
-    g.code_content_h = h;
-    const std::string px = std::to_string(h) + "px";
-    layer->SetProperty("height", px);
-    if (Rml::Element* box = by_id("fullcode")) box->SetProperty("height", px);
 }
 
 /// Split the output pane between PROBLEMS and the build log.
@@ -1282,19 +1302,30 @@ void render_diagnostics() {
 /// Apply the editor's scroll offset to both layers at once, so they cannot
 /// drift apart, and clamp it to the text that actually exists.
 void sync_highlight_scroll() {
-    Rml::Element* layer = by_id("codehl");
     Rml::Element* ed = by_id("fullcode");
     Rml::Element* view = by_id("codeview");
-    if (!layer || !ed || !view) return;
+    if (!ed || !view) return;
 
+    // Whole lines only. A part-line offset would put the top row partly above
+    // the viewport, which is the one thing this design cannot draw.
     const int viewport = (int)view->GetBox().GetSize().y;
-    const int max_scroll = std::max(0, g.code_content_h + 2 * theme::CODE_PAD_Y - viewport);
-    if (g.code_scroll < 0) g.code_scroll = 0;
-    if (g.code_scroll > max_scroll) g.code_scroll = max_scroll;
+    const int max_scroll =
+        std::max(0, g.code_content_h - viewport + 2 * theme::CODE_LINE_H);
+    g.code_scroll = std::max(0, std::min(g.code_scroll, max_scroll));
+    g.code_scroll -= g.code_scroll % theme::CODE_LINE_H;
 
-    const std::string top = std::to_string(theme::CODE_PAD_Y - g.code_scroll) + "px";
-    layer->SetProperty("top", top);
-    ed->SetProperty("top", top);
+    // The text control scrolls its own text and clips it properly, so it does
+    // the work for the editable layer; the highlight layer is redrawn instead.
+    //
+    // Ask, then read back what it actually did, then snap to a whole line and
+    // ask again. RmlUi clamps to its own maximum, and a scroll that is not a
+    // multiple of the line height leaves the two layers half a line apart —
+    // which is invisible until you notice every glyph has a ghost.
+    ed->SetScrollTop((float)g.code_scroll);
+    const int actual = (int)ed->GetScrollTop();
+    g.code_scroll = actual - (actual % theme::CODE_LINE_H);
+    ed->SetScrollTop((float)g.code_scroll);
+    refresh_highlight();
 }
 
 /// Push the editor's text to disk and reload the designer model from it.
@@ -2389,9 +2420,12 @@ void run_script(const char* script) {
                     for (int i = 0; i < ticks; i++) g.context->ProcessMouseWheel(1.f, 0);
                     g.context->Update();
                     g.context->Update();
-                    (void)view;
-                    std::printf("scroll: offset=%d content=%d\n", g.code_scroll,
-                                g.code_content_h);
+                    std::printf("scroll: offset=%d content=%d view_h=%.0f ed_h=%.0f "
+                                "ed_scroll=%.0f ed_max=%.0f\n",
+                                g.code_scroll, g.code_content_h,
+                                view ? view->GetBox().GetSize().y : -1.f,
+                                e->GetBox().GetSize().y, e->GetScrollTop(),
+                                (float)e->GetScrollHeight() - e->GetBox().GetSize().y);
                     std::fflush(stdout);
                 }
             }
