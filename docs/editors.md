@@ -2,7 +2,7 @@
 
 OpenEPL ships a language server, `openepl lsp`, that speaks LSP over stdio. Any
 LSP-capable editor becomes an OpenEPL editor by pointing it at that command —
-this is why the toolchain does not ship an editor widget of its own (ADR 0012).
+the intelligence lives in one server rather than in any single editor.
 
 ## What works today
 

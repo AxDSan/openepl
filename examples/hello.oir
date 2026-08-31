@@ -1,6 +1,7 @@
-# OpenEPL Phase 0 vertical slice: print + arithmetic.
-# Build:  openepl build examples/hello.oir -o hello
-# Run:    ./hello
+# Printing and arithmetic — the smallest useful OpenEPL program.
+#
+#   openepl build examples/hello.oir -o hello
+#   ./hello
 module hello
 
 sub main

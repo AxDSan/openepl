@@ -6,14 +6,14 @@ ship in `licenses/` inside the release bundle, and this file must stay accurate
 
 Only permissive licences are accepted (MIT / BSD / Apache-2.0 / Zlib / ISC);
 GPL and LGPL without a static-linking exception, non-OSI grants and proprietary
-code are rejected (PRD §9, ADR 0005/D15).
+code are rejected.
 
 ## Statically linked into `openepl-studio` and into GUI programs it builds
 
 | Component | Licence | Used for |
 | --- | --- | --- |
-| [RmlUi](https://github.com/mikke89/RmlUi) | MIT | The UI substrate: layout, RCSS styling, form controls (ADR 0004/0005) |
-| [AccessKit C](https://github.com/AccessKit/accesskit-c) | MIT OR Apache-2.0 | The accessibility bridge, exposing the UI tree to AT-SPI (ADR 0005/D16) |
+| [RmlUi](https://github.com/mikke89/RmlUi) | MIT | The UI substrate: layout, styling and form controls |
+| [AccessKit C](https://github.com/AccessKit/accesskit-c) | MIT OR Apache-2.0 | The accessibility bridge, exposing the UI tree to AT-SPI |
 
 RmlUi in turn uses:
 
@@ -42,4 +42,4 @@ tools and are not part of the bundle.
 
 The BlackMoon `kernel.lib` (BSD-3-Clause) is used **only as a behaviour oracle**
 and is reimplemented from public specifications — never copied or shipped. No
-proprietary EPL or BlackMoon binary is included (PRD §9).
+proprietary EPL or BlackMoon binary is included.

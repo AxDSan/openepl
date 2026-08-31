@@ -57,9 +57,16 @@ strip "$OUT/bin/openepl" "$OUT/bin/openepl-studio" 2>/dev/null || true
 # The runtime, ABI and support libraries ship as SOURCE: `openepl build`
 # compiles and links them into each program, which is what makes dead-stripping
 # per-command possible (PRD D3/ADR 0003).
-for d in runtime abi libs templates examples docs editors; do
+for d in runtime abi libs templates examples editors; do
     cp -r "$d" "$OUT/$d"
 done
+
+# Only user-facing documentation ships. docs/decisions, docs/spec and
+# docs/research are the project's own working notes — architecture arguments,
+# frozen internal specs, and digests of third-party sources. Shipping them in a
+# product download is noise at best and confusing at worst.
+mkdir -p "$OUT/docs"
+cp docs/editors.md "$OUT/docs/editors.md"
 
 # GUI programs link the vendored UI stack, so a user building outside this
 # repository needs its headers and static libraries too.

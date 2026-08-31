@@ -62,13 +62,13 @@ Zed, and `editors/vscode/` is a working extension with syntax highlighting.
 
 ## What this is not, yet
 
-* **Linux x86-64 only.** Windows, macOS and arm64 are Phase 4.
+* **Linux x86-64 only.** Windows, macOS and arm64 are not supported yet.
 * **No hardened release profile.** Programs you build are ordinary native
   binaries; the stripped, non-decompilable release output is still to come.
 * **No debugger.** You get a program's output and its exit code in the IDE
   console, not breakpoints or stepping.
 
-Bug reports and the full picture: `docs/`, `PRD.md`, and the decision log in
-`docs/decisions/`.
+The project's design notes, specifications and decision log live in the source
+repository, not in this download.
 
 Licensed MIT OR BSD-3-Clause. See `LICENSE` and `THIRD-PARTY.md`.

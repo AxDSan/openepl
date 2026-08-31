@@ -1,4 +1,7 @@
-# Phase 1 showcase: call-expressions, int64/double, math, text, datetime.
+# A tour of the core commands: text, numbers, maths and dates, and calls used
+# as expressions.
+#
+#   openepl run examples/demo.oir
 module demo
 
 sub main
