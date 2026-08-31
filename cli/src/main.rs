@@ -507,7 +507,21 @@ fn find_runtime_dir() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let mut dir = std::env::current_dir().ok()?;
+    // Walking up from the working directory covers running inside the repo.
+    if let Some(found) = std::env::current_dir().ok().and_then(walk_up_for_runtime) {
+        return Some(found);
+    }
+    // …and walking up from the executable covers everything else: `openepl new`
+    // is run from wherever the user's project will live, and the templates and
+    // runtime are next to the binary, not next to them.
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .and_then(walk_up_for_runtime)
+}
+
+fn walk_up_for_runtime(start: PathBuf) -> Option<PathBuf> {
+    let mut dir = start;
     loop {
         let cand = dir.join("runtime");
         if cand.join("openepl_core.h").is_file() {

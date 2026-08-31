@@ -39,6 +39,7 @@
 #include "highlight.h"
 #include "model.h"
 #include "theme.h"
+#include "welcome.h"
 #include "ui_mapping.h"
 
 using namespace openepl::designer;
@@ -1823,9 +1824,23 @@ Listener g_listener;
 
 /// Render a few frames and write the framebuffer, so the chrome can be
 /// inspected without a human at the window.
-void dump_frame() {
-    const char* path = std::getenv("OPENEPL_DESIGNER_DUMP");
+/// Write the current framebuffer to a PPM. Split out so the pre-IDE screens
+/// (splash, welcome) can be verified the same way the IDE is — by looking at
+/// what was actually drawn.
+void dump_to(const char* path) {
     if (!path) return;
+    if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+        int dw = 0, dh = 0, ww = 0, wh = 0;
+        if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
+            SDL_GL_GetDrawableSize(win, &dw, &dh);
+            SDL_GetWindowSize(win, &ww, &wh);
+        }
+        GLint vp[4] = {0, 0, 0, 0};
+        glGetIntegerv(GL_VIEWPORT, vp);
+        std::fprintf(stderr,
+                     "dump: drawable %dx%d  window %dx%d  viewport %d,%d %dx%d  g.win %dx%d\n",
+                     dw, dh, ww, wh, vp[0], vp[1], vp[2], vp[3], g.win_w, g.win_h);
+    }
     auto* gl3 = static_cast<RenderInterface_GL3*>(Backend::GetRenderInterface());
     for (int i = 0; i < 3; i++) {
         g.context->Update();
@@ -1833,16 +1848,31 @@ void dump_frame() {
         g.context->Render();
         gl3->EndFrame();
     }
-    std::vector<unsigned char> px((size_t)g.win_w * g.win_h * 3);
-    glReadPixels(0, 0, g.win_w, g.win_h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+    // Read the ACTUAL drawable, not the size we asked for. A window manager may
+    // hand back a smaller window than requested — and reading more rows than
+    // exist fills the top of the image with undefined memory, which looks
+    // exactly like a rendering bug that isn't there.
+    int w = g.win_w, h = g.win_h;
+    if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
+        int dw = 0, dh = 0;
+        SDL_GL_GetDrawableSize(win, &dw, &dh);
+        if (dw > 0 && dh > 0) {
+            w = dw;
+            h = dh;
+        }
+    }
+    std::vector<unsigned char> px((size_t)w * h * 3);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
     if (FILE* f = std::fopen(path, "wb")) {
-        std::fprintf(f, "P6\n%d %d\n255\n", g.win_w, g.win_h);
-        for (int y = g.win_h - 1; y >= 0; y--)
-            std::fwrite(&px[(size_t)y * g.win_w * 3], 1, (size_t)g.win_w * 3, f);
+        std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+        for (int y = h - 1; y >= 0; y--)
+            std::fwrite(&px[(size_t)y * w * 3], 1, (size_t)w * 3, f);
         std::fclose(f);
     }
     std::printf("designer: wrote %s\n", path);
 }
+
+void dump_frame() { dump_to(std::getenv("OPENEPL_DESIGNER_DUMP")); }
 
 void run_script(const char* script) {
     std::string s(script);
@@ -2056,22 +2086,171 @@ void run_script(const char* script) {
 
 } // namespace
 
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr,
-                     "usage: openepl-designer <project.oir> [path/to/openepl]\n\n"
-                     "Environment:\n"
-                     "  OPENEPL_DESIGNER_SCRIPT   run a scripted session headlessly, then exit\n"
-                     "  OPENEPL_DESIGNER_DEBUG    report chrome/toolbox diagnostics\n");
-        return 2;
+/// Create a project from a template next to the working directory, and return
+/// the file to open.
+///
+/// There is no file dialog yet, so the location is derived rather than asked
+/// for — and the name is made unique, because silently writing into an existing
+/// project would be the worst possible first impression.
+std::string create_project(const std::string& template_id,
+                           const std::vector<openepl::welcome::TemplateInfo>& templates) {
+    std::string dir = template_id;
+    for (int n = 2; ::access(dir.c_str(), F_OK) == 0 && n < 100; n++) {
+        dir = template_id + "-" + std::to_string(n);
     }
-    const std::string path = argv[1];
-    if (argc > 2) g.openepl_bin = argv[2];
 
-    std::string err;
-    if (!load_model(g.openepl_bin, path, g.model, err)) {
-        std::fprintf(stderr, "designer: cannot load %s\n%s\n", path.c_str(), err.c_str());
-        return 1;
+    const std::string cmd = g.openepl_bin + " new " + template_id + " " + dir + " 2>&1";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    std::string open_path;
+    char buf[1024];
+    while (fgets(buf, sizeof buf, pipe)) {
+        std::string line(buf);
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+        // `new` reports which file to open, so we do not have to guess it from
+        // the template's layout.
+        if (line.rfind("open: ", 0) == 0) open_path = line.substr(6);
+        std::fprintf(stderr, "designer: %s\n", line.c_str());
+    }
+    pclose(pipe);
+    (void)templates;
+    return open_path;
+}
+
+/// Put the splash on screen and paint it, so it is visible *during* the work
+/// that follows rather than after it.
+Rml::ElementDocument* show_splash(const std::string& family) {
+    const auto dim = g.context->GetDimensions();
+    Rml::ElementDocument* doc = g.context->LoadDocumentFromMemory(
+        openepl::welcome::splash_markup(family, dim.x, dim.y));
+    if (!doc) return nullptr;
+    doc->Show();
+    // Two frames: one to lay out, one to present. Without this the splash is
+    // constructed and never actually drawn.
+    for (int i = 0; i < 2; i++) {
+        g.context->Update();
+        Backend::BeginFrame();
+        g.context->Render();
+        Backend::PresentFrame();
+    }
+    dump_to(std::getenv("OPENEPL_DESIGNER_SPLASH_DUMP"));
+    return doc;
+}
+
+/// The welcome screen. Returns the project file to open, or "" if the user
+/// closed the window.
+std::string run_welcome(const std::string& family) {
+    const auto dim = g.context->GetDimensions();
+    const auto templates = openepl::welcome::load_templates(g.openepl_bin);
+    const auto recent = openepl::welcome::load_recent();
+
+    Rml::ElementDocument* doc = g.context->LoadDocumentFromMemory(
+        openepl::welcome::welcome_markup(family, dim.x, dim.y, templates, recent));
+    if (!doc) return "";
+    doc->Show();
+
+    // Headless hooks, mirroring the IDE's scripted sessions: render the screen,
+    // optionally dump it, and optionally choose without a click so the whole
+    // create-and-open path can be tested.
+    //
+    // dump_to renders its own frames and reads the buffer without presenting;
+    // presenting first would swap away the buffer it is about to read.
+    // Pump the backend first: it is what applies the real window size to the
+    // GL viewport. Rendering before it has run leaves part of the frame never
+    // written, which reads back as black.
+    for (int i = 0; i < 3; i++) {
+        Backend::ProcessEvents(g.context, nullptr, false);
+        g.context->Update();
+        Backend::BeginFrame();
+        g.context->Render();
+        Backend::PresentFrame();
+    }
+    dump_to(std::getenv("OPENEPL_DESIGNER_WELCOME_DUMP"));
+    if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+        const auto bb = doc->GetBox().GetSize();
+        std::fprintf(stderr, "welcome: body %.0fx%.0f at %.0f,%.0f\n", bb.x, bb.y,
+                     doc->GetAbsoluteLeft(), doc->GetAbsoluteTop());
+        std::fprintf(stderr, "welcome: context %dx%d  g.win %dx%d\n",
+                     g.context->GetDimensions().x, g.context->GetDimensions().y,
+                     g.win_w, g.win_h);
+        for (const char* id : {"bg", "head", "mark", "cols"}) {
+            if (Rml::Element* e = doc->GetElementById(id)) {
+                const auto b = e->GetBox().GetSize();
+                std::fprintf(stderr, "welcome: #%s %.0fx%.0f at %.0f,%.0f\n", id, b.x, b.y,
+                             e->GetAbsoluteLeft(), e->GetAbsoluteTop());
+            } else {
+                std::fprintf(stderr, "welcome: #%s MISSING\n", id);
+            }
+        }
+    }
+    if (const char* pick = std::getenv("OPENEPL_DESIGNER_WELCOME_PICK")) {
+        doc->Close();
+        g.context->Update();
+        const std::string want(pick);
+        if (want.rfind("open:", 0) == 0) return want.substr(5);
+        return create_project(want, templates);
+    }
+
+    std::string chosen;
+    struct Pick : Rml::EventListener {
+        std::string* out;
+        const std::vector<openepl::welcome::TemplateInfo>* templates;
+        void ProcessEvent(Rml::Event& ev) override {
+            for (Rml::Element* e = ev.GetTargetElement(); e; e = e->GetParentNode()) {
+                if (e->HasAttribute("oe-open")) {
+                    *out = e->GetAttribute<Rml::String>("oe-open", "");
+                    return;
+                }
+                if (e->HasAttribute("oe-new")) {
+                    *out = "new:" + e->GetAttribute<Rml::String>("oe-new", "");
+                    return;
+                }
+            }
+        }
+    } pick;
+    pick.out = &chosen;
+    pick.templates = &templates;
+    doc->AddEventListener("click", &pick);
+
+    while (chosen.empty()) {
+        if (!Backend::ProcessEvents(g.context, nullptr, true)) break;   // window closed
+        g.context->Update();
+        Backend::BeginFrame();
+        g.context->Render();
+        Backend::PresentFrame();
+    }
+    doc->Close();
+    g.context->Update();
+
+    if (chosen.rfind("new:", 0) == 0) {
+        chosen = create_project(chosen.substr(4), templates);
+    }
+    return chosen;
+}
+
+int main(int argc, char** argv) {
+    // Either argument may be omitted: with no project we show the welcome
+    // screen, and the compiler path is optional. They are told apart by
+    // extension rather than by position, so `openepl-designer <compiler>` works
+    // without inventing a flag.
+    std::string path;
+    for (int i = 1; i < argc; i++) {
+        const std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            std::fprintf(stderr,
+                         "usage: openepl-designer [project.oir] [path/to/openepl]\n\n"
+                         "With no project, Studio opens its welcome screen.\n\n"
+                         "Environment:\n"
+                         "  OPENEPL_DESIGNER_SCRIPT   run a scripted session headlessly\n"
+                         "  OPENEPL_DESIGNER_DEBUG    report chrome/toolbox diagnostics\n");
+            return 2;
+        }
+        const bool is_project = arg.size() > 4 && arg.compare(arg.size() - 4, 4, ".oir") == 0;
+        if (is_project) {
+            path = arg;
+        } else {
+            g.openepl_bin = arg;
+        }
     }
 
     if (!Backend::Initialize("OpenEPL Studio", INIT_W, INIT_H, true)) return 1;
@@ -2097,6 +2276,32 @@ int main(int argc, char** argv) {
 
     const std::string dot_tile = write_dot_tile("openepl_dotgrid.tga", 10);
     g.context = Rml::CreateContext("studio", Rml::Vector2i(INIT_W, INIT_H));
+
+    // Splash first, and painted before the slow part starts. Loading the
+    // component registry shells out to `openepl inspect`; done before the
+    // window exists it is a second of nothing at all.
+    Rml::ElementDocument* splash = show_splash(family);
+
+    // With no file to open, ask what to build. The welcome screen has no
+    // project yet, so the IDE chrome cannot meaningfully exist behind it.
+    if (path.empty()) {
+        if (splash) { splash->Close(); splash = nullptr; }
+        path = run_welcome(family);
+        if (path.empty()) {          // the user closed the window
+            Rml::Shutdown();
+            Backend::Shutdown();
+            return 0;
+        }
+        splash = show_splash(family);
+    }
+
+    std::string err;
+    if (!load_model(g.openepl_bin, path, g.model, err)) {
+        std::fprintf(stderr, "designer: cannot load %s\n%s\n", path.c_str(), err.c_str());
+        return 1;
+    }
+    openepl::welcome::remember_recent(path);
+    if (splash) splash->Close();
 
     const std::string chrome = build_chrome(family, dot_tile);
     if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {

@@ -96,10 +96,14 @@ bool load_model(const std::string& openepl_bin, const std::string& path, Model& 
         (void)current;
     }
 
-    if (rc != 0 || out.form_name.empty()) {
+    if (rc != 0) {
         error = text.empty() ? "openepl inspect failed" : text;
         return false;
     }
+    // A module with no form is still a project: a console program or a library
+    // has code to edit even though it has nothing to lay out. Refusing to open
+    // one would mean the welcome screen offers templates the IDE cannot then
+    // open. The canvas simply has nothing to draw.
     return true;
 }
 
