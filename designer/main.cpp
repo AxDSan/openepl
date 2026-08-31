@@ -239,9 +239,6 @@ void log(const std::string& line, const char* cls);
 
 void set_status(const std::string& text) {
     if (Rml::Element* e = by_id("statustext")) e->SetInnerRML(esc(text));
-    // Mirror into the console: the status bar shows only the latest message,
-    // and the one you need is usually the one it just replaced.
-    log(text, "muted");
     std::printf("designer: %s\n", text.c_str());
     std::fflush(stdout);
 }
@@ -432,6 +429,23 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     // The editor fills the pane. A textarea has no default appearance in RmlUi,
     // so colours are explicit — the default text colour is white, which on this
     // panel would be invisible.
+    // RmlUi ships no default scrollbar appearance or size. Left unstyled, a
+    // textarea's slider covers the whole control and eats every click — which
+    // is what made the code editor impossible to focus, and so impossible to
+    // type in. Sizing them is not cosmetic.
+    s << "scrollbarvertical{width:10px;background-color:" << CANVAS << "}";
+    s << "scrollbarhorizontal{height:10px;background-color:" << CANVAS << "}";
+    s << "scrollbarvertical slidertrack,scrollbarhorizontal slidertrack{"
+         "background-color:" << CANVAS << "}";
+    s << "scrollbarvertical sliderbar{width:10px;min-height:24px;border-radius:5px;"
+         "background-color:#c9d1d9}";
+    s << "scrollbarhorizontal sliderbar{height:10px;min-width:24px;border-radius:5px;"
+         "background-color:#c9d1d9}";
+    s << "scrollbarvertical sliderbar:hover,scrollbarhorizontal sliderbar:hover{"
+         "background-color:" << TEXT_MUTED << "}";
+    // No stepper arrows: undersized ones are the other way a scrollbar becomes
+    // a click trap.
+    s << "sliderarrowdec,sliderarrowinc{width:0px;height:0px}";
     s << "#fullcode{font-family:'" << family << "';font-size:13px;padding:"
       << CODE_PAD_Y << "px " << CODE_PAD_X << "px;"
          "width:100%;height:100%;background-color:" << PANEL << ";color:" << TEXT
@@ -1814,6 +1828,47 @@ void run_script(const char* script) {
                 // Give the child a moment to produce output, then drain it the
                 // way the frame loop would.
                 for (int i = 0; i < 40; i++) { poll_app(); usleep(50000); }
+            }
+            else if (verb == "typetest") {
+                // Prove the real editing path: focus the control the way a
+                // click does, then push a character through the context the
+                // way a keystroke does.
+                Rml::Element* e = by_id("fullcode");
+                // First: what a real click does. Move the mouse over the
+                // editor and press, exactly as the backend would.
+                g.context->Update();
+                const int cx = (int)(e->GetAbsoluteLeft() + 40);
+                const int cy = (int)(e->GetAbsoluteTop() + 40);
+                g.context->ProcessMouseMove(cx, cy, 0);
+                g.context->ProcessMouseButtonDown(0, 0);
+                g.context->ProcessMouseButtonUp(0, 0);
+                g.context->Update();
+                std::printf("after-click focus: %s\n",
+                            g.doc->GetFocusLeafNode() ? g.doc->GetFocusLeafNode()->GetId().c_str()
+                                                      : "(none)");
+                Rml::Element* hit = g.context->GetHoverElement();
+                std::printf("hover element: <%s> id=%s\n",
+                            hit ? hit->GetTagName().c_str() : "(none)",
+                            hit ? hit->GetId().c_str() : "");
+                const bool focused = e && e->Focus();
+                std::printf("focus: %s\n", focused ? "yes" : "NO");
+                std::printf("focus-element: %s\n",
+                            g.doc->GetFocusLeafNode() ? g.doc->GetFocusLeafNode()->GetId().c_str()
+                                                      : "(none)");
+                auto* ed = code_editor();
+                const size_t before = ed ? ed->GetValue().size() : 0;
+                g.context->ProcessTextInput(Rml::String("Z"));
+                g.context->Update();
+                const size_t after = ed ? ed->GetValue().size() : 0;
+                std::printf("value: %zu -> %zu  (%s)\n", before, after,
+                            after > before ? "TYPING WORKS" : "TYPING DOES NOT REACH THE EDITOR");
+                // Undo the probe. A diagnostic that leaves the document dirty
+                // gets written out by the save-on-exit path — which is how this
+                // verb corrupted an example file the first time it was run.
+                if (ed) ed->SetValue(g.model_text);
+                g.code_dirty = false;
+                g.dirty = false;
+                std::fflush(stdout);
             }
             else if (verb == "logdump") {
                 std::printf("logdump-begin\n");

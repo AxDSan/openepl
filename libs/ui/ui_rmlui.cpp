@@ -349,7 +349,10 @@ int oe_ui_run(void) {
     int frames = 0;
     bool running = true;
     while (running) {
-        if (max_frames == 0) running = Backend::ProcessEvents(g.context, nullptr, true);
+        // Not power-save: with it the loop blocks until this window gets an
+        // input event, so an app whose window is not focused stops updating —
+        // timers, animation and anything driven by the frame loop simply stop.
+        if (max_frames == 0) running = Backend::ProcessEvents(g.context, nullptr, false);
         g.context->Update();
 
         /* Refresh accessible bounds from the laid-out widgets, then publish.
