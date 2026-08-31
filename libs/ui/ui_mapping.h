@@ -164,25 +164,36 @@ struct FontCandidate {
     const char* bold;        ///< may be null
     const char* italic;      ///< may be null
     const char* bold_italic; ///< may be null
+    /// Fixed-width. The code editor needs one: its syntax-highlight layer sits
+    /// behind the text and only aligns if every glyph is the same width.
+    bool is_mono;
 };
 inline const FontCandidate* font_candidates(int* count) {
     static const FontCandidate fonts[] = {
         {"/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "DejaVu Sans",
          "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
          "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Oblique.ttf",
-         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-BoldOblique.ttf"},
+         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-BoldOblique.ttf", false},
         {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVu Sans",
          "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
          "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
-         "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"},
+         "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf", false},
         {"/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf", "Adwaita Mono",
          "/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Bold.ttf",
          "/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Italic.ttf",
-         "/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-BoldItalic.ttf"},
+         "/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-BoldItalic.ttf", true},
         {"/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf", "Liberation Sans",
          "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf",
          "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Italic.ttf",
-         "/usr/share/fonts/liberation-sans-fonts/LiberationSans-BoldItalic.ttf"},
+         "/usr/share/fonts/liberation-sans-fonts/LiberationSans-BoldItalic.ttf", false},
+        {"/usr/share/fonts/liberation-mono-fonts/LiberationMono-Regular.ttf", "Liberation Mono",
+         "/usr/share/fonts/liberation-mono-fonts/LiberationMono-Bold.ttf",
+         "/usr/share/fonts/liberation-mono-fonts/LiberationMono-Italic.ttf",
+         "/usr/share/fonts/liberation-mono-fonts/LiberationMono-BoldItalic.ttf", true},
+        {"/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf", "DejaVu Sans Mono",
+         "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono-Bold.ttf",
+         "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono-Oblique.ttf",
+         "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono-BoldOblique.ttf", true},
     };
     *count = (int)(sizeof(fonts) / sizeof(fonts[0]));
     return fonts;

@@ -118,7 +118,19 @@ struct Server {
 
 impl Server {
     fn new(params: InitializeParams) -> Server {
-        let repo_root = workspace_root(&params).and_then(|r| find_repo_root_from(&r));
+        // Walking up from the editor's workspace finds the runtime when the
+        // project lives inside a checkout. It does NOT when the project lives
+        // anywhere else — which, for anything created from a template, is the
+        // normal case. Falling back to our own location covers that: the
+        // runtime ships beside the binary.
+        let repo_root = workspace_root(&params)
+            .and_then(|r| find_repo_root_from(&r))
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    .and_then(|d| find_repo_root_from(&d))
+            });
         match &repo_root {
             Some(r) => eprintln!("openepl-lsp: runtime at {}", r.display()),
             None => eprintln!("openepl-lsp: no runtime found — parse-only mode"),

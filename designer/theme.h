@@ -11,6 +11,9 @@ namespace openepl::designer::theme {
 // Primary / accent
 /// Padding inside the code editor. Named because relayout() must subtract it
 /// from the editor's box: RmlUi sizes content, not border, boxes.
+/// Line box for the code editor. Both editor layers must use it: the
+/// highlight layer lines up with the text only if their line heights match.
+constexpr int CODE_LINE_H = 18;
 constexpr int CODE_PAD_X = 10;
 constexpr int CODE_PAD_Y = 8;
 

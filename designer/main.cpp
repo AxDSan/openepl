@@ -274,6 +274,9 @@ void run_app(const std::string& path);
 void stop_app();
 void poll_build();
 void set_activity(const char* what);
+void refresh_highlight();
+void sync_highlight_scroll();
+Rml::ElementFormControl* code_editor();
 void drain_app_output();
 void log(const std::string& line, const char* cls = nullptr);
 Rml::ElementFormControl* code_editor();
@@ -356,7 +359,8 @@ std::string build_toolbox() {
 /// Build the whole IDE chrome. Structure follows the OpenEPL Studio design
 /// specification: title bar, menu bar, action toolbar, toolbox / designer /
 /// inspector docks, a split code+output panel, and a status bar.
-std::string build_chrome(const std::string& family, const std::string& dot_tile) {
+std::string build_chrome(const std::string& family, const std::string& mono,
+                         const std::string& dot_tile) {
     using namespace theme;
     const int WIN_W = g.win_w, WIN_H = g.win_h;
     const int content_y = TITLEBAR_H + MENUBAR_H + TOOLBAR_H;
@@ -476,10 +480,23 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     // No stepper arrows: undersized ones are the other way a scrollbar becomes
     // a click trap.
     s << "sliderarrowdec,sliderarrowinc{width:0px;height:0px}";
-    s << "#fullcode{font-family:'" << family << "';font-size:13px;padding:"
+    // Both layers share typography exactly. Any difference in family, size,
+    // line-height or padding shows up as text drifting away from its colour.
+    s << "#codehl{position:absolute;left:0;top:0;font-family:'" << mono
+      << "';font-size:13px;line-height:" << CODE_LINE_H << "px;padding:" << CODE_PAD_Y << "px "
+      << CODE_PAD_X << "px;white-space:pre;color:" << TEXT << "}";
+    s << "#codehl div{white-space:pre;height:" << CODE_LINE_H << "px}";
+    s << "#codeview{background-color:" << PANEL << "}";
+    // Positioned, so it paints ABOVE the highlight layer. Left unpositioned it
+    // sits below an absolutely-positioned sibling — taking the caret and the
+    // selection with it, which is an editor you cannot see yourself typing in.
+    s << "#fullcode{position:absolute;left:0;top:0;font-family:'" << mono << "';line-height:" << CODE_LINE_H << "px;font-size:13px;padding:"
       << CODE_PAD_Y << "px " << CODE_PAD_X << "px;"
-         "width:100%;height:100%;background-color:" << PANEL << ";color:" << TEXT
-      << ";border:0;caret-color:" << ACCENT << ";cursor:text}";
+         "width:100%;height:100%;background-color:transparent;"
+         // Transparent glyphs: the layer underneath supplies the colour. The
+         // caret and the selection must stay opaque or the editor looks dead.
+         "color:#00000000;border:0;caret-color:" << TEXT << ";cursor:text;"
+         "selection-color:" << TEXT << ";selection-background-color:#cfe3ff}";
     s << "#canvasarea{left:0;top:" << TABBAR_H << "px;width:" << centre_w << "px;height:" << canvas_h
       << "px;background-color:" << CANVAS << ";decorator:image(\"" << dot_tile << "\" repeat)}";
 
@@ -618,10 +635,17 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
       << esc(g.model.form_name) << "</div>"
          "<div class='tab' id='tabcode' oe-view='code'>Code</div>"
          "</div>"
-         // A real RmlUi <textarea>, not a rendered div: it brings the caret,
-         // selection, keyboard handling and clipboard that make this an editor
-         // rather than a viewer.
-         "<div id='codeview' style='display:none'><textarea id='fullcode'/></div>"
+         // The editor is two layers. Underneath, `#codehl` paints the
+         // syntax-highlighted text; on top, a real RmlUi <textarea> supplies
+         // the caret, selection, keyboard handling and clipboard, with its own
+         // text made transparent. RmlUi draws a textarea through a single
+         // ElementText, so one colour is all it can have — colour has to come
+         // from a layer it does not own.
+         //
+         // `wrap='nowrap'` is structural, not cosmetic: a wrapped line in one
+         // layer and not the other would desynchronise every line below it.
+         "<div id='codeview' style='display:none'>"
+         "<div id='codehl'/><textarea id='fullcode' wrap='nowrap'/></div>"
          "<div id='canvasarea'>"
          "<div id='formwin'>"
          "<div id='formtitle'><span id='formtitletext'>Form</span>"
@@ -1003,11 +1027,51 @@ void rebuild_code() {
     if (!g.code_dirty) {
         if (auto* full = code_editor()) full->SetValue(g.model_text);
     }
+    refresh_highlight();
 }
 
 /// The code editor, or null before the chrome exists.
 Rml::ElementFormControl* code_editor() {
     return dynamic_cast<Rml::ElementFormControl*>(by_id("fullcode"));
+}
+
+/// Repaint the syntax-highlight layer from the editor's LIVE text.
+///
+/// From the control, never from disk: the file lags behind by every unsaved
+/// keystroke, and colour that is one save out of date is worse than none.
+void refresh_highlight() {
+    Rml::Element* layer = by_id("codehl");
+    auto* ed = code_editor();
+    if (!layer || !ed) return;
+
+    const std::string text = ed->GetValue();
+    static std::string painted;
+    static bool first = true;
+    if (!first && text == painted) return;   // repainting per frame would crawl
+    painted = text;
+    first = false;
+
+    std::string html;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t nl = text.find('\n', start);
+        const std::string line = text.substr(start, nl == std::string::npos ? std::string::npos
+                                                                            : nl - start);
+        // An empty div collapses, which would shift every following line up.
+        html += "<div>" + (line.empty() ? std::string("&nbsp;") : highlight_line(line)) + "</div>";
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+    }
+    layer->SetInnerRML(html);
+}
+
+/// Keep the highlight layer under the text as the editor scrolls.
+void sync_highlight_scroll() {
+    Rml::Element* layer = by_id("codehl");
+    Rml::Element* ed = by_id("fullcode");
+    if (!layer || !ed) return;
+    layer->SetProperty("left", Rml::String(std::to_string(-(int)ed->GetScrollLeft()) + "px"));
+    layer->SetProperty("top", Rml::String(std::to_string(-(int)ed->GetScrollTop()) + "px"));
 }
 
 /// Push the editor's text to disk and reload the designer model from it.
@@ -1502,6 +1566,7 @@ struct Listener : Rml::EventListener {
                     g.dirty = true;
                     set_status("code edited — Ctrl+S to save");
                 }
+                refresh_highlight();
                 return;
             }
             if (src->GetId() == "search") {
@@ -2059,6 +2124,30 @@ void run_script(const char* script) {
                 g.dirty = false;
                 std::fflush(stdout);
             }
+            else if (verb == "scroll") {
+                // Scroll the editor and re-sync, so a dumped frame proves the
+                // highlight layer follows the text rather than sitting still.
+                if (Rml::Element* e = by_id("fullcode")) {
+                    g.context->Update();
+                    e->SetScrollTop((float)std::atoi(arg.c_str()));
+                    sync_highlight_scroll();
+                    g.context->Update();
+                }
+            }
+            else if (verb == "hldebug") {
+                // Make the editor's own glyphs visible in red. Alignment cannot
+                // be judged from a screenshot otherwise: the text you can see
+                // is the highlight layer, and the text you actually edit is
+                // transparent. Misalignment shows up here as doubled glyphs.
+                if (Rml::Element* e = by_id("fullcode")) {
+                    e->SetProperty("color", "#ff0000");
+                    g.context->Update();
+                }
+            }
+            else if (verb == "focus") {
+                if (Rml::Element* e = by_id("fullcode")) e->Focus();
+                g.context->Update();
+            }
             else if (verb == "logdump") {
                 std::printf("logdump-begin\n");
                 for (const auto& l : g.log_lines) std::printf("LOG %s\n", l.c_str());
@@ -2305,6 +2394,20 @@ int main(int argc, char** argv) {
     // Into a cache directory, not the working directory: Studio is launched
     // from wherever the user's project lives, and dropping a .tga into it is
     // littering someone else's folder.
+    // The editor needs a MONOSPACE face: the highlight overlay sits behind the
+    // textarea and only lines up if both use the same fixed-width metrics.
+    // Companions come along too — the comment style is italic, and text in a
+    // face that was never loaded renders invisibly.
+    std::string mono = family;
+    for (int i = 0; i < font_count; i++) {
+        if (!fonts[i].is_mono || !Rml::LoadFontFace(fonts[i].path)) continue;
+        mono = fonts[i].family;
+        for (const char* extra : {fonts[i].bold, fonts[i].italic, fonts[i].bold_italic}) {
+            if (extra) Rml::LoadFontFace(extra);
+        }
+        break;
+    }
+
     const std::string dot_tile = write_dot_tile(cache_file("openepl_dotgrid.tga"), 10);
     g.context = Rml::CreateContext("studio", Rml::Vector2i(INIT_W, INIT_H));
 
@@ -2334,7 +2437,7 @@ int main(int argc, char** argv) {
     openepl::welcome::remember_recent(path);
     if (splash) splash->Close();
 
-    const std::string chrome = build_chrome(family, dot_tile);
+    const std::string chrome = build_chrome(family, mono, dot_tile);
     if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
         std::fprintf(stderr, "designer: chrome %zu bytes\n", chrome.size());
     }
@@ -2399,6 +2502,7 @@ int main(int argc, char** argv) {
     while (Backend::ProcessEvents(g.context, &on_key_down, g.running_app <= 0 && g.build_pid <= 0)) {
         poll_build();
         poll_app();
+        if (g.view == "code") sync_highlight_scroll();
         // Follow the OS window. The backend resizes the context; the layout has
         // to follow or everything past the old size is left unpainted.
         const auto dim = g.context->GetDimensions();
