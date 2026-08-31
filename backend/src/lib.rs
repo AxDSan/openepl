@@ -52,21 +52,28 @@ fn llvm_ty(t: Ty) -> &'static str {
 
 /// Lower a whole module to a `.ll` string using the given command registry.
 ///
-/// Two entry shapes (ADR 0006):
+/// Entry shapes depend on the module's target (PRD G12):
 ///  * **console** — `main` is lowered into `ECodeStart` as before.
 ///  * **GUI** — the module declares a form; `ECodeStart` becomes the generated
 ///    form constructor: init the UI, create components, set properties, bind
 ///    handlers by function pointer, run the loop. `main`, if present, runs
 ///    first as start-up code.
+///  * **library** (shared or static) — no entry at all. Each subroutine gets an
+///    exported wrapper under its plain name so a host can call it through the
+///    C ABI. Internal calls keep the mangled name, so the two never collide.
 ///
 /// User subroutines each lower to their own `@oe_user_<name>` function so an
 /// event handler can be bound by pointer. Handler names never appear as data —
 /// there is no name-based dispatch at runtime (G8).
 pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
+    let target = m.target();
     let subs: Vec<_> = m.subs().collect();
     let forms: Vec<_> = m.forms().collect();
-    if forms.is_empty() && !subs.iter().any(|s| s.name == "main") {
+    if target.is_executable() && forms.is_empty() && !subs.iter().any(|s| s.name == "main") {
         return err("module has no `main` subroutine and no form");
+    }
+    if !target.is_executable() && subs.is_empty() {
+        return err("a library target must define at least one subroutine to export");
     }
 
     let mut lo = Lowerer {
@@ -110,6 +117,37 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
             lo.allocas.join(""),
             lo.body
         ));
+    }
+
+    // A library has no entry point: it exports its subroutines and stops there.
+    // The wrapper carries the plain name while the body keeps the mangled one,
+    // so a host links against `greet` and internal calls still resolve.
+    if !target.is_executable() {
+        for sub in &subs {
+            functions.push_str(&format!(
+                "define void @{}() {{\nentry:\n  call void @{}()\n  ret void\n}}\n\n",
+                sub.name,
+                user_symbol(&sub.name)
+            ));
+        }
+        // Module variables still need initialising, but a library has no moment
+        // that is obviously "start-up". Exported explicitly so the host can say
+        // when — an implicit constructor would run before the host is ready.
+        lo.body.clear();
+        lo.vars.clear();
+        lo.allocas.clear();
+        for g in m.globals() {
+            let v = lo.eval(&g.value)?;
+            lo.store_global(&g.name, &v);
+        }
+        let init = format!(
+            "define void @{}_init() {{\nentry:\n{}{}  ret void\n}}\n\n",
+            m.name,
+            lo.allocas.join(""),
+            lo.body
+        );
+        functions.push_str(&init);
+        return Ok(lo.finish_library(&m.name, &functions));
     }
 
     // The entry function. Order matters: the form must be BUILT before any user
@@ -1022,7 +1060,16 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Everything except the entry point. A library stops here.
+    fn finish_library(self, module_name: &str, functions: &str) -> String {
+        self.finish_with(module_name, functions, false)
+    }
+
     fn finish(self, module_name: &str, functions: &str) -> String {
+        self.finish_with(module_name, functions, true)
+    }
+
+    fn finish_with(self, module_name: &str, functions: &str, entry: bool) -> String {
         let mut out = String::new();
         writeln!(
             out,
@@ -1100,12 +1147,14 @@ impl Lowerer<'_> {
 
         out.push_str(functions);
 
-        writeln!(out, "define i32 @ECodeStart() {{").unwrap();
-        writeln!(out, "entry:").unwrap();
-        out.push_str(&self.allocas.join(""));
-        out.push_str(&self.body);
-        writeln!(out, "  ret i32 0").unwrap();
-        writeln!(out, "}}").unwrap();
+        if entry {
+            writeln!(out, "define i32 @ECodeStart() {{").unwrap();
+            writeln!(out, "entry:").unwrap();
+            out.push_str(&self.allocas.join(""));
+            out.push_str(&self.body);
+            writeln!(out, "  ret i32 0").unwrap();
+            writeln!(out, "}}").unwrap();
+        }
         out
     }
 }

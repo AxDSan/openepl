@@ -18,7 +18,7 @@
 use crate::lexer::{lex, Spanned, Tok};
 use crate::{
     BinOp, CmpOp, Component, Expr, Form, GlobalVar, Item, LogicalOp, Module, Stmt, StmtKind, Sub,
-    Ty,
+    Target, Ty,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,10 +94,36 @@ impl Parser {
         let name = self.ident("module name")?;
         self.expect(&Tok::Newline, "newline after module name")?;
 
-        // Optional `use <lib>` declarations precede the items.
+        // Optional `target <kind>` and `use <lib>` declarations precede the
+        // items.
+        //
+        // `target` is a *soft* keyword — matched as an identifier in this one
+        // position rather than reserved in the lexer. Reserving it would steal
+        // `target` as a variable and property name everywhere, which is a poor
+        // trade for one declaration.
+        let mut target = None;
         let mut uses = Vec::new();
         loop {
             self.skip_newlines();
+            if matches!(self.peek(), Tok::Ident(w) if w == "target") {
+                let line = self.line();
+                self.bump();
+                let kind = self.ident("target kind")?;
+                match Target::parse(&kind) {
+                    Some(t) => target = Some(t),
+                    None => {
+                        return Err(ParseError {
+                            line,
+                            msg: format!(
+                                "unknown target `{kind}` — expected console, gui, sharedlib \
+                                 or staticlib"
+                            ),
+                        })
+                    }
+                }
+                self.expect(&Tok::Newline, "newline after `target`")?;
+                continue;
+            }
             if matches!(self.peek(), Tok::Use) {
                 self.bump();
                 let lib = self.ident("library name")?;
@@ -121,7 +147,7 @@ impl Parser {
                 }
             }
         }
-        Ok(Module { name, uses, items })
+        Ok(Module { name, target, uses, items })
     }
 
     fn sub(&mut self) -> Result<Sub, ParseError> {

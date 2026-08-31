@@ -514,6 +514,9 @@ fn find_repo_root_from(start: &Path) -> Option<PathBuf> {
 const KEYWORDS: &[&str] = &[
     "module", "sub", "end", "let", "var", "call", "if", "else", "while", "and", "or", "not",
     "true", "false", "use", "form", "on", "int", "double", "bool", "text",
+    // Build targets (PRD G12). `target` is a soft keyword, so it is offered
+    // here but not reserved by the lexer.
+    "target", "console", "gui", "sharedlib", "staticlib",
 ];
 
 fn item(label: &str, kind: CompletionItemKind, detail: String) -> CompletionItem {

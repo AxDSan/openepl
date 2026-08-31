@@ -20,7 +20,10 @@ The IR is **build-time only** and is **never embedded** in output binaries
 ## 2. Text grammar (v0)
 
 ```text
-module  := "module" IDENT NEWLINE item*
+module  := "module" IDENT NEWLINE decl* item*
+decl    := target | use
+target  := "target" TARGETKIND NEWLINE          # soft keyword; at most one
+use     := "use" IDENT NEWLINE
 item    := sub                       # (reserved: form | component | const | enum | usertype)
 sub     := "sub" IDENT NEWLINE stmt* "end" NEWLINE
 stmt    := let | callstmt
@@ -38,6 +41,23 @@ args     := expr ("," expr)*
   `\n \t \\ \" \0`; raw UTF-8 bytes pass through.
 - `main` is the program entry (lowered to `ECodeStart`). v0 requires exactly one
   subroutine named `main`; multi-sub and parameters are **(reserved)**.
+- **Build target** (v0.4, PRD G12). `TARGETKIND` is one of `console`, `gui`,
+  `sharedlib` (aliases `shared`/`dll`/`so`) or `staticlib` (alias `static`).
+  Omitted, it is inferred: a module declaring a form is `gui`, otherwise
+  `console` — so every file written before targets existed still means what it
+  meant. `--target` on the command line overrides the declaration, so one source
+  builds as either a program or a library without being edited.
+
+  The target changes only the **entry contract**:
+
+  | Target | Entry | Exports |
+  | --- | --- | --- |
+  | `console` | `ECodeStart` calls `main` | — |
+  | `gui` | `ECodeStart` builds the form, then runs `main`, then the loop | — |
+  | `sharedlib`, `staticlib` | none | every `sub` under its plain name, plus `<module>_init` for module variables |
+
+  `target` is a **soft keyword**: recognised only in this position, so it stays
+  usable as a variable or property name everywhere else.
 - Locals are immutable in v0 (single `let` binding; no reassignment).
 
 ## 3. Type system (`SDT_*` tags)

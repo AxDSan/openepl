@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::sema::{check_args_in, property_type, type_of_expr_in, Components};
-use crate::{Component, Expr, Item, Module, Registry, Stmt, StmtKind, Ty};
+use crate::{Component, Expr, Item, Module, Registry, Stmt, StmtKind, Target, Ty};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidateError {
@@ -50,9 +50,42 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     let sub_names: HashSet<&str> = subs.iter().map(|s| s.name.as_str()).collect();
 
     // --- entry point -----------------------------------------------------
-    // A GUI module is entered through its form; a console module needs `main`.
-    if forms.is_empty() && !sub_names.contains("main") {
-        push("module has no `main` subroutine and no `form` (nothing to run)".into(), 0);
+    // What counts as a valid entry depends on the target: a GUI module is
+    // entered through its form, a console module needs `main`, and a library
+    // has no entry at all — it is called by a host.
+    let target = m.target();
+    if target.is_executable() {
+        if forms.is_empty() && !sub_names.contains("main") {
+            push("module has no `main` subroutine and no `form` (nothing to run)".into(), 0);
+        }
+        if target == Target::Console && !forms.is_empty() {
+            push(
+                "`target console` but the module declares a form — use `target gui`".into(),
+                0,
+            );
+        }
+        if target == Target::Gui && forms.is_empty() {
+            push("`target gui` but the module declares no form".into(), 0);
+        }
+    } else {
+        if subs.is_empty() {
+            push(
+                format!(
+                    "`target {}` exports nothing — a library needs at least one subroutine",
+                    target.as_str()
+                ),
+                0,
+            );
+        }
+        if !forms.is_empty() {
+            push(
+                format!(
+                    "`target {}` cannot declare a form — build a GUI module as `target gui`",
+                    target.as_str()
+                ),
+                0,
+            );
+        }
     }
     if forms.len() > 1 {
         push(format!(

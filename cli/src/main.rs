@@ -18,7 +18,7 @@ mod lsp;
 mod lsp_index;
 
 use openepl_backend::lower_module;
-use openepl_ir::{parse, validate};
+use openepl_ir::{parse, validate, Target};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -64,10 +64,19 @@ fn usage() {
     );
 }
 
-/// Parse `<in.oir> [-o out]` from an argument slice.
-fn parse_io(rest: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
+/// What a build/emit invocation was asked to do.
+struct Io {
+    input: PathBuf,
+    output: Option<PathBuf>,
+    /// Overrides the module's own `target` declaration when given.
+    target: Option<Target>,
+}
+
+/// Parse `<in.oir> [-o out] [--target kind]` from an argument slice.
+fn parse_io(rest: &[String]) -> Result<Io, String> {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut target: Option<Target> = None;
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -75,6 +84,13 @@ fn parse_io(rest: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
                 i += 1;
                 let v = rest.get(i).ok_or("`-o` needs a path")?;
                 output = Some(PathBuf::from(v));
+            }
+            "--target" | "-t" => {
+                i += 1;
+                let v = rest.get(i).ok_or("`--target` needs a kind")?;
+                target = Some(Target::parse(v).ok_or_else(|| {
+                    format!("unknown target `{v}` — expected console, gui, sharedlib or staticlib")
+                })?);
             }
             s if s.starts_with('-') => return Err(format!("unknown flag `{s}`")),
             s => {
@@ -87,19 +103,23 @@ fn parse_io(rest: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
         i += 1;
     }
     let input = input.ok_or("no input .oir file given")?;
-    Ok((input, output))
+    Ok(Io {
+        input,
+        output,
+        target,
+    })
 }
 
 fn cmd_emit(rest: &[String]) -> i32 {
-    let (input, _) = match parse_io(rest) {
+    let io = match parse_io(rest) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
             return 2;
         }
     };
-    match compile(&input) {
-        Ok((ll, _plan)) => {
+    match compile(&io.input, io.target) {
+        Ok((ll, _plan, _t)) => {
             print!("{ll}");
             0
         }
@@ -119,13 +139,14 @@ fn cmd_emit(rest: &[String]) -> i32 {
 ///
 /// Line-based rather than JSON so neither side needs a serialisation library.
 fn cmd_inspect(rest: &[String]) -> i32 {
-    let (input, _) = match parse_io(rest) {
+    let io = match parse_io(rest) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
             return 2;
         }
     };
+    let input = io.input;
     let src = match std::fs::read_to_string(&input) {
         Ok(s) => s,
         Err(e) => {
@@ -185,22 +206,22 @@ fn literal_text(e: &openepl_ir::Expr) -> String {
 }
 
 fn cmd_build(rest: &[String], then_run: bool) -> i32 {
-    let (input, output) = match parse_io(rest) {
+    let io = match parse_io(rest) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
             return 2;
         }
     };
-    let out_bin = output.unwrap_or_else(|| default_output(&input));
-
-    let (ll, plan) = match compile(&input) {
+    let input = io.input;
+    let (ll, plan, target) = match compile(&input, io.target) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
             return 1;
         }
     };
+    let out_bin = io.output.unwrap_or_else(|| default_output(&input, target));
 
     let ll_path = out_bin.with_extension("ll");
     if let Err(e) = std::fs::write(&ll_path, &ll) {
@@ -209,7 +230,7 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
     }
 
     let repo_root = find_repo_root().expect("runtime located during compile()");
-    if let Err(code) = clang_link(&ll_path, &repo_root, &plan, &out_bin) {
+    if let Err(code) = clang_link(&ll_path, &repo_root, &plan, &out_bin, target) {
         return code;
     }
     eprintln!("openepl: wrote {}", out_bin.display());
@@ -230,10 +251,16 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
 
 /// Parse, introspect libraries, validate, and lower to LLVM IR.
 /// Returns the `.ll` text and the implementation sources to static-link.
-fn compile(input: &Path) -> Result<(String, libload::LibPlan), String> {
+fn compile(input: &Path, target_override: Option<Target>) -> Result<(String, libload::LibPlan, Target), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
-    let module = parse(&src).map_err(|e| e.to_string())?;
+    let mut module = parse(&src).map_err(|e| e.to_string())?;
+    // An explicit --target wins over the module's declaration: the same source
+    // should be buildable as a program or a library without editing it.
+    if let Some(t) = target_override {
+        module.target = Some(t);
+    }
+    let target = module.target();
 
     let repo_root = find_repo_root().ok_or_else(|| {
         "could not locate the OpenEPL runtime (runtime/openepl_core.h); \
@@ -258,12 +285,18 @@ fn compile(input: &Path) -> Result<(String, libload::LibPlan), String> {
         ));
     }
     let ll = lower_module(&module, &plan.registry).map_err(|e| e.to_string())?;
-    Ok((ll, plan))
+    Ok((ll, plan, target))
 }
 
-fn default_output(input: &Path) -> PathBuf {
+fn default_output(input: &Path, target: Target) -> PathBuf {
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("a");
-    PathBuf::from(stem)
+    // Libraries follow the platform convention, so a host's linker finds them
+    // by the name it expects (`-lgreet` wants `libgreet.so`).
+    match target {
+        Target::Console | Target::Gui => PathBuf::from(stem),
+        Target::SharedLib => PathBuf::from(format!("lib{stem}.so")),
+        Target::StaticLib => PathBuf::from(format!("lib{stem}.a")),
+    }
 }
 
 /// Invoke clang to assemble the `.ll` and static-link the library implementation
@@ -273,50 +306,80 @@ fn clang_link(
     repo_root: &Path,
     plan: &libload::LibPlan,
     out_bin: &Path,
+    target: Target,
 ) -> Result<(), i32> {
     let cfg = &plan.build;
-    // C++ is only needed when a library that requires it is actually used, so a
-    // console program never drags in the UI stack or libstdc++ (ADR 0006).
-    let mut cmd = Command::new(if cfg.needs_cxx { "clang++" } else { "clang" });
-    cmd.arg("-O0")
-        .arg("-ffunction-sections")
-        .arg("-fdata-sections")
-        .arg("-Wl,--gc-sections")
-        .arg("-Wno-override-module")
-        .arg("-I")
-        .arg(repo_root.join("abi"))
-        .arg("-I")
-        .arg(repo_root.join("runtime"))
-        .arg(ll_path);
+    let driver = if cfg.needs_cxx { "clang++" } else { "clang" };
+
+    // Flags every invocation needs, whether we are linking a program or
+    // compiling one object at a time for an archive.
+    let mut common: Vec<String> = vec![
+        "-O0".into(),
+        "-ffunction-sections".into(),
+        "-fdata-sections".into(),
+        "-Wno-override-module".into(),
+        "-I".into(),
+        repo_root.join("abi").display().to_string(),
+        "-I".into(),
+        repo_root.join("runtime").display().to_string(),
+    ];
     for d in &cfg.include_dirs {
-        cmd.arg("-I").arg(d);
+        common.push("-I".into());
+        common.push(d.display().to_string());
     }
     for d in &cfg.defines {
-        cmd.arg(format!("-D{d}"));
+        common.push(format!("-D{d}"));
     }
     match libload::pkg_config_flags(&cfg.pkg_config, "--cflags") {
-        Ok(flags) => {
-            for f in flags {
-                cmd.arg(f);
-            }
-        }
+        Ok(flags) => common.extend(flags),
         Err(e) => {
             eprintln!("openepl: {e}");
             return Err(1);
         }
     }
-    // When any library needs C++ the driver is clang++, which would otherwise
-    // compile our .c files as C++ and mangle their symbols (breaking the C ABI
-    // the emitted IR calls). Mark each source's language explicitly.
+    // Both library kinds must be position independent: a shared object requires
+    // it, and a static archive is routinely linked into one.
+    if !target.is_executable() {
+        common.push("-fPIC".into());
+    }
+
+    // The inputs, each with the language it must be compiled as. When any
+    // library needs C++ the driver is clang++, which would otherwise compile
+    // our .c files as C++ and mangle their symbols, breaking the C ABI the
+    // emitted IR calls.
+    let mut inputs: Vec<(PathBuf, Option<&'static str>)> = vec![(ll_path.to_path_buf(), None)];
     for s in &plan.impl_sources {
+        // The process-entry object provides `main`, which calls `ECodeStart`.
+        // A library has no `ECodeStart`, so linking it in leaves an undefined
+        // symbol and the `.so` fails to dlopen — a file with the right
+        // extension that cannot actually be loaded. oe_start.c lives in its own
+        // TU precisely so a build target can drop it (PRD G12).
+        if !target.is_executable() && s.file_name().and_then(|f| f.to_str()) == Some("oe_start.c") {
+            continue;
+        }
         let is_cxx = matches!(
             s.extension().and_then(|e| e.to_str()),
             Some("cpp") | Some("cc") | Some("cxx")
         );
-        if cfg.needs_cxx {
-            cmd.arg("-x").arg(if is_cxx { "c++" } else { "c" });
+        let lang = if cfg.needs_cxx {
+            Some(if is_cxx { "c++" } else { "c" })
+        } else {
+            None
+        };
+        inputs.push((s.clone(), lang));
+    }
+
+    if target == Target::StaticLib {
+        return build_archive(driver, &common, &inputs, out_bin);
+    }
+
+    let mut cmd = Command::new(driver);
+    cmd.args(&common);
+    for (path, lang) in &inputs {
+        if let Some(l) = lang {
+            cmd.arg("-x").arg(l);
         }
-        cmd.arg(s);
+        cmd.arg(path);
     }
     for a in &cfg.link_args {
         cmd.arg(a);
@@ -333,6 +396,14 @@ fn clang_link(
         }
     }
     cmd.arg("-lm"); // libm for the floating-point commands
+    if target == Target::SharedLib {
+        cmd.arg("-shared");
+    } else {
+        // Dead-strip: the headline property of the BlackMoon model (PRD M2).
+        // Only for programs — a library must keep exports no host has linked
+        // yet, and --gc-sections would drop every one of them.
+        cmd.arg("-Wl,--gc-sections");
+    }
     cmd.arg("-o").arg(out_bin);
 
     match cmd.status() {
@@ -343,6 +414,66 @@ fn clang_link(
         }
         Err(e) => {
             eprintln!("openepl: could not invoke clang: {e}");
+            Err(1)
+        }
+    }
+}
+
+/// Compile each input to its own object and archive them.
+///
+/// `clang -c` refuses a single `-o` for several inputs, so an archive has to be
+/// built one object at a time rather than in one command like a link.
+fn build_archive(
+    driver: &str,
+    common: &[String],
+    inputs: &[(PathBuf, Option<&'static str>)],
+    out_lib: &Path,
+) -> Result<(), i32> {
+    let dir = std::env::temp_dir().join(format!("openepl_ar_{}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("openepl: cannot create {}: {e}", dir.display());
+        return Err(1);
+    }
+
+    let mut objects: Vec<PathBuf> = Vec::new();
+    for (i, (path, lang)) in inputs.iter().enumerate() {
+        let obj = dir.join(format!("{i}.o"));
+        let mut cmd = Command::new(driver);
+        cmd.args(common).arg("-c");
+        if let Some(l) = lang {
+            cmd.arg("-x").arg(l);
+        }
+        cmd.arg(path).arg("-o").arg(&obj);
+        match cmd.status() {
+            Ok(s) if s.success() => objects.push(obj),
+            Ok(s) => {
+                eprintln!("openepl: clang failed with status {s} on {}", path.display());
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(1);
+            }
+            Err(e) => {
+                eprintln!("openepl: could not invoke {driver}: {e}");
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(1);
+            }
+        }
+    }
+
+    // `ar rcs` replaces rather than appends, so a stale archive of the same name
+    // cannot leave old objects behind.
+    let _ = std::fs::remove_file(out_lib);
+    let mut ar = Command::new("ar");
+    ar.arg("rcs").arg(out_lib).args(&objects);
+    let status = ar.status();
+    let _ = std::fs::remove_dir_all(&dir);
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => {
+            eprintln!("openepl: ar failed with status {s}");
+            Err(1)
+        }
+        Err(e) => {
+            eprintln!("openepl: could not invoke ar: {e}");
             Err(1)
         }
     }

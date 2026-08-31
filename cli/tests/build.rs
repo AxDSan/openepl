@@ -847,3 +847,178 @@ fn layout_follows_the_window_size() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Build targets (PRD G12): one source, several artifacts
+// ---------------------------------------------------------------------------
+
+/// A library source: no entry point, two subroutines to export.
+const LIB_SRC: &str = "module greetlib\n\
+                       target sharedlib\n\
+                       \n\
+                       sub greet\n  call print_text(\"hello from a library\")\nend\n\
+                       \n\
+                       sub farewell\n  call print_text(\"goodbye\")\nend\n";
+
+/// Build `LIB_SRC` for `target`, returning the artifact path. `tag` must be
+/// unique per test — see `build_as`.
+fn build_lib(target: &str, tag: &str, ext: &str) -> PathBuf {
+    let repo = repo();
+    let dir = std::env::temp_dir().join(format!("openepl_lib_{tag}"));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join("greetlib.oir");
+    std::fs::write(&src, LIB_SRC).expect("write source");
+    let out = dir.join(format!("libgreet.{ext}"));
+
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            target,
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+        .status()
+        .expect("run openepl");
+    assert!(status.success(), "openepl build --target {target} failed");
+    out
+}
+
+/// Compile `main_src` against `lib`, run it, and return its stdout.
+fn run_c_host(dir: &Path, main_src: &str, lib: &Path, tag: &str) -> String {
+    let c = dir.join(format!("host_{tag}.c"));
+    std::fs::write(&c, main_src).expect("write host");
+    let bin = dir.join(format!("host_{tag}"));
+    let status = Command::new("clang")
+        .arg(&c)
+        .arg(lib)
+        .arg("-lm")
+        .arg("-o")
+        .arg(&bin)
+        .status()
+        .expect("run clang");
+    assert!(status.success(), "linking the C host failed");
+    let out = Command::new(&bin).output().expect("run host");
+    assert!(out.status.success(), "host exited non-zero");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A `.so` must actually LOAD and RUN, not merely exist with the right
+/// extension. The first version of this linked cleanly and then failed to
+/// dlopen with `undefined symbol: ECodeStart`, because the runtime's
+/// process-entry object came along for the ride.
+#[test]
+fn shared_library_loads_and_its_exports_run() {
+    let lib = build_lib("sharedlib", "so", "so");
+    let dir = lib.parent().unwrap();
+
+    let host = "#include <dlfcn.h>\n#include <stdio.h>\n\
+                int main(void){\n\
+                  void* h = dlopen(\"LIBPATH\", RTLD_NOW);\n\
+                  if(!h){ printf(\"dlopen failed: %s\\n\", dlerror()); return 1; }\n\
+                  void (*init)(void) = dlsym(h, \"greetlib_init\");\n\
+                  void (*greet)(void) = dlsym(h, \"greet\");\n\
+                  void (*bye)(void) = dlsym(h, \"farewell\");\n\
+                  if(!init || !greet || !bye){ printf(\"missing export\\n\"); return 1; }\n\
+                  init(); greet(); bye(); return 0;\n}\n";
+    let host = host.replace("LIBPATH", lib.to_str().unwrap());
+
+    // The host links against libdl only; the library is opened at run time.
+    let c = dir.join("dlhost.c");
+    std::fs::write(&c, host).expect("write host");
+    let bin = dir.join("dlhost");
+    let status = Command::new("clang")
+        .arg(&c)
+        .arg("-ldl")
+        .arg("-o")
+        .arg(&bin)
+        .status()
+        .expect("clang");
+    assert!(status.success(), "compiling the dlopen host failed");
+    let out = Command::new(&bin).output().expect("run host");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("hello from a library") && text.contains("goodbye"),
+        "exports did not run: {text}"
+    );
+}
+
+/// The exports must be there under their plain names, and the program entry
+/// must NOT be: a library with an `ECodeStart` is a program wearing a hat.
+#[test]
+fn shared_library_exports_plain_names_and_no_entry() {
+    let lib = build_lib("sharedlib", "syms", "so");
+    let out = Command::new("nm")
+        .args(["-D", "--defined-only"])
+        .arg(&lib)
+        .output()
+        .expect("nm");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains(" T greet"), "missing export `greet`: {text}");
+    assert!(text.contains(" T farewell"), "missing export `farewell`");
+    assert!(
+        !text.contains("ECodeStart"),
+        "a library must not define a program entry: {text}"
+    );
+
+    let undef = Command::new("nm").args(["-D", "-u"]).arg(&lib).output().expect("nm");
+    assert!(
+        !String::from_utf8_lossy(&undef.stdout).contains("ECodeStart"),
+        "unresolved ECodeStart would make the .so unloadable"
+    );
+}
+
+/// A `.a` has to link into a real host and run.
+#[test]
+fn static_library_links_into_a_c_host() {
+    let lib = build_lib("staticlib", "a", "a");
+    let dir = lib.parent().unwrap();
+    let text = run_c_host(
+        dir,
+        "void greetlib_init(void); void greet(void);\n\
+         int main(void){ greetlib_init(); greet(); return 0; }\n",
+        &lib,
+        "static",
+    );
+    assert!(
+        text.contains("hello from a library"),
+        "the archived export did not run: {text}"
+    );
+}
+
+/// The same source builds as either artifact — that is what makes the target a
+/// build-time choice rather than a rewrite (G12).
+#[test]
+fn one_source_builds_as_both_library_kinds() {
+    let so = build_lib("sharedlib", "both_so", "so");
+    let a = build_lib("staticlib", "both_a", "a");
+    assert!(so.exists() && a.exists());
+    let ar = Command::new("ar").arg("t").arg(&a).output().expect("ar t");
+    assert!(
+        !String::from_utf8_lossy(&ar.stdout).trim().is_empty(),
+        "the archive should contain objects"
+    );
+}
+
+/// A library with no subroutines exports nothing, and a form belongs to a GUI
+/// program — both are caught before the toolchain is invoked.
+#[test]
+fn library_targets_reject_nonsense() {
+    let dir = std::env::temp_dir().join("openepl_lib_reject");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join("empty.oir");
+    std::fs::write(&src, "module empty\ntarget sharedlib\n").expect("write");
+    let out = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", src.to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+        .output()
+        .expect("run openepl");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "an empty library should not build");
+    assert!(
+        err.contains("exports nothing"),
+        "the error should say what is wrong: {err}"
+    );
+}

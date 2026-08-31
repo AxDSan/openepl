@@ -298,10 +298,70 @@ pub struct GlobalVar {
     pub value: Expr,
 }
 
+/// What a module is compiled into (PRD G12: one project, every artifact).
+///
+/// The target changes the *entry contract*, not the language: an executable
+/// gets `ECodeStart`, a library gets no entry and exports its subroutines
+/// instead. Everything else about lowering is identical, which is the point —
+/// shipping a `.so` is a build-target choice, not a rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// Terminal program; `main` is the entry.
+    Console,
+    /// Windowed program; the form drives the entry, `main` runs first if present.
+    Gui,
+    /// `.so` / `.dll` / `.dylib` — no entry, subroutines exported.
+    SharedLib,
+    /// `.a` / `.lib` — no entry, subroutines exported, linked into a host.
+    StaticLib,
+}
+
+impl Target {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Target::Console => "console",
+            Target::Gui => "gui",
+            Target::SharedLib => "sharedlib",
+            Target::StaticLib => "staticlib",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Target> {
+        match s {
+            "console" => Some(Target::Console),
+            "gui" => Some(Target::Gui),
+            "sharedlib" | "shared" | "dll" | "so" => Some(Target::SharedLib),
+            "staticlib" | "static" => Some(Target::StaticLib),
+            _ => None,
+        }
+    }
+
+    /// Does this target produce a program with an entry point?
+    pub fn is_executable(self) -> bool {
+        matches!(self, Target::Console | Target::Gui)
+    }
+
+    /// The conventional file extension on this platform, or `""` for an
+    /// executable (which has none on Unix).
+    pub fn extension(self) -> &'static str {
+        match self {
+            Target::Console | Target::Gui => "",
+            // Linux naming for now; Windows/macOS land with Phase 4's
+            // cross-platform work.
+            Target::SharedLib => "so",
+            Target::StaticLib => "a",
+        }
+    }
+}
+
 /// A whole compilation unit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub name: String,
+    /// What to build this module into. `None` means "infer": a module with a
+    /// form is a GUI program, otherwise a console one — so every file written
+    /// before targets existed still means what it meant.
+    pub target: Option<Target>,
     /// Support libraries this module uses (`use <name>`), beyond the implicit
     /// `core`.  The compiler introspects each for command signatures and links
     /// its implementations (PRD §5.4).
@@ -310,6 +370,17 @@ pub struct Module {
 }
 
 impl Module {
+    /// The target to build, declared or inferred.
+    pub fn target(&self) -> Target {
+        self.target.unwrap_or_else(|| {
+            if self.forms().next().is_some() {
+                Target::Gui
+            } else {
+                Target::Console
+            }
+        })
+    }
+
     /// Iterate the subroutines.
     pub fn subs(&self) -> impl Iterator<Item = &Sub> {
         self.items.iter().filter_map(|i| match i {

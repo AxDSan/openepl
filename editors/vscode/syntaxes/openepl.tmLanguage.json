@@ -13,6 +13,9 @@
       "include": "#number"
     },
     {
+      "include": "#buildtarget"
+    },
+    {
       "include": "#declaration"
     },
     {
@@ -97,7 +100,7 @@
       ]
     },
     "keyword": {
-      "match": "\\b(module|use|sub|end|let|var|call|if|else|while|form|on|and|or|not)\\b",
+      "match": "\\b(module|use|target|sub|end|let|var|call|if|else|while|form|on|and|or|not)\\b",
       "name": "keyword.control.openepl"
     },
     "type": {
@@ -127,6 +130,18 @@
       "captures": {
         "1": {
           "name": "variable.other.openepl"
+        }
+      }
+    },
+    "buildtarget": {
+      "comment": "Build-target kinds, meaningful only after `target`.",
+      "match": "\\b(target)\\s+(console|gui|sharedlib|staticlib|shared|static|dll|so)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.control.openepl"
+        },
+        "2": {
+          "name": "support.constant.openepl"
         }
       }
     }
