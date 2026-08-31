@@ -14,11 +14,13 @@
  * survives (ADR 0011).
  */
 #include <RmlUi/Core.h>
+#include <RmlUi/Core/Elements/ElementFormControl.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <fstream>
+#include <fcntl.h>
 #include <signal.h>
 #include <sstream>
 #include <sys/wait.h>
@@ -92,6 +94,15 @@ struct Designer {
     std::vector<std::string> pending_subs;
     std::vector<std::string> log_lines;
     bool dirty = false;
+
+    /// The code editor's text, and whether it holds edits the model has not
+    /// seen. `code_dirty` is what stops a refresh from overwriting what the
+    /// user is in the middle of typing.
+    std::string model_text;
+    bool code_dirty = false;
+    /// Read end of the running app's stdout+stderr, so its output lands in the
+    /// IDE console instead of the terminal the IDE was launched from.
+    int app_output = -1;
     bool dragging = false;
     int drag_dx = 0, drag_dy = 0;
 
@@ -214,13 +225,18 @@ void relayout() {
     }
 }
 
+void log(const std::string& line, const char* cls);
+
 void set_status(const std::string& text) {
     if (Rml::Element* e = by_id("statustext")) e->SetInnerRML(esc(text));
+    // Mirror into the console: the status bar shows only the latest message,
+    // and the one you need is usually the one it just replaced.
+    log(text, "muted");
     std::printf("designer: %s\n", text.c_str());
     std::fflush(stdout);
 }
 
-void log(const std::string& line, const char* cls = nullptr) {
+void log(const std::string& line, const char* cls) {
     g.log_lines.push_back(cls ? "<span class='" + std::string(cls) + "'>" + esc(line) + "</span>"
                               : esc(line));
     if (Rml::Element* e = by_id("log")) {
@@ -234,6 +250,10 @@ void mark_dirty() { g.dirty = true; }
 
 void run_app(const std::string& path);
 void stop_app();
+void drain_app_output();
+void log(const std::string& line, const char* cls = nullptr);
+Rml::ElementFormControl* code_editor();
+bool apply_code();
 void refresh_all();
 bool is_selected(const std::string& id);
 
@@ -399,7 +419,12 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
       << ";border-bottom:2px " << ACCENT << "}";
     s << "#codeview{position:absolute;left:0;top:" << TABBAR_H << "px;width:100%;"
          "background-color:" << PANEL << ";overflow:auto}";
-    s << "#fullcode{font-family:'" << family << "';font-size:12px;padding:8px 0 0 0}";
+    // The editor fills the pane. A textarea has no default appearance in RmlUi,
+    // so colours are explicit — the default text colour is white, which on this
+    // panel would be invisible.
+    s << "#fullcode{font-family:'" << family << "';font-size:13px;padding:8px 10px;"
+         "width:100%;height:100%;background-color:" << PANEL << ";color:" << TEXT
+      << ";border:0;caret-color:" << ACCENT << ";cursor:text}";
     s << "#canvasarea{left:0;top:" << TABBAR_H << "px;width:" << centre_w << "px;height:" << canvas_h
       << "px;background-color:" << CANVAS << ";decorator:image(\"" << dot_tile << "\" repeat)}";
 
@@ -533,7 +558,10 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
       << esc(g.model.form_name) << "</div>"
          "<div class='tab' id='tabcode' oe-view='code'>Code</div>"
          "</div>"
-         "<div id='codeview' style='display:none'><div id='fullcode'/></div>"
+         // A real RmlUi <textarea>, not a rendered div: it brings the caret,
+         // selection, keyboard handling and clipboard that make this an editor
+         // rather than a viewer.
+         "<div id='codeview' style='display:none'><textarea id='fullcode'/></div>"
          "<div id='canvasarea'>"
          "<div id='formwin'>"
          "<div id='formtitle'><span id='formtitletext'>Form</span>"
@@ -866,6 +894,10 @@ void rebuild_code() {
     std::vector<std::string> lines;
     std::string l;
     while (std::getline(f, l)) lines.push_back(l);
+    if (!g.code_dirty) {
+        g.model_text.clear();
+        for (const auto& line : lines) g.model_text += line + "\n";
+    }
 
     std::string want;
     if (const Component* c = g.model.find(g.selected)) {
@@ -898,21 +930,65 @@ void rebuild_code() {
     }
     code->SetInnerRML(html);
 
-    // The Code view shows the whole module, not just the wired handler.
-    if (Rml::Element* full = by_id("fullcode")) {
-        std::string all;
-        for (size_t i = 0; i < lines.size(); i++) {
-            char num[16];
-            std::snprintf(num, sizeof num, "%4zu", i + 1);
-            all += "<div class='cl'><span class='ln'>" + std::string(num) + "</span>" +
-                   highlight_line(lines[i]) + "</div>";
-        }
-        full->SetInnerRML(all);
+    // The Code view is an editable textarea holding the whole module.
+    //
+    // Never overwrite it while the user has unsaved edits: a refresh triggered
+    // by anything else (a selection change, a canvas drag) would silently throw
+    // away what they were typing.
+    if (!g.code_dirty) {
+        if (auto* full = code_editor()) full->SetValue(g.model_text);
     }
+}
+
+/// The code editor, or null before the chrome exists.
+Rml::ElementFormControl* code_editor() {
+    return dynamic_cast<Rml::ElementFormControl*>(by_id("fullcode"));
+}
+
+/// Push the editor's text to disk and reload the designer model from it.
+///
+/// The Rust parser stays the only reader of `.oir` (ADR 0011), so the model is
+/// rebuilt by re-inspecting the saved file rather than by parsing text here —
+/// two grammars would drift.
+bool apply_code() {
+    auto* ed = code_editor();
+    if (!ed) return false;
+    const std::string text = ed->GetValue();
+
+    std::FILE* f = std::fopen(g.model.path.c_str(), "w");
+    if (!f) { log("cannot write " + g.model.path, "err"); return false; }
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+
+    Model fresh;
+    std::string err;
+    if (!load_model(g.openepl_bin, g.model.path, fresh, err)) {
+        // The text is saved either way — losing the user's typing because it
+        // does not compile yet would be far worse than an out-of-date canvas.
+        log("saved, but the designer could not read it back:", "err");
+        log("  " + err, "err");
+        set_status("saved with errors — see the console");
+        g.code_dirty = false;
+        g.dirty = false;
+        g.model_text = text;
+        return false;
+    }
+    fresh.path = g.model.path;
+    g.model = fresh;
+    g.model_text = text;
+    g.code_dirty = false;
+    g.dirty = false;
+    g.selection.clear();
+    g.selected.clear();
+    set_status("saved " + g.model.path);
+    return true;
 }
 
 /// Switch the centre pane between the designer canvas and the code view.
 void set_view(const std::string& view) {
+    // Leaving the code view with unsaved text: commit it first, so the canvas
+    // reflects what the file now says rather than a stale model.
+    if (g.view == "code" && view != "code" && g.code_dirty) apply_code();
     g.view = view;
     const bool code = (view == "code");
     if (Rml::Element* e = by_id("canvasarea")) e->SetProperty("display", code ? "none" : "block");
@@ -1102,6 +1178,14 @@ void paste_clipboard() {
 }
 
 void save() {
+    // In the code view the user's text is the truth, not the component model:
+    // splicing the model over it would discard everything they typed.
+    if (g.code_dirty) {
+        apply_code();
+        rebuild_canvas();
+        rebuild_inspector();
+        return;
+    }
     std::string err;
     if (!save_model(g.model, g.pending_subs, property_needs_quotes, err)) {
         set_status("save failed: " + err);
@@ -1156,12 +1240,25 @@ void build_binary(bool then_run) {
 /// "nothing running".
 void run_app(const std::string& path) {
     stop_app();
+    // Pipe the app's stdout and stderr back to us: its output belongs in the
+    // IDE console, not in whatever terminal the IDE happened to start from.
+    int fds[2] = {-1, -1};
+    if (::pipe(fds) != 0) { log("could not create the output pipe", "err"); return; }
     const pid_t pid = fork();
     if (pid == 0) {
+        ::close(fds[0]);
+        ::dup2(fds[1], STDOUT_FILENO);
+        ::dup2(fds[1], STDERR_FILENO);
+        ::close(fds[1]);
         execl(path.c_str(), path.c_str(), (char*)nullptr);
         _exit(127);
     }
-    if (pid < 0) { log("could not start the app"); return; }
+    ::close(fds[1]);
+    if (pid < 0) { ::close(fds[0]); log("could not start the app"); return; }
+    // Non-blocking: poll_app drains it once per frame and must never stall the
+    // UI waiting for an app that is simply quiet.
+    ::fcntl(fds[0], F_SETFL, O_NONBLOCK);
+    g.app_output = fds[0];
     g.running_app = pid;
     log("> running (pid " + std::to_string(pid) + ")", "muted");
     set_status("running");
@@ -1178,21 +1275,64 @@ void stop_app() {
     ::kill(g.running_app, SIGTERM);
     int status = 0;
     ::waitpid(g.running_app, &status, 0);
+    drain_app_output();
     log("> stopped (pid " + std::to_string(g.running_app) + ")", "muted");
+    if (g.app_output >= 0) { ::close(g.app_output); g.app_output = -1; }
     g.running_app = 0;
     set_status("stopped");
 }
 
 /// Reap the app if it exited on its own, so Stop reports honestly.
+void drain_app_output() {
+    if (g.app_output < 0) return;
+    char buf[1024];
+    ssize_t n;
+    static std::string partial;
+    while ((n = ::read(g.app_output, buf, sizeof buf)) > 0) {
+        partial.append(buf, (size_t)n);
+        size_t nl;
+        // Log whole lines only: a write split mid-line would otherwise appear
+        // as two console entries.
+        while ((nl = partial.find('\n')) != std::string::npos) {
+            log(partial.substr(0, nl));
+            partial.erase(0, nl + 1);
+        }
+    }
+    if (n == 0) {   // the app closed its end
+        if (!partial.empty()) { log(partial); partial.clear(); }
+        ::close(g.app_output);
+        g.app_output = -1;
+    }
+}
+
 void poll_app() {
+    drain_app_output();
     if (g.running_app <= 0) return;
     int status = 0;
     if (::waitpid(g.running_app, &status, WNOHANG) == g.running_app) {
-        log("> app exited", "muted");
+        drain_app_output();      // whatever it printed on the way out
+        log("> app exited with code " + std::to_string(WEXITSTATUS(status)), "muted");
         g.running_app = 0;
     }
 }
 
+
+/// Global keyboard shortcuts.
+///
+/// Deliberately minimal: every key not claimed here falls through to RmlUi, and
+/// therefore to the code editor's caret. Claiming plain letters for tool
+/// shortcuts — the obvious next feature — would make the editor untypeable, so
+/// anything added here must require a modifier.
+bool on_key_down(Rml::Context* context, Rml::Input::KeyIdentifier key, int modifier, float, bool priority) {
+    if (priority) return true;   // let RmlUi's own bindings go first
+    const bool ctrl = (modifier & Rml::Input::KM_CTRL) != 0;
+    if (ctrl && key == Rml::Input::KI_S) {
+        save();
+        return false;            // handled; don't type an 's' into the editor
+    }
+    (void)context;
+    return true;
+}
 
 /* --- events --------------------------------------------------------------- */
 
@@ -1205,6 +1345,17 @@ struct Listener : Rml::EventListener {
             Rml::Element* src = el;
             const Rml::String cls = src->GetAttribute<Rml::String>("class", "");
             const Rml::String value = src->GetAttribute<Rml::String>("value", "");
+            if (src->GetId() == "fullcode") {
+                // Typing in the code editor. Mark it dirty so no refresh
+                // overwrites the text, and so Save knows the editor — not the
+                // component model — is what to write out.
+                if (!g.code_dirty) {
+                    g.code_dirty = true;
+                    g.dirty = true;
+                    set_status("code edited — Ctrl+S to save");
+                }
+                return;
+            }
             if (src->GetId() == "search") {
                 g.search = value;
                 if (Rml::Element* tb = by_id("toolbox")) {
@@ -1607,8 +1758,36 @@ void run_script(const char* script) {
             else if (verb == "paste") paste_clipboard();
             else if (verb == "delete") delete_selection();
             else if (verb == "addsel") select(arg, true);
+            else if (verb == "type") {
+                // Simulate typing in the code editor: set its value and fire
+                // the same path a keystroke takes, so the test exercises the
+                // real dirty-tracking rather than a shortcut around it.
+                if (auto* ed = code_editor()) {
+                    ed->SetValue(arg);
+                    g.code_dirty = true;
+                    g.dirty = true;
+                }
+            }
+            else if (verb == "codetext") {
+                if (auto* ed = code_editor()) {
+                    std::printf("codetext: %s\n", ed->GetValue().c_str());
+                    std::fflush(stdout);
+                }
+            }
             else if (verb == "save") save();
             else if (verb == "build") build_binary(false);
+            else if (verb == "run") {
+                build_binary(true);
+                // Give the child a moment to produce output, then drain it the
+                // way the frame loop would.
+                for (int i = 0; i < 40; i++) { poll_app(); usleep(50000); }
+            }
+            else if (verb == "logdump") {
+                std::printf("logdump-begin\n");
+                for (const auto& l : g.log_lines) std::printf("LOG %s\n", l.c_str());
+                std::printf("logdump-end\n");
+                std::fflush(stdout);
+            }
         }
         if (semi == std::string::npos) break;
         i = semi + 1;
@@ -1644,7 +1823,16 @@ int main(int argc, char** argv) {
     const auto* fonts = openepl::ui::font_candidates(&font_count);
     std::string family = "sans-serif";
     for (int i = 0; i < font_count; i++) {
-        if (Rml::LoadFontFace(fonts[i].path)) { family = fonts[i].family; break; }
+        if (!Rml::LoadFontFace(fonts[i].path)) continue;
+        family = fonts[i].family;
+        // Load the companion styles too. RmlUi does not synthesise bold or
+        // italic: text asking for a face that was never loaded renders with no
+        // font at all, i.e. invisibly. Missing companions are not fatal —
+        // that text just falls back to regular.
+        for (const char* extra : {fonts[i].bold, fonts[i].italic, fonts[i].bold_italic}) {
+            if (extra) Rml::LoadFontFace(extra);
+        }
+        break;
     }
 
     const std::string dot_tile = write_dot_tile("openepl_dotgrid.tga", 10);
@@ -1708,7 +1896,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    while (Backend::ProcessEvents(g.context, nullptr, true)) {
+    while (Backend::ProcessEvents(g.context, &on_key_down, true)) {
         poll_app();
         // Follow the OS window. The backend resizes the context; the layout has
         // to follow or everything past the old size is left unpainted.

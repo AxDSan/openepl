@@ -128,7 +128,16 @@ int oe_ui_init(const char* title, int width, int height) {
     const auto* fonts = openepl::ui::font_candidates(&font_count);
     std::string family = "sans-serif";
     for (int i = 0; i < font_count; i++) {
-        if (Rml::LoadFontFace(fonts[i].path)) { family = fonts[i].family; break; }
+        if (!Rml::LoadFontFace(fonts[i].path)) continue;
+        family = fonts[i].family;
+        // Load the companion styles too. RmlUi does not synthesise bold or
+        // italic: text asking for a face that was never loaded renders with no
+        // font at all, i.e. invisibly. Missing companions are not fatal —
+        // that text just falls back to regular.
+        for (const char* extra : {fonts[i].bold, fonts[i].italic, fonts[i].bold_italic}) {
+            if (extra) Rml::LoadFontFace(extra);
+        }
+        break;
     }
 
     g.context = Rml::CreateContext("main", Rml::Vector2i(width, height));

@@ -6,24 +6,24 @@ module hello_form
 use ui
 
 form main_window
-  title  = "OpenEPL — Phase 2"
-  width  = 480
+  title = "OpenEPL — Phase 2"
+  width = 480
   height = 300
   background_color = "#1e2233"
 
   label greeting
-    text  = "Click the button."
-    left  = 40
-    top   = 40
+    text = "Click the button."
+    left = 40
+    top = 50
     width = 400
     color = "#ffffff"
   end
 
   button ok_button
-    text   = "Click me"
-    left   = 40
-    top    = 110
-    width  = 160
+    text = "Click me"
+    left = 150
+    top = 130
+    width = 160
     height = 44
     background_color = "#4a86e8"
     border_radius = 8
