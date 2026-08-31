@@ -89,6 +89,9 @@ struct Designer {
     Rml::Context* context = nullptr;
     Rml::ElementDocument* doc = nullptr;
     Model model;
+    /// The compiler. Resolved at startup from our own location so an installed
+    /// bundle works wherever it is unpacked; the in-repo dev path is the
+    /// fallback.
     std::string openepl_bin = "./target/debug/openepl";
     std::string selected;
     std::string inspector_tab = "props";
@@ -1257,19 +1260,6 @@ void save() {
     rebuild_code();
 }
 
-/// Run a command, streaming its output into the build log.
-int run_logged(const std::string& cmd) {
-    FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
-    if (!pipe) { log("could not start: " + cmd); return -1; }
-    char buf[512];
-    while (fgets(buf, sizeof buf, pipe)) {
-        std::string line(buf);
-        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
-        if (!line.empty()) log(line, "muted");
-    }
-    return pclose(pipe);
-}
-
 /// Seconds since an arbitrary origin, for step timings.
 double now_seconds() {
     struct timespec ts;
@@ -1633,9 +1623,6 @@ struct Listener : Rml::EventListener {
                 }
                 if (e->HasAttribute("oe-tab")) {
                     g.inspector_tab = e->GetAttribute<Rml::String>("oe-tab", "props");
-                    for (const char* id : {"props", "events"}) {
-                        // Repaint the segmented control.
-                    }
                     if (Rml::Element* bar = e->GetParentNode()) {
                         for (int i = 0; i < bar->GetNumChildren(); i++) {
                             Rml::Element* seg = bar->GetChild(i);
@@ -2228,7 +2215,48 @@ std::string run_welcome(const std::string& family) {
     return chosen;
 }
 
+/// A writable per-user cache path for `name`.
+std::string cache_file(const char* name) {
+    const char* xdg = std::getenv("XDG_CACHE_HOME");
+    const char* home = std::getenv("HOME");
+    std::string dir;
+    if (xdg && *xdg) {
+        dir = std::string(xdg) + "/openepl";
+    } else if (home && *home) {
+        dir = std::string(home) + "/.cache/openepl";
+    } else {
+        dir = "/tmp";
+    }
+    std::string acc;
+    for (size_t i = 0; i < dir.size(); i++) {
+        acc += dir[i];
+        if (dir[i] == '/' || i + 1 == dir.size()) ::mkdir(acc.c_str(), 0755);
+    }
+    return dir + "/" + name;
+}
+
+/// The `openepl` binary that ships beside us.
+///
+/// A bundle is unpacked wherever the user likes, so the compiler cannot be
+/// found by a fixed relative path. Ours is next to this executable; the repo's
+/// debug build is the fallback for development.
+std::string sibling_openepl() {
+    char buf[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n > 0) {
+        buf[n] = 0;
+        std::string exe(buf);
+        const size_t slash = exe.find_last_of('/');
+        if (slash != std::string::npos) {
+            const std::string cand = exe.substr(0, slash) + "/openepl";
+            if (::access(cand.c_str(), X_OK) == 0) return cand;
+        }
+    }
+    return "./target/debug/openepl";
+}
+
 int main(int argc, char** argv) {
+    g.openepl_bin = sibling_openepl();
     // Either argument may be omitted: with no project we show the welcome
     // screen, and the compiler path is optional. They are told apart by
     // extension rather than by position, so `openepl-designer <compiler>` works
@@ -2274,7 +2302,10 @@ int main(int argc, char** argv) {
         break;
     }
 
-    const std::string dot_tile = write_dot_tile("openepl_dotgrid.tga", 10);
+    // Into a cache directory, not the working directory: Studio is launched
+    // from wherever the user's project lives, and dropping a .tga into it is
+    // littering someone else's folder.
+    const std::string dot_tile = write_dot_tile(cache_file("openepl_dotgrid.tga"), 10);
     g.context = Rml::CreateContext("studio", Rml::Vector2i(INIT_W, INIT_H));
 
     // Splash first, and painted before the slow part starts. Loading the

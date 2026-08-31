@@ -8,6 +8,7 @@
 #define OPENEPL_DESIGNER_DOTGRID_H
 
 #include <cstdio>
+#include <sys/stat.h>
 #include <string>
 
 namespace openepl::designer {
