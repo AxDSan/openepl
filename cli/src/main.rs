@@ -5,6 +5,8 @@
 //!   openepl run   <in.oir> [-o <out>]   build, then execute it
 //!   openepl emit  <in.oir>              print the generated LLVM IR to stdout
 //!   openepl lsp                         language server (stdio) for editors
+//!   openepl templates                   list project templates
+//!   openepl new <tmpl> <dir>            create a project from a template
 //!
 //! The pipeline is the BlackMoon model with `clang` standing in for the raw
 //! obj-emit + system-linker steps (PRD §5.2): IR -> `.ll` -> `clang` assembles
@@ -16,6 +18,7 @@ use std::process::{exit, Command};
 mod libload;
 mod lsp;
 mod lsp_index;
+mod templates;
 
 use openepl_backend::lower_module;
 use openepl_ir::{parse, validate, Target};
@@ -40,6 +43,20 @@ fn run(args: &[String]) -> i32 {
         "emit" => cmd_emit(rest),
         "inspect" => cmd_inspect(rest),
         "lsp" => lsp::run(),
+        "templates" => match find_repo_root() {
+            Some(root) => templates::cmd_list(&root),
+            None => {
+                eprintln!("openepl: could not locate the OpenEPL templates directory");
+                1
+            }
+        },
+        "new" => match find_repo_root() {
+            Some(root) => templates::cmd_new(&root, rest),
+            None => {
+                eprintln!("openepl: could not locate the OpenEPL templates directory");
+                1
+            }
+        },
         "-h" | "--help" | "help" => {
             usage();
             0
@@ -60,7 +77,9 @@ fn usage() {
          openepl run   <in.oir> [-o <out>]   compile and run\n  \
          openepl emit  <in.oir>              print generated LLVM IR\n  \
          openepl inspect <in.oir>            dump the form model (for the designer)\n  \
-         openepl lsp                         language server over stdio (see docs/editors.md)\n"
+         openepl lsp                         language server over stdio (see docs/editors.md)\n  \
+         openepl templates                   list the available project templates\n  \
+         openepl new <template> <dir>        create a project from a template\n"
     );
 }
 

@@ -1,0 +1,8 @@
+# A static library: no entry point. Link the archive into a host and call the
+# exported subroutines, after calling `__MODULE___init` once.
+module __MODULE__
+target staticlib
+
+sub greet
+  call print_text("Hello from a static library.")
+end

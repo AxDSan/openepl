@@ -1022,3 +1022,112 @@ fn library_targets_reject_nonsense() {
         "the error should say what is wrong: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Project templates
+// ---------------------------------------------------------------------------
+
+fn openepl(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(args)
+        .current_dir(repo())
+        .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+        .output()
+        .expect("run openepl")
+}
+
+/// A template that does not compile is worse than no template: it hands a
+/// newcomer a broken project as their first experience. Every one is built.
+#[test]
+fn every_template_creates_a_project_that_builds() {
+    let listing = openepl(&["templates"]);
+    let text = String::from_utf8_lossy(&listing.stdout);
+    let ids: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("template: "))
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert!(!ids.is_empty(), "no templates listed:\n{text}");
+
+    for id in ids {
+        let dir = std::env::temp_dir().join(format!("openepl_tmpl_{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = openepl(&["new", id, dir.to_str().unwrap()]);
+        assert!(
+            out.status.success(),
+            "`openepl new {id}` failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // The listing tells the caller which file to open; it must exist.
+        let created = String::from_utf8_lossy(&out.stdout);
+        let open = created
+            .lines()
+            .find_map(|l| l.strip_prefix("open: "))
+            .expect("`new` should report the file to open");
+        assert!(Path::new(open).is_file(), "{open} was not created");
+
+        let bin = dir.join("out");
+        let built = openepl(&["build", open, "-o", bin.to_str().unwrap()]);
+        assert!(
+            built.status.success(),
+            "template `{id}` does not build:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The console template is the newcomer's first program: it must actually run
+/// and print, not merely compile.
+#[test]
+fn the_console_template_runs() {
+    let dir = std::env::temp_dir().join("openepl_tmpl_run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(openepl(&["new", "console-app", dir.to_str().unwrap()])
+        .status
+        .success());
+
+    let bin = dir.join("app");
+    let src = dir.join("main.oir");
+    assert!(openepl(&["build", src.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+        .status
+        .success());
+    let out = Command::new(&bin).output().expect("run template app");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Hello from OpenEPL"), "got: {text}");
+    assert!(text.contains("six times seven is 42"), "arithmetic line missing: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The module name comes from the directory, sanitised into an identifier.
+#[test]
+fn the_module_name_follows_the_directory() {
+    let dir = std::env::temp_dir().join("openepl-my-app");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = openepl(&["new", "console-app", dir.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("module: openepl_my_app"),
+        "dashes are not legal in an identifier: {text}"
+    );
+    let src = std::fs::read_to_string(dir.join("main.oir")).expect("read");
+    assert!(src.contains("module openepl_my_app"));
+    assert!(!src.contains("__MODULE__"), "placeholder left behind");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Creating into someone's existing work would destroy it.
+#[test]
+fn new_refuses_a_non_empty_directory() {
+    let dir = std::env::temp_dir().join("openepl_tmpl_occupied");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("keepme.txt"), "important").expect("write");
+    let out = openepl(&["new", "console-app", dir.to_str().unwrap()]);
+    assert!(!out.status.success(), "should refuse a non-empty directory");
+    assert!(
+        dir.join("keepme.txt").is_file(),
+        "the existing file must survive"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

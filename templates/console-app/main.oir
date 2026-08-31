@@ -1,0 +1,10 @@
+# A console program. Execution starts at `main`.
+module __MODULE__
+target console
+
+sub main
+  call print_text("Hello from OpenEPL.")
+
+  let answer: int = 6 * 7
+  call print_text(concat("six times seven is ", int_to_text(answer)))
+end
