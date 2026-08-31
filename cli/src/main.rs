@@ -4,6 +4,7 @@
 //!   openepl build <in.oir> [-o <out>]   parse -> lower -> clang -> native binary
 //!   openepl run   <in.oir> [-o <out>]   build, then execute it
 //!   openepl emit  <in.oir>              print the generated LLVM IR to stdout
+//!   openepl lsp                         language server (stdio) for editors
 //!
 //! The pipeline is the BlackMoon model with `clang` standing in for the raw
 //! obj-emit + system-linker steps (PRD §5.2): IR -> `.ll` -> `clang` assembles
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 mod libload;
+mod lsp;
 
 use openepl_backend::lower_module;
 use openepl_ir::{parse, validate};
@@ -36,6 +38,7 @@ fn run(args: &[String]) -> i32 {
         "run" => cmd_build(rest, true),
         "emit" => cmd_emit(rest),
         "inspect" => cmd_inspect(rest),
+        "lsp" => lsp::run(),
         "-h" | "--help" | "help" => {
             usage();
             0
@@ -55,7 +58,8 @@ fn usage() {
          openepl build <in.oir> [-o <out>]   compile to a native binary\n  \
          openepl run   <in.oir> [-o <out>]   compile and run\n  \
          openepl emit  <in.oir>              print generated LLVM IR\n  \
-         openepl inspect <in.oir>            dump the form model (for the designer)\n"
+         openepl inspect <in.oir>            dump the form model (for the designer)\n  \
+         openepl lsp                         language server over stdio (see docs/editors.md)\n"
     );
 }
 
