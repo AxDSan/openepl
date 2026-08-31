@@ -1214,11 +1214,17 @@ void refresh_highlight() {
     const size_t rows = (size_t)(viewport / theme::CODE_LINE_H) + 1;
     const size_t first_line = (size_t)(g.code_scroll / theme::CODE_LINE_H);
 
+    // The row count belongs in the cache key. The first refresh can run before
+    // the view has been laid out, when its height is zero and only one row
+    // "fits"; keyed on text and scroll alone, that one-line render is what the
+    // cache then preserves forever.
     static std::string painted;
     static size_t painted_first = (size_t)-1;
-    if (text == painted && first_line == painted_first) return;
+    static size_t painted_rows = 0;
+    if (text == painted && first_line == painted_first && rows == painted_rows) return;
     painted = text;
     painted_first = first_line;
+    painted_rows = rows;
 
     std::string html;
     for (size_t i = first_line; i < lines.size() && i < first_line + rows; i++) {
@@ -1377,7 +1383,14 @@ void set_view(const std::string& view) {
     if (Rml::Element* e = by_id("codeview")) e->SetProperty("display", code ? "block" : "none");
     // Sizing lives in relayout(), which is the single place that knows the
     // current dock geometry; duplicating it here is how the two drift.
-    if (code) relayout();
+    if (code) {
+        relayout();
+        // Lay out before deciding how many lines fit. Asking first gets the
+        // height the view had a moment ago — zero, on the way in — and the
+        // editor paints a single line until something else nudges it.
+        g.context->Update();
+        refresh_highlight();
+    }
     // Keep the toolbar switcher and the document tabs in step.
     for (const char* id : {"tabdesigner", "tabcode", "btndesigner", "btncode"}) {
         if (Rml::Element* e = by_id(id)) {

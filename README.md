@@ -165,12 +165,17 @@ Full documentation — installation, a language guide, the visual designer, and
 generated references for every command and component — is at
 **[axdsan.github.io/openepl](https://axdsan.github.io/openepl/)**.
 
-It is built from `docs-site/`. To work on it locally:
+The landing page is `docs-site/landing/`, and the book is `docs-site/`. To work
+on them locally:
 
 ```sh
 cargo install mdbook
 tools/gen-docs.sh          # regenerate the reference pages from the toolchain
-mdbook serve docs-site     # http://localhost:3000
+mdbook serve docs-site     # the book, at http://localhost:3000
+
+# or assemble the whole site the way it is published
+mdbook build docs-site && mkdir -p _site && cp -r docs-site/landing/. _site/ \
+  && cp -r docs-site/book _site/docs && tools/check-site.sh _site
 ```
 
 ## Licence

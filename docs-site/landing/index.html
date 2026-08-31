@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenEPL — draw an app, wire an event, ship a native binary</title>
+<meta name="description" content="A visual-first development environment with a native compiler. Lay out a window, wire a button, and build an ordinary native binary — nothing to install, nothing to unpack.">
+<link rel="icon" href="assets/openepl-icon.png">
+<meta property="og:title" content="OpenEPL">
+<meta property="og:description" content="Draw an app. Wire an event. Ship a native binary.">
+<meta property="og:image" content="assets/screenshot-designer.png">
+<style>
+:root {
+  --ink: #1f2328;
+  --muted: #656d76;
+  --line: #d8dee4;
+  --panel: #ffffff;
+  --canvas: #fafafa;
+  --accent: #1e60d5;
+  --night: #0e1120;
+  --night-2: #171b31;
+  --radius: 12px;
+  --wrap: 1080px;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.wrap { max-width: var(--wrap); margin: 0 auto; padding: 0 24px; }
+
+/* --- nav ------------------------------------------------------------- */
+.nav {
+  position: sticky; top: 0; z-index: 10;
+  background: rgba(14, 17, 32, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.nav .wrap { display: flex; align-items: center; gap: 24px; height: 58px; }
+.nav .brand { display: flex; align-items: center; gap: 9px; font-weight: 600; color: #fff; }
+.nav .brand img { width: 22px; height: 22px; }
+.nav .links { margin-left: auto; display: flex; gap: 22px; align-items: center; }
+.nav .links a { color: #c8cee0; font-size: 15px; }
+.nav .links a:hover { color: #fff; text-decoration: none; }
+.nav .cta {
+  background: var(--accent); color: #fff !important;
+  padding: 7px 15px; border-radius: 8px; font-weight: 500;
+}
+
+/* --- hero ------------------------------------------------------------ */
+.hero {
+  background:
+    radial-gradient(900px 420px at 12% -8%, rgba(53, 198, 232, 0.20), transparent 62%),
+    radial-gradient(760px 420px at 88% 4%, rgba(214, 59, 214, 0.20), transparent 62%),
+    linear-gradient(180deg, var(--night) 0%, var(--night-2) 100%);
+  color: #fff;
+  padding: 84px 0 96px;
+  text-align: center;
+}
+.hero img.wordmark { width: min(460px, 78vw); display: block; margin: 0 auto 26px; }
+.hero h1 {
+  font-size: clamp(26px, 4.6vw, 40px);
+  line-height: 1.22; margin: 0 0 18px; font-weight: 650; letter-spacing: -0.02em;
+}
+.hero p.sub {
+  max-width: 640px; margin: 0 auto 34px;
+  color: #b9c1d6; font-size: 17px;
+}
+.buttons { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+.btn {
+  display: inline-block; padding: 12px 26px; border-radius: 10px;
+  font-weight: 550; font-size: 15px; border: 1px solid transparent;
+}
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: #1a54ba; text-decoration: none; }
+.btn-ghost { border-color: rgba(255,255,255,0.28); color: #e6eaf5; }
+.btn-ghost:hover { border-color: rgba(255,255,255,0.6); text-decoration: none; }
+
+.install {
+  margin: 34px auto 0; max-width: 560px;
+  background: rgba(0,0,0,0.34); border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px; padding: 13px 18px;
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 13.5px; color: #d9e0f0; text-align: left; overflow-x: auto;
+}
+.install .p { color: #6f7ba0; user-select: none; }
+
+/* --- shot ------------------------------------------------------------ */
+.shot { margin-top: -56px; }
+.shot img {
+  width: 100%; border-radius: var(--radius);
+  border: 1px solid var(--line);
+  box-shadow: 0 18px 48px rgba(16, 22, 48, 0.22);
+  display: block;
+}
+.caption { color: var(--muted); font-size: 13.5px; text-align: center; margin-top: 12px; }
+
+/* --- sections -------------------------------------------------------- */
+section { padding: 72px 0; }
+h2 {
+  font-size: clamp(22px, 3vw, 28px); letter-spacing: -0.015em;
+  margin: 0 0 12px; font-weight: 650;
+}
+.lede { color: var(--muted); max-width: 620px; margin: 0 0 34px; }
+
+.cards { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 24px;
+}
+.card h3 { margin: 0 0 8px; font-size: 17px; font-weight: 620; }
+.card p { margin: 0; color: var(--muted); font-size: 15px; }
+
+.split { display: grid; gap: 32px; grid-template-columns: 1.05fr 0.95fr; align-items: start; }
+@media (max-width: 820px) { .split { grid-template-columns: 1fr; } }
+
+pre {
+  margin: 0; background: var(--night); color: #e7ebf6;
+  border-radius: var(--radius); padding: 20px 22px; overflow-x: auto;
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 13.5px; line-height: 1.7;
+}
+pre .k { color: #b79cff; }
+pre .s { color: #ffca7a; }
+pre .n { color: #7fd3ff; }
+pre .c { color: #7b86a8; font-style: italic; }
+
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
+th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--line); }
+th { font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+td code { font-size: 13.5px; }
+code {
+  background: #eef1f5; border-radius: 5px; padding: 1.5px 6px;
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.alt { background: var(--panel); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+
+.note {
+  background: #fff8e6; border: 1px solid #f0dca8; border-radius: var(--radius);
+  padding: 20px 24px; color: #6b5518;
+}
+.note h3 { margin: 0 0 8px; font-size: 16px; color: #6b5518; }
+.note p { margin: 0 0 8px; font-size: 15px; }
+.note a { color: #8a5a00; text-decoration: underline; }
+
+footer {
+  background: var(--night); color: #93a0c0; padding: 44px 0; font-size: 14.5px;
+}
+footer .wrap { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
+footer a { color: #c8cee0; }
+footer .right { margin-left: auto; display: flex; gap: 20px; }
+
+/* --- narrow screens --------------------------------------------------- */
+@media (max-width: 720px) {
+  /* The full link set does not fit: the last item and the button were pushed
+     off the side of the screen. Keep the two that matter. */
+  .nav .links .secondary { display: none; }
+  .nav .links { gap: 14px; }
+  .nav .wrap { gap: 12px; padding: 0 16px; }
+  .hero { padding: 56px 0 72px; }
+  .shot { margin-top: -36px; }
+  section { padding: 52px 0; }
+  .wrap { padding: 0 16px; }
+  footer .wrap { flex-direction: column; align-items: flex-start; gap: 12px; }
+  footer .right { margin-left: 0; flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap">
+    <span class="brand"><img src="assets/openepl-icon.png" alt=""> OpenEPL</span>
+    <span class="links">
+      <a href="docs/">Documentation</a>
+      <a class="secondary" href="docs/quick-start.html">Quick start</a>
+      <a class="secondary" href="https://github.com/AxDSan/openepl">GitHub</a>
+      <a class="cta" href="docs/installation.html">Get started</a>
+    </span>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <img class="wordmark" src="assets/openepl-wordmark.png" alt="OpenEPL">
+    <h1>Draw an app. Wire an event.<br>Ship a native binary.</h1>
+    <p class="sub">
+      A visual-first development environment with a compiler behind it. Lay out a
+      window, set properties, wire a button's click to a subroutine, and press
+      Run — what comes out is an ordinary native binary you can hand to someone.
+    </p>
+    <div class="buttons">
+      <a class="btn btn-primary" href="docs/quick-start.html">Get started</a>
+      <a class="btn btn-ghost" href="https://github.com/AxDSan/openepl">View on GitHub</a>
+    </div>
+    <div class="install">
+      <span class="p">$</span> tar xzf openepl-0.1.0-linux-x86_64.tar.gz<br>
+      <span class="p">$</span> cd openepl-0.1.0-linux-x86_64<br>
+      <span class="p">$</span> bin/openepl-studio
+    </div>
+  </div>
+</header>
+
+<div class="wrap shot">
+  <img src="assets/screenshot-designer.png" alt="The OpenEPL Studio visual designer, with a form on the canvas and its properties in the inspector">
+  <p class="caption">The designer and the source are the same file — drag a button and the code changes.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>What makes it different</h2>
+    <p class="lede">Three things, and they are the whole idea.</p>
+    <div class="cards">
+      <div class="card">
+        <h3>The designer is not a separate tool</h3>
+        <p>The form you draw and the file you edit are one thing. Drag a button
+        and the source changes; edit the source and the canvas follows. There is
+        no designer format that could drift from your code.</p>
+      </div>
+      <div class="card">
+        <h3>Programs are ordinary binaries</h3>
+        <p>Your project is compiled and linked with the system linker, and the
+        linker drops every command you never call. Nothing is unpacked at
+        start-up and there is no interpreter inside.</p>
+      </div>
+      <div class="card">
+        <h3>One project, every artifact</h3>
+        <p>The same source builds as a console program, a windowed program, a
+        shared library or a static library. A build option, not a rewrite.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap split">
+    <div>
+      <h2>A small, English-first language</h2>
+      <p class="lede">
+        One way to call things. No pointers, no manual memory management, no
+        ceremony. Assignment is a statement rather than an expression, so
+        <code>if x = 5</code> compares — it cannot silently assign.
+      </p>
+      <p><a href="docs/language.html">Read the language guide →</a></p>
+    </div>
+    <pre><span class="c"># hello.oir</span>
+<span class="k">module</span> hello
+<span class="k">target</span> console
+
+<span class="k">sub</span> main
+  <span class="k">call</span> print_text(<span class="s">"Hello from OpenEPL."</span>)
+
+  <span class="k">let</span> answer: <span class="k">int</span> = <span class="n">6</span> * <span class="n">7</span>
+  <span class="k">call</span> print_text(concat(<span class="s">"six times seven is "</span>,
+                       int_to_text(answer)))
+<span class="k">end</span></pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap split">
+    <div>
+      <h2>Build it as anything</h2>
+      <p class="lede">
+        Declare the target in the module, or override it for one build without
+        touching the source. Libraries export their subroutines under their own
+        names, so anything that can call C can link against them.
+      </p>
+      <p><a href="docs/build-targets.html">Read about build targets →</a></p>
+    </div>
+    <table>
+      <thead><tr><th>Target</th><th>Produces</th></tr></thead>
+      <tbody>
+        <tr><td><code>console</code></td><td>a terminal program</td></tr>
+        <tr><td><code>gui</code></td><td>a windowed program</td></tr>
+        <tr><td><code>sharedlib</code></td><td><code>.so</code> / <code>.dll</code> / <code>.dylib</code></td></tr>
+        <tr><td><code>staticlib</code></td><td><code>.a</code> archive</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>Editing, with the compiler helping</h2>
+    <p class="lede">
+      Syntax highlighting and live diagnostics in the IDE, backed by a language
+      server any editor can use — completion, hover, go-to-definition and
+      find-references in VS Code, Neovim, Helix and Zed.
+    </p>
+    <img src="assets/screenshot-editor.png" alt="The OpenEPL code editor with syntax highlighting and a problems pane"
+         style="width:100%;border-radius:12px;border:1px solid var(--line);box-shadow:0 10px 30px rgba(16,22,48,0.14)">
+    <p style="margin-top:20px"><a href="docs/editors.html">Set up your editor →</a></p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="note">
+      <h3>OpenEPL is young — here is the honest part</h3>
+      <p>Linux on x86-64 only. Programs you build are ordinary native binaries;
+      the hardened, hard-to-decompile release output is not implemented yet.
+      There is no debugger, and the component library is small.</p>
+      <p>What does work, end to end: design a form, wire an event, build it, run
+      it, and ship the binary — today.</p>
+      <p><a href="docs/limitations.html">The full list of limitations →</a></p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>MIT OR BSD-3-Clause</span>
+    <span class="right">
+      <a href="docs/">Documentation</a>
+      <a href="https://github.com/AxDSan/openepl">GitHub</a>
+      <a href="https://github.com/AxDSan/openepl/blob/main/LICENSE">Licence</a>
+    </span>
+  </div>
+</footer>
+
+</body>
+</html>

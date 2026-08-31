@@ -47,12 +47,22 @@ jobs:
         run: tools/check-docs.sh
 
       - name: Build the site
-        run: mdbook build docs-site
+        run: |
+          mdbook build docs-site
+          # The landing page is the site root; the book is published under
+          # /docs/. Assembled here rather than in the repo so neither half has
+          # to know where the other ends up.
+          mkdir -p _site
+          cp -r docs-site/landing/. _site/
+          cp -r docs-site/book _site/docs
+
+      - name: Check the assembled site
+        run: tools/check-site.sh _site
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs-site/book
+          path: _site
 
   deploy:
     needs: build

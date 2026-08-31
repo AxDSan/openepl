@@ -13,7 +13,8 @@ edit-url-template = "https://github.com/AxDSan/openepl/edit/main/docs-site/{path
 # A project page lives under /openepl/, so every generated link and asset URL
 # has to be built with that prefix. Without it the site deploys "successfully"
 # and then 404s on its own stylesheet.
-site-url = "/openepl/"
+# The landing page owns the site root; the book is published beneath it.
+site-url = "/openepl/docs/"
 additional-css = ["theme/openepl.css"]
 
 [output.html.fold]
