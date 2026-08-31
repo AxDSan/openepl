@@ -9,6 +9,11 @@
 namespace openepl::designer::theme {
 
 // Primary / accent
+/// Padding inside the code editor. Named because relayout() must subtract it
+/// from the editor's box: RmlUi sizes content, not border, boxes.
+constexpr int CODE_PAD_X = 10;
+constexpr int CODE_PAD_Y = 8;
+
 constexpr const char* ACCENT        = "#1e60d5";
 constexpr const char* ACCENT_TEXT   = "#ffffff";
 

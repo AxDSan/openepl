@@ -201,6 +201,16 @@ void relayout() {
     place("toolbox", 0, content_y, g.toolbox_w, content_h);
     place("centre", g.toolbox_w, content_y, centre_w, content_h);
     place("canvasarea", 0, TABBAR_H, centre_w, canvas_h);
+    // The code view fills the centre column below the tab bar, and the editor
+    // fills the view. Both are sized here, inline, on purpose: RmlUi's text
+    // widget writes its own layout properties onto the element, and an inline
+    // property beats the stylesheet — so a `width:100%` rule in the CSS is
+    // silently ignored and the editor collapses to its default column width.
+    place("codeview", 0, TABBAR_H, centre_w, content_h - TABBAR_H);
+    // RmlUi boxes are content-box, so the editor's own padding has to come off
+    // its width and height — otherwise it is exactly `padding` bigger than the
+    // view that holds it and the pane grows a scrollbar it does not need.
+    place("fullcode", 0, 0, centre_w - 2 * CODE_PAD_X, content_h - TABBAR_H - 2 * CODE_PAD_Y);
     place("inspectdock", g.toolbox_w + centre_w, content_y, g.inspect_w, content_h);
     place("bottom", g.toolbox_w, content_y + TABBAR_H + canvas_h, centre_w, g.bottom_h);
     place("splitleft", g.toolbox_w - 3, content_y, 6, content_h);
@@ -422,7 +432,8 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     // The editor fills the pane. A textarea has no default appearance in RmlUi,
     // so colours are explicit — the default text colour is white, which on this
     // panel would be invisible.
-    s << "#fullcode{font-family:'" << family << "';font-size:13px;padding:8px 10px;"
+    s << "#fullcode{font-family:'" << family << "';font-size:13px;padding:"
+      << CODE_PAD_Y << "px " << CODE_PAD_X << "px;"
          "width:100%;height:100%;background-color:" << PANEL << ";color:" << TEXT
       << ";border:0;caret-color:" << ACCENT << ";cursor:text}";
     s << "#canvasarea{left:0;top:" << TABBAR_H << "px;width:" << centre_w << "px;height:" << canvas_h
@@ -580,7 +591,8 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     s << "<div id='bottom'>"
          "<div class='pane' id='codepane' style='left:0;width:" << half
       << "px;border-right:1px " << BORDER << "'>"
-         "<div class='panehead' id='codehead'>CODE EDITOR</div><div id='code'/></div>"
+         "<div class='panehead' id='codehead'>CODE PREVIEW</div>"
+         "<div id='code' oe-view='code'/></div>"
          "<div class='pane' id='logpane' style='left:" << half << "px;width:"
       << (centre_w - half) << "px'>"
          "<div class='panehead'>OUTPUT / BUILD LOG</div><div id='log'/></div>"
@@ -925,8 +937,12 @@ void rebuild_code() {
                 highlight_line(lines[i]) + "</div>";
     }
     if (Rml::Element* head = code->GetParentNode()->GetChild(0)) {
-        head->SetInnerRML(want.empty() ? "CODE EDITOR · whole module"
-                                       : "CODE EDITOR · " + esc(want));
+        // Named a preview because it is one: it is syntax-highlighted and
+        // read-only, and clicking it opens the editable Code tab. Calling it
+        // an editor while it refuses to take a keystroke is the mismatch.
+        head->SetInnerRML((want.empty() ? "CODE PREVIEW · whole module"
+                                        : "CODE PREVIEW · " + esc(want)) +
+                          std::string("  ·  CLICK TO EDIT"));
     }
     code->SetInnerRML(html);
 
@@ -993,11 +1009,9 @@ void set_view(const std::string& view) {
     const bool code = (view == "code");
     if (Rml::Element* e = by_id("canvasarea")) e->SetProperty("display", code ? "none" : "block");
     if (Rml::Element* e = by_id("codeview")) e->SetProperty("display", code ? "block" : "none");
-    if (Rml::Element* e = by_id("codeview")) {
-        const int content_h = g.win_h - (theme::TITLEBAR_H + theme::MENUBAR_H + theme::TOOLBAR_H) -
-                              theme::STATUS_H - theme::TABBAR_H;
-        e->SetProperty("height", Rml::String(std::to_string(content_h - theme::TABBAR_H) + "px"));
-    }
+    // Sizing lives in relayout(), which is the single place that knows the
+    // current dock geometry; duplicating it here is how the two drift.
+    if (code) relayout();
     // Keep the toolbar switcher and the document tabs in step.
     for (const char* id : {"tabdesigner", "tabcode", "btndesigner", "btncode"}) {
         if (Rml::Element* e = by_id(id)) {
@@ -1770,7 +1784,26 @@ void run_script(const char* script) {
             }
             else if (verb == "codetext") {
                 if (auto* ed = code_editor()) {
-                    std::printf("codetext: %s\n", ed->GetValue().c_str());
+                    g.context->Update();   // offsets are stale until layout runs
+                    std::printf("codetext: %zu chars\n", ed->GetValue().size());
+                    Rml::Element* e = by_id("fullcode");
+                    std::printf("box: %.0fx%.0f at %.0f,%.0f  children=%d\n",
+                                e->GetOffsetWidth(), e->GetOffsetHeight(),
+                                e->GetAbsoluteLeft(), e->GetAbsoluteTop(),
+                                e->GetNumChildren());
+                    if (const auto* c = e->GetProperty(Rml::PropertyId::Color))
+                        std::printf("color: %s\n", c->ToString().c_str());
+                    if (const auto* fs = e->GetProperty(Rml::PropertyId::FontSize))
+                        std::printf("font-size: %s\n", fs->ToString().c_str());
+                    for (int ci = 0; ci < e->GetNumChildren(); ci++) {
+                        Rml::Element* ch = e->GetChild(ci);
+                        std::printf("  child %d <%s> %.0fx%.0f\n", ci, ch->GetTagName().c_str(),
+                                    ch->GetOffsetWidth(), ch->GetOffsetHeight());
+                    }
+                    Rml::Element* cv = by_id("codeview");
+                    std::printf("codeview: %.0fx%.0f display=%s\n", cv->GetOffsetWidth(),
+                                cv->GetOffsetHeight(),
+                                cv->GetProperty(Rml::PropertyId::Display)->ToString().c_str());
                     std::fflush(stdout);
                 }
             }
@@ -1896,7 +1929,11 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    while (Backend::ProcessEvents(g.context, &on_key_down, true)) {
+    // Power-save blocks until Studio itself gets an input event. That is right
+    // when idle, but while an app is running the user is clicking in *its*
+    // window, not ours — and a blocked loop never drains the app's output pipe,
+    // so its prints would only appear when you happened to jiggle Studio.
+    while (Backend::ProcessEvents(g.context, &on_key_down, g.running_app <= 0)) {
         poll_app();
         // Follow the OS window. The backend resizes the context; the layout has
         // to follow or everything past the old size is left unpainted.
