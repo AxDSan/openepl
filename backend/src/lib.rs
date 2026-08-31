@@ -2,7 +2,7 @@
 //! real **slot ABI** calling convention (abi/openepl_abi.h).
 //!
 //! Every command is invoked as `void cmd(Slot* ret, i32 argc, Slot* argv)`
-//! (PRD §11).  For each call the backend allocates an argv array of `%Slot`s and
+//!.  For each call the backend allocates an argv array of `%Slot`s and
 //! a return slot, stores each argument's tag + reinterpreted 64-bit value, calls
 //! the command by its runtime symbol (no dispatch table, no ordinal indirection
 //! — G8), then reads the return slot back.  `clang` assembles + links this
@@ -52,7 +52,7 @@ fn llvm_ty(t: Ty) -> &'static str {
 
 /// Lower a whole module to a `.ll` string using the given command registry.
 ///
-/// Entry shapes depend on the module's target (PRD G12):
+/// Entry shapes depend on the module's target:
 ///  * **console** — `main` is lowered into `ECodeStart` as before.
 ///  * **GUI** — the module declares a form; `ECodeStart` becomes the generated
 ///    form constructor: init the UI, create components, set properties, bind
@@ -96,7 +96,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
 
     // Assign component handles BEFORE lowering subroutines: a handler may
     // address a component, and handles are compile-time constants derived from
-    // creation order (ADR 0008), so they can be known up front.
+    // creation order, so they can be known up front.
     if let Some(form) = forms.first() {
         lo.map_components(form);
     }
@@ -215,7 +215,7 @@ struct Lowerer<'a> {
     /// Handles are assigned by creation order, and creation order is fully
     /// static, so every id resolves to a compile-time integer constant. This is
     /// why component ids need no interning table and never reach the binary:
-    /// `ok_button` simply compiles to `3` (ADR 0008).
+    /// `ok_button` simply compiles to `3`.
     handles: HashMap<String, u64>,
     /// Component id -> component type name, for resolving property types.
     component_types: HashMap<String, String>,
@@ -551,7 +551,7 @@ impl Lowerer<'_> {
         }
     }
 
-    /// The compile-time handle constant for a component id (ADR 0008).
+    /// The compile-time handle constant for a component id.
     fn handle_of(&self, id: &str) -> Result<u64, LowerError> {
         self.handles.get(id).copied().ok_or_else(|| LowerError {
             msg: format!("unknown component `{id}`"),

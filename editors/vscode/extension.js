@@ -1,4 +1,4 @@
-// Thin LSP client: everything intelligent lives in `openepl lsp` (ADR 0012),
+// Thin LSP client: everything intelligent lives in `openepl lsp`,
 // so this file only starts the server and gets out of the way.
 const { workspace } = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");

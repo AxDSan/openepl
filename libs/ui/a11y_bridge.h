@@ -1,5 +1,5 @@
 /* Bridge between the substrate-free a11y model and the platform adapter.
- * Kept separate so ui_rmlui.cpp never includes AccessKit headers (ADR 0007). */
+ * Kept separate so ui_rmlui.cpp never includes AccessKit headers. */
 #ifndef OPENEPL_A11Y_BRIDGE_H
 #define OPENEPL_A11Y_BRIDGE_H
 

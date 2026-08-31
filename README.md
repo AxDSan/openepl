@@ -4,8 +4,10 @@
 
 **Draw an app. Wire an event. Ship a native binary.**
 
-A cross-platform, visual-first development environment — with a compiler that
-produces clean native executables, no runtime to install and nothing to unpack.
+An open implementation of **Easy Programming Language** (易语言, EPL) — the
+visual, RAD-first way of building desktop software — rebuilt as open source,
+English-first and cross-platform, with a compiler that produces clean native
+executables: no runtime to install, nothing to unpack.
 
 **[Documentation](https://axdsan.github.io/openepl/)** · [Quick start](#quick-start) ·
 [Build targets](#one-project-every-artifact) · [Editor support](#editor-support) ·
@@ -21,6 +23,17 @@ OpenEPL is an IDE and a compiler that belong together. You lay a form out
 visually, set properties in an inspector, wire a button's click to a
 subroutine, and press **Run** — and what comes out the other side is an
 ordinary native binary you can hand to someone.
+
+That is the idea Easy Programming Language got right, and this is an open
+implementation of it: the same RAD-first way of working — draw the window,
+wire the events, build a real executable — without a proprietary toolchain,
+and readable to anyone who does not speak Chinese.
+
+**On compatibility:** OpenEPL is a fresh, open implementation of the idea, not
+a drop-in replacement. It does not read or run existing EPL programs, and its
+keywords are English rather than Chinese. What it takes from EPL is the model:
+a visual designer over a component library, event-driven code, and a compiler
+that emits standalone native binaries.
 
 The language is English-first and deliberately small: one uniform call syntax,
 no pointers, no manual memory management, no ceremony. Assignment is a

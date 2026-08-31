@@ -1,4 +1,4 @@
-/* AccessKit bridge (ADR 0005/D16, ADR 0007).
+/* AccessKit bridge.
  *
  * Turns the substrate-free a11y model into an AccessKit tree and serves it to
  * assistive technologies over AT-SPI. This file includes AccessKit and the

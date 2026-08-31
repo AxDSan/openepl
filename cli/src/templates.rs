@@ -5,7 +5,7 @@
 //! the new project's module name.
 //!
 //! They are exposed through the CLI rather than read directly by the designer,
-//! for the same reason the designer never parses `.oir` itself (ADR 0011): one
+//! for the same reason the designer never parses `.oir` itself: one
 //! reader, one format, no drift. Studio builds its New Project tiles from
 //! `openepl templates` output, so adding a template adds a tile with no IDE
 //! change.

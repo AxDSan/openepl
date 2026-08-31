@@ -251,7 +251,7 @@ fn cmd_commands(repo_root: &Path, args: &[String]) -> i32 {
 /// This is the designer's ONLY way to learn a file's contents: the Rust parser
 /// stays the single reader of `.oir`. If the designer ever parsed the text
 /// itself there would be two grammars to keep in step, and they would drift
-/// (ADR 0011).
+///.
 ///
 /// Line-based rather than JSON so neither side needs a serialisation library.
 fn cmd_inspect(rest: &[String]) -> i32 {
@@ -432,7 +432,7 @@ fn default_output(input: &Path, target: Target) -> PathBuf {
 }
 
 /// Invoke clang to assemble the `.ll` and static-link the library implementation
-/// sources into a native executable, dead-stripping unused commands (PRD D3).
+/// sources into a native executable, dead-stripping unused commands.
 fn clang_link(
     ll_path: &Path,
     repo_root: &Path,
@@ -485,7 +485,7 @@ fn clang_link(
         // A library has no `ECodeStart`, so linking it in leaves an undefined
         // symbol and the `.so` fails to dlopen — a file with the right
         // extension that cannot actually be loaded. oe_start.c lives in its own
-        // TU precisely so a build target can drop it (PRD G12).
+        // TU precisely so a build target can drop it.
         if !target.is_executable() && s.file_name().and_then(|f| f.to_str()) == Some("oe_start.c") {
             continue;
         }
@@ -531,7 +531,7 @@ fn clang_link(
     if target == Target::SharedLib {
         cmd.arg("-shared");
     } else {
-        // Dead-strip: the headline property of the BlackMoon model (PRD M2).
+        // Dead-strip: the headline property of the BlackMoon model.
         // Only for programs — a library must keep exports no host has linked
         // yet, and --gc-sections would drop every one of them.
         cmd.arg("-Wl,--gc-sections");

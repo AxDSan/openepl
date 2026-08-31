@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fetch the prebuilt accesskit-c into vendor/ (gitignored). Run once.
-# Pinned per ADR 0007. Prebuilt avoids a cargo + cbindgen toolchain requirement.
+# Pinned. Prebuilt avoids a cargo + cbindgen toolchain requirement.
 set -eu
 VER=0.22.3
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

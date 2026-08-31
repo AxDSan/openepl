@@ -1,15 +1,15 @@
 //! OpenEPL e-code IR — v0.1 (Phase 1).
 //!
-//! The keystone artifact (PRD G1): a typed, tree-structured IR.  Phase 1 grows
+//! The keystone artifact: a typed, tree-structured IR.  Phase 1 grows
 //! the v0 slice with `int64`/`double` slot types, **command return types** and
 //! **call-expressions** (so core commands are usable inside expressions), a
 //! shared **command registry** (`registry`), a reusable **type checker**
-//! (`sema`), and an **IR validator** (`validate`, PRD §5.1).
+//! (`sema`), and an **IR validator** (`validate`.1).
 //!
 //! The schema still reserves room for the form / component / property / event
 //! nodes that later phases add (see `Item`).  Byte-set (`SDT_BIN`) and the
 //! aggregate storage ABI are specified but deferred to Phase 2 (they ride on the
-//! runtime↔library notification channel / memory-ownership model, PRD §1.2/D4).
+//! runtime↔library notification channel / memory-ownership model.2/D4).
 //!
 //! Only the *text* encoding is implemented; the binary encoding stays deferred.
 
@@ -23,8 +23,8 @@ pub use parser::{parse, ParseError};
 pub use registry::Registry;
 pub use validate::{validate, ValidateError};
 
-/// Slot data-type tags — the ABI type system (PRD §1.2, `SDT_*`).  Phase 1
-/// exposes the numeric + text core; the full set is frozen in `docs/spec/abi.md`.
+/// Slot data-type tags — the ABI type system.  Phase 1
+/// exposes the numeric + text core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// `SDT_INT` — 32-bit signed integer.
@@ -170,7 +170,7 @@ pub enum Expr {
     Var(String),
     /// Binary arithmetic; both operands must share one numeric type.
     Bin(BinOp, Box<Expr>, Box<Expr>),
-    /// Call to a non-void command, used as a value (PRD §5.0 uniform call form).
+    /// Call to a non-void command, used as a value.
     Call { cmd: String, args: Vec<Expr> },
     /// Read a component's property: `ok_button.text`.
     GetProperty { component: String, property: String },
@@ -236,7 +236,7 @@ pub enum StmtKind {
 }
 
 /// A subroutine (EPL 子程序).  v0.1 subs take no params and return nothing;
-/// `main` is the program entry, lowered to `ECodeStart` (PRD §1.4).
+/// `main` is the program entry, lowered to `ECodeStart`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sub {
     pub name: String,
@@ -245,7 +245,7 @@ pub struct Sub {
 
 /// One component instance inside a form: a type, an id, literal property
 /// values, and event bindings to subroutines.  This is the IR half of the
-/// component model (PRD D9/D11) — the designer will emit exactly this.
+/// component model — the designer will emit exactly this.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Component {
     /// Registered component type name, e.g. `button`.
@@ -259,7 +259,7 @@ pub struct Component {
     pub handlers: Vec<(String, String)>,
 }
 
-/// A form: the root component plus its children (PRD §4.5).
+/// A form: the root component plus its children.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Form {
     pub name: String,
@@ -267,7 +267,7 @@ pub struct Form {
     ///
     /// The designer rewrites **only** these lines when saving, splicing them
     /// into the original file. Re-emitting the whole module would destroy every
-    /// hand-written subroutine body (ADR 0011).
+    /// hand-written subroutine body.
     pub line_span: (usize, usize),
     /// Properties of the form itself (title, size, …).
     pub properties: Vec<(String, Expr)>,
@@ -276,7 +276,7 @@ pub struct Form {
 }
 
 /// A top-level module item.  Remaining seam: `UserType`, `Const`, `Enum`
-/// (PRD §5.1 / §4.5).
+///.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Sub(Sub),
@@ -298,7 +298,7 @@ pub struct GlobalVar {
     pub value: Expr,
 }
 
-/// What a module is compiled into (PRD G12: one project, every artifact).
+/// What a module is compiled into.
 ///
 /// The target changes the *entry contract*, not the language: an executable
 /// gets `ECodeStart`, a library gets no entry and exports its subroutines
@@ -364,7 +364,7 @@ pub struct Module {
     pub target: Option<Target>,
     /// Support libraries this module uses (`use <name>`), beyond the implicit
     /// `core`.  The compiler introspects each for command signatures and links
-    /// its implementations (PRD §5.4).
+    /// its implementations.
     pub uses: Vec<String>,
     pub items: Vec<Item>,
 }

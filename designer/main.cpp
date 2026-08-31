@@ -1,17 +1,17 @@
-/* OpenEPL Studio — the visual designer (PRD §7 Phase 3, metric M0).
+/* OpenEPL Studio — the visual designer.
  *
  * Chrome follows the OpenEPL Studio design specification: title bar, menu bar,
  * action toolbar, toolbox / designer / inspector docks, a split code+output
  * panel, and a status bar. Tokens live in theme.h so no colour is hard-coded
  * here.
  *
- * Dogfoods RmlUi (ADR 0005/D18): the IDE and the apps it builds run on the same
+ * Dogfoods RmlUi: the IDE and the apps it builds run on the same
  * substrate, and the canvas builds components through the SHARED mapping
  * (libs/ui/ui_mapping.h) so what you draw is what you get (D9).
  *
  * It never parses .oir — `openepl inspect` is the only reader — and saving
  * splices the regenerated form over the original lines so hand-written code
- * survives (ADR 0011).
+ * survives.
  */
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
@@ -1335,7 +1335,7 @@ void sync_highlight_scroll() {
 
 /// Push the editor's text to disk and reload the designer model from it.
 ///
-/// The Rust parser stays the only reader of `.oir` (ADR 0011), so the model is
+/// The Rust parser stays the only reader of `.oir`, so the model is
 /// rebuilt by re-inspecting the saved file rather than by parsing text here —
 /// two grammars would drift.
 bool apply_code() {

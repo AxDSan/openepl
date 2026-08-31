@@ -1,12 +1,12 @@
 /* OpenEPL support-library ABI + SDK — v1 (Phase 2).
  *
  * The single documented contract between the OpenEPL runtime/compiler and a
- * support library (PRD G4/§5.4), a clean-room descendant of EPL's
- * `GetNewInf`/`LIB_INFO` (PRD §1.2, §11).  A library is a shared object that
+ * support library, a clean-room descendant of EPL's
+ * `GetNewInf`/`LIB_INFO`.  A library is a shared object that
  * exports ONE function, `openepl_get_lib_info`, returning a fully-populated
  * `OpenEPL_LibInfo`.  The compiler dlopens the library at build time to read
  * command signatures; the command *implementations* are then static-linked into
- * the program (BlackMoon model — no runtime library dependency, PRD D1).
+ * the program (BlackMoon model — no runtime library dependency.
  *
  * Third parties include THIS header to author a library in C/C++/Rust/Zig (M5).
  *
@@ -25,7 +25,7 @@ extern "C" {
 
 #define OPENEPL_ABI_VERSION 1
 
-/* --- Data-type tags (SDT_*) — the ABI type system (PRD §1.2). ---------
+/* --- Data-type tags (SDT_*) — the ABI type system. ---------
  * Numeric values are frozen.  Phase 2 uses INT/INT64/DOUBLE/TEXT; the rest are
  * reserved with fixed numbers so later phases don't renumber. */
 enum {
@@ -47,7 +47,7 @@ enum {
 
 /* --- Slot (MDATA_INF analog) — one argument or return value. ----------
  * A tagged 16-byte cell; the 8-byte value union sits at offset 8.  This is the
- * uniform in/out currency of every command (PRD §11). */
+ * uniform in/out currency of every command. */
 typedef struct OpenEPL_Slot {
     int32_t tag;      /* one of OE_SDT_*                                     */
     int32_t _pad;     /* keep the value 8-byte aligned                      */
@@ -68,7 +68,7 @@ _Static_assert(offsetof(OpenEPL_Slot, v) == 8, "value union must be at offset 8"
  * left OE_SDT_NULL for a void command).  `argv` is an array of `argc` slots. */
 typedef void (*OpenEPL_CommandFn)(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
 
-/* --- Runtime↔library notification channel (NRS_*, PRD §1.2). -----------
+/* --- Runtime↔library notification channel (NRS_*.2). -----------
  * All EPL-data heap allocation goes THROUGH the runtime so ownership stays
  * consistent across the program and its libraries.  A library asks the runtime
  * to allocate/free via oe_notify(); the runtime may also notify libraries of
@@ -86,7 +86,7 @@ enum {
  * NULL otherwise. */
 void *oe_notify(int32_t msg, void *p1, void *p2);
 
-/* Convenience wrappers over the channel (PRD §11: E_MAlloc/E_MFree/E_MRealloc). */
+/* Convenience wrappers over the channel. */
 static inline void *oe_malloc(long size)            { return oe_notify(OE_NRS_MALLOC, (void *)(size_t)size, 0); }
 static inline void  oe_mfree(void *p)               { oe_notify(OE_NRS_MFREE, p, 0); }
 static inline void *oe_mrealloc(void *p, long size) { return oe_notify(OE_NRS_MREALLOC, p, (void *)(size_t)size); }
@@ -99,14 +99,14 @@ static inline void  oe_runtime_error(const char *m) { oe_notify(OE_NRS_RUNTIME_E
  * into a shipped program — the compiler resolves symbols at link time.  This is
  * EPL's `.fne` (design-time) vs `.fnr` (runtime) split, and the G8 "no metadata
  * in release output" story. */
-/* --- Visual components (PRD G0/D9/D11; EDK digest §9). -----------------
+/* --- Visual components. -----------------
  * A library contributes visual components through the SAME LibInfo mechanism
  * that carries commands.  A component declares its properties and events by
  * NAME, which is what makes the Object Inspector, form streaming, and the
  * designer generic — one primitive, exactly as Delphi's `published` RTTI does
- * (ADR 0005/D11).
+ *.
  *
- * Accessibility is part of the descriptor, not an afterthought (ADR 0005/D16):
+ * Accessibility is part of the descriptor, not an afterthought:
  * every component states its a11y role here, and per-instance name/state travel
  * with the properties below. */
 

@@ -1,4 +1,4 @@
-/* Accessibility model — the thread boundary (ADR 0007).
+/* Accessibility model — the thread boundary.
  *
  * AccessKit's adapter states plainly in its own header: *"All of the handlers
  * will always be called from another thread."* RmlUi is not thread-safe, so an

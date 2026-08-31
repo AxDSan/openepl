@@ -1,5 +1,5 @@
 //! End-to-end tests for the Phase 1 toolchain: build `.oir` examples to native
-//! binaries, run them, and prove dead-code stripping (PRD M2).
+//! binaries, run them, and prove dead-code stripping.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -75,7 +75,7 @@ fn demo_builds_and_runs() {
     );
 }
 
-/// PRD M2 / D3: only referenced commands are linked in; unused command code is
+///; unused command code is
 /// dead-stripped by `-ffunction-sections` + `--gc-sections`.
 #[test]
 fn unused_commands_are_dead_stripped() {
@@ -119,7 +119,7 @@ fn hello_library_via_abi() {
     assert_eq!(lines, vec!["Hello, OpenEPL!", "HELLO, WORLD!"]);
 }
 
-/// PRD Phase 2 (RAD half): a form + button + handler authored in IR compiles to
+///
 /// a native GUI binary, and a click reaches the handler subroutine.
 ///
 /// Runs headlessly through the UI test hooks (see abi/openepl_ui.h): render a
@@ -148,7 +148,7 @@ fn form_builds_and_click_reaches_handler() {
 
 /// The UI stack must link ONLY into modules that declare a form. Without this,
 /// every console program would carry megabytes of widget toolkit (and the
-/// dead-strip guarantee, PRD M2/D3, would be meaningless).
+/// dead-strip guarantee.
 #[test]
 fn console_programs_do_not_link_the_ui() {
     let bin = build_as("demo", "ldd");
@@ -226,7 +226,7 @@ fn button_hover_changes_pixels() {
 }
 
 /// The accessibility tree must mirror the widget tree with correct roles,
-/// names, parent links and bounds (ADR 0005/D16). Substrate-independent and
+/// names, parent links and bounds. Substrate-independent and
 /// needs no accessibility bus, so it always runs.
 #[test]
 fn accessibility_tree_is_published() {
@@ -356,7 +356,7 @@ fn app_runs_with_accessibility_disabled() {
     );
 }
 
-/// Reading and writing component properties from code (ADR 0008). The counter
+/// Reading and writing component properties from code. The counter
 /// holds its state in the label's own text, so one synthetic click must both
 /// print the new count and leave the label showing it.
 #[test]
@@ -414,7 +414,7 @@ fn main_may_touch_components_before_the_loop_starts() {
 }
 
 /// Control flow end to end: if / else if / else, while, comparisons,
-/// short-circuit `and`, and content-based text equality (ADR 0010).
+/// short-circuit `and`, and content-based text equality.
 ///
 /// This also serves as the SSA verifier for branch codegen — clang rejects
 /// malformed basic blocks, so a passing build proves the emitted IR is sound.
@@ -433,7 +433,7 @@ fn control_flow_runs_correctly() {
     assert_eq!(lines[21], "text equality ok");
 }
 
-/// **M0, the RAD metric (PRD §8).** A scripted designer session adds a button,
+/// **M0, the RAD metric.** A scripted designer session adds a button,
 /// sets its properties, wires a click handler, and saves — and the resulting
 /// `.oir` compiles to a native binary whose button actually works.
 ///
@@ -564,7 +564,7 @@ fn all_components_are_real_controls() {
     let out = Command::new(&bin)
         .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "4")
         // Handle 7 is the button: the form root is 1 and children follow in
-        // declaration order (ADR 0008).
+        // declaration order.
         .env("OPENEPL_UI_SYNTH_CLICK", "7")
         .env("OPENEPL_UI_DUMP_A11Y", "1")
         .output()
@@ -849,7 +849,7 @@ fn layout_follows_the_window_size() {
 }
 
 // ---------------------------------------------------------------------------
-// Build targets (PRD G12): one source, several artifacts
+// Build targets: one source, several artifacts
 // ---------------------------------------------------------------------------
 
 /// A library source: no entry point, two subroutines to export.

@@ -1,6 +1,6 @@
 {
   "name": "ui",
-  "comment": "Visual component library. Sources are split so the metadata TU never reaches a shipped program (ADR 0003/D12), and the UI stack links only into modules that actually declare a form.",
+  "comment": "Visual component library. Sources are split so the metadata TU never reaches a shipped program, and the UI stack links only into modules that actually declare a form.",
   "libinfo_sources": [
     "ui_libinfo.c"
   ],

@@ -8,8 +8,8 @@
 // coherent to draw.
 //
 // The template tiles are generated from `openepl templates` rather than from a
-// list here: the CLI is the single reader of the templates directory (ADR
-// 0011/0013), so adding a template adds a tile with no change to this file.
+// list here: the CLI is the single reader of the templates directory, so adding
+// a template adds a tile with no change to this file.
 #ifndef OPENEPL_DESIGNER_WELCOME_H
 #define OPENEPL_DESIGNER_WELCOME_H
 

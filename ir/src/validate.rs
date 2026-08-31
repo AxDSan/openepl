@@ -1,4 +1,4 @@
-//! IR validator (PRD §5.1): rejects malformed / ill-typed IR before lowering.
+//! IR validator: rejects malformed / ill-typed IR before lowering.
 //!
 //! Runs the shared type checker (`sema`) over every subroutine and adds the
 //! structural rules it doesn't cover — entry-point presence, redefinition, and

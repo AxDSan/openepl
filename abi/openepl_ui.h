@@ -1,9 +1,9 @@
-/* OpenEPL widget-backend interface — the D10 boundary (ADR 0005).
+/* OpenEPL widget-backend interface — the D10 boundary.
  *
  * THE LEAK RULE: this header must contain **no substrate types whatsoever** —
  * no RmlUi, no SDL, no GL. Widgets are opaque integer handles. If a substrate
  * type ever appears here, the substrate choice (D14) silently stops being
- * reversible, which is the single failure mode ADR 0005 calls load-bearing.
+ * reversible, which is the single failure mode calls load-bearing.
  *
  * Everything below is plain C so that code emitted by the OpenEPL backend can
  * call it directly. The current implementation lives in `libs/ui/` (C++ over

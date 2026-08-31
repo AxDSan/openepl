@@ -1,10 +1,9 @@
-/* OpenEPL UI backend — RmlUi implementation of the D10 interface (ADR 0005/D14).
+/* OpenEPL UI backend — RmlUi implementation of the D10 interface.
  *
  * This is the ONLY file that knows RmlUi exists. Everything above it speaks
  * `abi/openepl_ui.h`, which contains no substrate types — that is what keeps the
  * substrate swappable (D10). Swapping backends means replacing this file.
  *
- * Verified mechanics come from spikes/q9-rmlui/.
  */
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/ElementInstancer.h>

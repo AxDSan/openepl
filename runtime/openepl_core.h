@@ -5,21 +5,21 @@
  * Slot* argv)`.  Command implementations live in the family `.c` files and are
  * static-linked into each program; the LibInfo *table* that names them lives in
  * `core_libinfo.c`, compiled ONLY into the introspection `.so` (never a shipped
- * program) so `--gc-sections` still strips unused commands (PRD D3/G8; ADR 0003).
+ * program) so `--gc-sections` still strips unused commands.
  */
 #ifndef OPENEPL_CORE_H
 #define OPENEPL_CORE_H
 
 #include "openepl_abi.h"
 
-/* Program entry emitted by the backend (PRD §1.4 lean-entry model). */
+/* Program entry emitted by the backend. */
 extern int ECodeStart(void);
 
-/* Runtime lifecycle (PRD §1.4). */
+/* Runtime lifecycle. */
 void E_Init(void);
 void E_DestroyRes(void);
 
-/* Notification channel + allocation (PRD §1.2/D4/§11).  `oe_notify` is declared
+/* Notification channel + allocation.  `oe_notify` is declared
  * in the ABI header; these are the concrete runtime entry points behind it. */
 void *E_MAlloc(long size);
 void  E_MFree(void *p);

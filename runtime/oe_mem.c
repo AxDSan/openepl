@@ -1,4 +1,4 @@
-/* Runtime-owned memory + the NRS_* notification channel (PRD §1.2/D4/§11).
+/* Runtime-owned memory + the NRS_* notification channel.
  *
  * All EPL-data allocation flows through here, so ownership is consistent across
  * the program and every library.  Allocations are tracked in a singly-linked

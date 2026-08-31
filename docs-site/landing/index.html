@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OpenEPL — draw an app, wire an event, ship a native binary</title>
-<meta name="description" content="A visual-first development environment with a native compiler. Lay out a window, wire a button, and build an ordinary native binary — nothing to install, nothing to unpack.">
+<meta name="description" content="An open implementation of Easy Programming Language (EPL, 易语言): a RAD environment where you draw a window, wire a button, and build an ordinary native binary — nothing to install, nothing to unpack.">
 <link rel="icon" href="assets/openepl-icon.png">
 <meta property="og:title" content="OpenEPL">
 <meta property="og:description" content="Draw an app. Wire an event. Ship a native binary.">
@@ -198,9 +198,10 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
     <img class="wordmark" src="assets/openepl-wordmark.png" alt="OpenEPL">
     <h1>Draw an app. Wire an event.<br>Ship a native binary.</h1>
     <p class="sub">
-      A visual-first development environment with a compiler behind it. Lay out a
-      window, set properties, wire a button's click to a subroutine, and press
-      Run — what comes out is an ordinary native binary you can hand to someone.
+      An open implementation of <strong>Easy Programming Language</strong> (易语言) —
+      a RAD environment where you build desktop software by drawing it. Lay out a
+      window, set properties, wire a button's click to a subroutine, and press Run:
+      what comes out is an ordinary native binary you can hand to someone.
     </p>
     <div class="buttons">
       <a class="btn btn-primary" href="docs/quick-start.html">Get started</a>
@@ -222,7 +223,7 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
 <section>
   <div class="wrap">
     <h2>What makes it different</h2>
-    <p class="lede">Three things, and they are the whole idea.</p>
+    <p class="lede">Four things, and they are the whole idea.</p>
     <div class="cards">
       <div class="card">
         <h3>The designer is not a separate tool</h3>
@@ -235,6 +236,14 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
         <p>Your project is compiled and linked with the system linker, and the
         linker drops every command you never call. Nothing is unpacked at
         start-up and there is no interpreter inside.</p>
+      </div>
+      <div class="card">
+        <h3>The EPL model, opened up</h3>
+        <p>Easy Programming Language showed that drawing an application and
+        compiling it to a real executable is the right way to build desktop
+        software. OpenEPL implements that model as open source, in English, on
+        an inspectable toolchain — a fresh implementation, not a clone: it does
+        not run existing EPL programs.</p>
       </div>
       <div class="card">
         <h3>One project, every artifact</h3>

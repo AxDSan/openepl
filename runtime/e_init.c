@@ -1,10 +1,10 @@
-/* Runtime lifecycle (PRD §1.4: E_Init / E_DestroyRes).
+/* Runtime lifecycle.
  *
  * Phase 2: E_Init prepares the runtime; E_DestroyRes releases all runtime-owned
  * allocations.  Per-library init dispatch (the BlackMoonInitAllElib analog that
  * hands each linked library the notify callback) is deferred — spike libraries
  * are stateless and reach the runtime through the global `oe_notify` symbol
- * (ADR 0003). */
+ *. */
 #include <stdio.h>
 #include "openepl_core.h"
 

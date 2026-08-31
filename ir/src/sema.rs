@@ -26,7 +26,7 @@ fn err<T>(msg: impl Into<String>) -> Result<T, SemaError> {
 
 /// The static type of an integer literal: `int` if it fits in 32 bits, else
 /// `int64`.  Keeps common `let x: int = 5` ergonomic while big constants still
-/// typecheck (PRD G9: sensible defaults, no ceremony).
+/// typecheck.
 pub fn int_literal_type(v: i64) -> Ty {
     if i32::try_from(v).is_ok() {
         Ty::Int

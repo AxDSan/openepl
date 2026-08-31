@@ -5,7 +5,7 @@
  * to read command signatures — it is NEVER linked into a shipped program.  The
  * table holds a pointer to every command name/symbol; if it entered a program's
  * link line it would anchor all ~40 commands and defeat `--gc-sections`
- * (PRD D3/G8; ADR 0003).  Command *implementations* ship; this catalog does not.
+ *.  Command *implementations* ship; this catalog does not.
  */
 #include "openepl_core.h"
 

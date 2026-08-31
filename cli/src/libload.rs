@@ -1,4 +1,4 @@
-//! Build-time support-library introspection (PRD §5.4).
+//! Build-time support-library introspection.
 //!
 //! For the implicit `core` library and each `use <name>`, the loader:
 //!   1. builds an introspection shared object from the library's sources
@@ -10,7 +10,7 @@
 //!      `*_libinfo.c` metadata TU) for static-linking into the program.
 //!
 //! The metadata TU never enters the program link line, preserving `--gc-sections`
-//! dead-stripping (PRD D3/G8; ADR 0003).
+//! dead-stripping.
 //!
 //! `dlopen` runs the target library in-process, so this native path assumes
 //! host == target (x86_64-linux). Cross-compilation needs a sidecar manifest
@@ -86,7 +86,7 @@ pub struct LibPlan {
     pub impl_sources: Vec<PathBuf>,
     /// Extra compiler/linker configuration contributed by libraries that need
     /// it (the UI stack, for example). Only populated for libraries actually
-    /// used, so a console program never links the UI (ADR 0006).
+    /// used, so a console program never links the UI.
     pub build: BuildConfig,
 }
 
@@ -163,7 +163,7 @@ fn load_with(repo_root: &Path, uses: &[String], require_impl: bool) -> Result<Li
             ));
         }
         // Impl sources to link: everything except the metadata TU, which must
-        // never reach a shipped program (ADR 0003/D12).
+        // never reach a shipped program.
         for p in &sources {
             if !filename(p).ends_with("_libinfo.c") {
                 impl_sources.push(p.clone());
@@ -322,7 +322,7 @@ unsafe fn register_commands(
         }
     }
 
-    // Visual components (PRD D9/D11) come through the same LibInfo mechanism.
+    // Visual components come through the same LibInfo mechanism.
     let ccount = info.component_count.max(0) as isize;
     for i in 0..ccount {
         let cd = &*info.components.offset(i);
@@ -374,7 +374,7 @@ mod tests {
 
     /// The dlopen'd `core` LibInfo must match the hard-coded `Registry::core()`
     /// used by the ir/backend unit tests — so the fast in-memory table can never
-    /// silently drift from the C source of truth (ADR 0003).
+    /// silently drift from the C source of truth.
     #[test]
     fn core_libinfo_matches_hardcoded_registry() {
         let plan = load(&repo_root(), &[]).expect("introspect core");

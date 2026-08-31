@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fetch + build the pinned RmlUi into vendor/ (gitignored). Run once.
-# Pinned per ADR 0005/D14; the spike (spikes/q9-rmlui/) verified this version.
+# Pinned: this version is the one the UI layer is built and tested against.
 set -eu
 VER=6.3
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

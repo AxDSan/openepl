@@ -2,7 +2,7 @@
 //!
 //! Maps a surface command name to its `Signature` and the runtime symbol the
 //! backend emits a call to.  In Phase 2 this table is replaced by signatures
-//! loaded from `openepl_get_lib_info` (PRD §5.4); keeping it in one place now
+//! loaded from `openepl_get_lib_info`; keeping it in one place now
 //! means the validator and the backend agree on exactly one source of truth.
 
 use std::collections::HashMap;
@@ -16,12 +16,12 @@ pub struct PropertyDesc {
     pub ty: Ty,
 }
 
-/// A visual component type contributed by a support library (PRD D9/D11).
+/// A visual component type contributed by a support library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentDesc {
     pub name: String,
     /// Accessibility role (`OE_ROLE_*`) — carried from the descriptor so a11y
-    /// data exists from the start (ADR 0005/D16).
+    /// data exists from the start.
     pub a11y_role: i32,
     pub properties: Vec<PropertyDesc>,
     pub events: Vec<String>,

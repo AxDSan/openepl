@@ -1,6 +1,6 @@
 # OpenEPL Cargo workspace.
 # Phase 0 vertical slice: ir (IR + text parser) -> backend (IR -> LLVM IR text)
-# -> cli (openepl build/run). See docs/decisions/0001-phase0-spike.md.
+# -> cli (openepl build/run).
 [workspace]
 resolver = "2"
 members = ["ir", "backend", "cli"]

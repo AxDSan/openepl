@@ -4,10 +4,13 @@
 
 # Introduction
 
-OpenEPL is an IDE and a compiler that belong together. You lay a window out
-visually, set properties in an inspector, wire a button's click to a
-subroutine, and press **Run** — and what comes out is an ordinary native
-binary you can hand to someone.
+OpenEPL is an open implementation of **Easy Programming Language** (易语言,
+usually shortened to EPL) — a RAD environment where you build desktop software
+by drawing it.
+
+You lay a window out visually, set properties in an inspector, wire a button's
+click to a subroutine, and press **Run** — and what comes out is an ordinary
+native binary you can hand to someone.
 
 ![The OpenEPL Studio visual designer](./assets/screenshot-designer.png)
 
@@ -44,6 +47,17 @@ software.
 **One project builds every artifact.** The same source can become a console
 program, a windowed program, a shared library or a static library — a build
 option rather than a rewrite. See [Build targets](./build-targets.md).
+
+## Its relationship to EPL
+
+Easy Programming Language is a Chinese RAD environment with a large following:
+a visual designer, a component library, event-driven code, and a compiler that
+produces standalone native executables. That model is what OpenEPL implements.
+
+It is an open implementation of the idea rather than a clone. OpenEPL does not
+read or run existing EPL programs, and its keywords are English rather than
+Chinese, so the language is approachable to people who do not read Chinese —
+and the whole toolchain is open source, cross-platform and inspectable.
 
 ## Where to start
 

@@ -81,7 +81,7 @@ struct Model {
     }
 };
 
-/// Load by running `openepl inspect` — never by parsing .oir here (ADR 0011).
+/// Load by running `openepl inspect` — never by parsing.oir here.
 bool load_model(const std::string& openepl_bin, const std::string& path, Model& out,
                 std::string& error);
 

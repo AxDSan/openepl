@@ -1,7 +1,9 @@
 # OpenEPL __VERSION__
 
-An open-source, cross-platform, **RAD-first** application development
-environment: draw a form, wire an event, and get a clean native binary.
+An open implementation of **Easy Programming Language** (易语言, EPL): a
+cross-platform RAD environment where you draw a form, wire an event, and get a
+clean native binary. English-first, and a fresh implementation rather than a
+clone — it does not run existing EPL programs.
 
     bin/openepl-studio          the IDE — run it with no arguments
     bin/openepl                 the command-line toolchain
