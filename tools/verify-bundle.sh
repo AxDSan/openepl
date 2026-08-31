@@ -48,6 +48,8 @@ echo "verifying $(basename "$BUNDLE") from $WORK/project"
 echo
 
 check "binaries are present and executable" test -x "$BIN/openepl" -a -x "$BIN/openepl-studio"
+check "brand assets ship with the bundle" test -f "$WORK/openepl/assets/openepl-wordmark.png" \
+    -a -f "$WORK/openepl/assets/openepl-icon.png"
 check "licences ship with the bundle" test -f "$WORK/openepl/LICENSE" \
     -a -f "$WORK/openepl/licenses/RmlUi-LICENSE.txt"
 
@@ -79,6 +81,11 @@ check "studio opens a project" env OPENEPL_DESIGNER_SCRIPT='view:code' \
 check "studio's welcome screen creates and opens a project" env \
     OPENEPL_DESIGNER_WELCOME_PICK=console-app OPENEPL_DESIGNER_SCRIPT='view:code' \
     "$BIN/openepl-studio"
+
+# The logo must be found from the unpacked location, not from a build tree.
+check "studio finds its assets after relocation" bash -c \
+    "OPENEPL_DESIGNER_SCRIPT='view:code' '$BIN/openepl-studio' '$WORK/project/hello/main.oir' 2>&1 \
+     | grep -qi 'could not load texture' && exit 1 || exit 0"
 
 # Studio must not litter the directory it was launched from.
 check "studio leaves no scratch files behind" bash -c \

@@ -57,7 +57,7 @@ strip "$OUT/bin/openepl" "$OUT/bin/openepl-studio" 2>/dev/null || true
 # The runtime, ABI and support libraries ship as SOURCE: `openepl build`
 # compiles and links them into each program, which is what makes dead-stripping
 # per-command possible (PRD D3/ADR 0003).
-for d in runtime abi libs templates examples editors; do
+for d in runtime abi libs templates examples editors assets; do
     cp -r "$d" "$OUT/$d"
 done
 

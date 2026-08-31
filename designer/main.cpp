@@ -30,6 +30,7 @@
 #include <vector>
 
 #include <SDL.h>
+#include <SDL_image.h>
 
 #include "RmlUi_Backend.h"
 #include "RmlUi_Include_GL3.h"
@@ -427,6 +428,42 @@ std::string build_toolbox() {
 /// Build the whole IDE chrome. Structure follows the OpenEPL Studio design
 /// specification: title bar, menu bar, action toolbar, toolbox / designer /
 /// inspector docks, a split code+output panel, and a status bar.
+/// Locate a bundled asset (logo, icon) wherever OpenEPL was unpacked.
+///
+/// Tried in the order a real installation nests them: beside the binary's
+/// directory in a release bundle (bin/ -> ../assets), inside the source tree
+/// when running from a build, then the working directory. Returns "" when the
+/// asset is missing, and every caller must cope — a missing logo should cost a
+/// logo, not the IDE.
+std::string asset_path(const char* name) {
+    std::vector<std::string> roots;
+    char buf[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n > 0) {
+        buf[n] = 0;
+        std::string exe(buf);
+        const size_t slash = exe.find_last_of('/');
+        if (slash != std::string::npos) {
+            const std::string dir = exe.substr(0, slash);
+            roots.push_back(dir + "/../assets/");   // bundle: bin/ -> ../assets
+            roots.push_back(dir + "/assets/");
+            roots.push_back(dir + "/../../assets/"); // repo: designer/ -> ../assets
+        }
+    }
+    roots.push_back("assets/");
+    for (const auto& r : roots) {
+        const std::string candidate = r + name;
+        if (::access(candidate.c_str(), R_OK) == 0) {
+            char real[4096];
+            // RmlUi resolves a decorator path as a URL and eats the leading
+            // slash of an absolute one, so hand it back doubled.
+            if (::realpath(candidate.c_str(), real)) return "/" + std::string(real);
+            return candidate;
+        }
+    }
+    return "";
+}
+
 std::string build_chrome(const std::string& family, const std::string& mono,
                          const std::string& dot_tile) {
     using namespace theme;
@@ -451,9 +488,11 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // ---- title bar ------------------------------------------------------
     s << "#titlebar{left:0;top:0;width:" << WIN_W << "px;height:" << TITLEBAR_H
       << "px;background-color:" << CHROME << ";border-bottom:1px " << BORDER_SOFT << "}";
-    s << "#titlebar .appicon{position:absolute;left:10px;top:7px;width:18px;height:18px;"
-         "background-color:" << ACCENT << ";border-radius:4px;color:#fff;text-align:center;"
-         "font-size:11px;padding-top:3px}";
+    s << "#titlebar .appicon{position:absolute;left:10px;top:6px;width:20px;height:20px;"
+         "border-radius:5px;color:#fff;text-align:center;font-size:11px}";
+    // Only the drawn fallback needs a background; the icon brings its own.
+    s << "#titlebar div.appicon{background-color:" << ACCENT << ";padding-top:3px;"
+         "width:18px;height:18px;top:7px}";
     s << "#titlebar .title{position:absolute;left:38px;top:8px;width:700px;height:18px;"
          "overflow:hidden;white-space:nowrap;font-size:13px;font-weight:bold;color:" << TEXT << "}";
     s << "#titlebar .wc{position:absolute;top:8px;width:16px;height:16px;border-radius:8px}";
@@ -684,8 +723,11 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << "</style></head><body>";
 
     // ---- markup ---------------------------------------------------------
-    s << "<div id='titlebar'><div class='appicon'>E</div>"
-         "<div class='title'>OpenEPL Studio — " << esc(basename_of(g.model.path)) << " — ["
+    const std::string icon = asset_path("openepl-icon-64.png");
+    s << "<div id='titlebar'>"
+      << (icon.empty() ? std::string("<div class='appicon'>E</div>")
+                       : "<img class='appicon' src='" + icon + "'/>")
+      << "<div class='title'>OpenEPL Studio — " << esc(basename_of(g.model.path)) << " — ["
       << esc(g.model.form_name) << "]</div>"
          "<div class='wc' style='right:66px;background-color:#febc2e'/>"
          "<div class='wc' style='right:42px;background-color:#28c840'/>"
@@ -2450,7 +2492,7 @@ std::string create_project(const std::string& template_id,
 Rml::ElementDocument* show_splash(const std::string& family) {
     const auto dim = g.context->GetDimensions();
     Rml::ElementDocument* doc = g.context->LoadDocumentFromMemory(
-        openepl::welcome::splash_markup(family, dim.x, dim.y));
+        openepl::welcome::splash_markup(family, dim.x, dim.y, asset_path("openepl-wordmark.png")));
     if (!doc) return nullptr;
     doc->Show();
     // Two frames: one to lay out, one to present. Without this the splash is
@@ -2473,7 +2515,8 @@ std::string run_welcome(const std::string& family) {
     const auto recent = openepl::welcome::load_recent();
 
     Rml::ElementDocument* doc = g.context->LoadDocumentFromMemory(
-        openepl::welcome::welcome_markup(family, dim.x, dim.y, templates, recent));
+        openepl::welcome::welcome_markup(family, dim.x, dim.y, templates, recent,
+                                         asset_path("openepl-wordmark.png")));
     if (!doc) return "";
     doc->Show();
 
@@ -2623,6 +2666,21 @@ int main(int argc, char** argv) {
     }
 
     if (!Backend::Initialize("OpenEPL Studio", INIT_W, INIT_H, true)) return 1;
+
+    // The window icon: what a task switcher and a dock show. SDL owns the
+    // surface only until it copies it, so freeing straight after is correct.
+    if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
+        const std::string icon = asset_path("openepl-icon.png");
+        if (!icon.empty()) {
+            // asset_path returns the URL form (doubled leading slash) for
+            // RmlUi; SDL wants the plain filesystem path.
+            const std::string file = icon.compare(0, 2, "//") == 0 ? icon.substr(1) : icon;
+            if (SDL_Surface* s = IMG_Load(file.c_str())) {
+                SDL_SetWindowIcon(win, s);
+                SDL_FreeSurface(s);
+            }
+        }
+    }
     Rml::SetSystemInterface(Backend::GetSystemInterface());
     Rml::SetRenderInterface(Backend::GetRenderInterface());
     Rml::Initialise();

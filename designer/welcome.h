@@ -102,7 +102,8 @@ inline std::string base_styles() {
 }
 
 /// The splash: shown while the runtime registry loads.
-inline std::string splash_markup(const std::string& family, int w, int h) {
+inline std::string splash_markup(const std::string& family, int w, int h,
+                                 const std::string& wordmark) {
     std::string s = "<rml><head><style>";
     s += "body{width:" + std::to_string(w) + "px;height:" + std::to_string(h) +
          "px;font-family:'" + family + "'}";
@@ -111,8 +112,16 @@ inline std::string splash_markup(const std::string& family, int w, int h) {
          std::to_string(h) + "px}";
     s += "#inner{position:absolute;left:0;top:" + std::to_string(h / 2 - 60) +
          "px;width:" + std::to_string(w) + "px;text-align:center}";
+    // The wordmark, with the text mark as the fallback: a missing asset should
+    // cost the logo, not the splash.
+    s += "#logo{display:block;width:420px;margin-left:auto;margin-right:auto}";
     s += "</style></head><body><div id='box'><div id='inner'>";
-    s += "<div id='mark'>OpenEPL <span class='accent'>Studio</span></div>";
+    if (wordmark.empty()) {
+        s += "<div id='mark'>OpenEPL <span class='accent'>Studio</span></div>";
+    } else {
+        s += "<img id='logo' src='" + wordmark + "'/>";
+    }
+    s += "<div id='tag'>Studio</div>";
     // Literal UTF-8, not entities: RmlUi decodes only a small set (lt, gt, amp,
     // quot, nbsp) and prints anything else verbatim, so `&middot;` would show
     // up on screen exactly as written.
@@ -125,7 +134,8 @@ inline std::string splash_markup(const std::string& family, int w, int h) {
 /// The welcome screen: pick a project kind, or open something recent.
 inline std::string welcome_markup(const std::string& family, int w, int h,
                                   const std::vector<TemplateInfo>& templates,
-                                  const std::vector<std::string>& recent) {
+                                  const std::vector<std::string>& recent,
+                                  const std::string& wordmark) {
     using namespace openepl::designer::theme;
     std::string s = "<rml><head><style>";
     s += "body{width:" + std::to_string(w) + "px;height:" + std::to_string(h) +
@@ -156,9 +166,13 @@ inline std::string welcome_markup(const std::string& family, int w, int h,
     // guarantees no unpainted region shows through as black.
     s += "#bg{position:absolute;left:0;top:0;width:" + std::to_string(w) + "px;height:" +
          std::to_string(h) + "px;background-color:" + CANVAS + "}";
+    s += "#logo{display:block;width:300px}";
     s += "</style></head><body><div id='bg'/>";
 
-    s += "<div id='head'><div id='mark'>OpenEPL <span class='accent'>Studio</span></div>"
+    s += "<div id='head'>";
+    s += wordmark.empty() ? "<div id='mark'>OpenEPL <span class='accent'>Studio</span></div>"
+                          : "<img id='logo' src='" + wordmark + "'/>";
+    s += ""
          "<div id='tag'>Start something. Every template below compiles to a clean native "
          "binary.</div></div>";
 
