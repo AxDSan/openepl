@@ -15,6 +15,7 @@ use std::process::{exit, Command};
 
 mod libload;
 mod lsp;
+mod lsp_index;
 
 use openepl_backend::lower_module;
 use openepl_ir::{parse, validate};
