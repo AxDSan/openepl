@@ -104,6 +104,21 @@ pub struct BuildConfig {
 
 /// Resolve `core` + each `use`d library under `repo_root`.
 pub fn load(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
+    load_with(repo_root, uses, true)
+}
+
+/// Introspect libraries without requiring what only a *link* needs.
+///
+/// The metadata translation unit references command implementations by symbol
+/// name rather than by pointer, so reading a library's descriptors never needs
+/// its vendored dependencies. Asking what commands exist should not require the
+/// ability to build a window — which is also what lets the documentation be
+/// generated on a machine that has never fetched the UI stack.
+pub fn load_metadata(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
+    load_with(repo_root, uses, false)
+}
+
+fn load_with(repo_root: &Path, uses: &[String], require_impl: bool) -> Result<LibPlan, String> {
     let mut registry = Registry::new();
     let mut impl_sources = Vec::new();
     let mut build = BuildConfig::default();
@@ -122,9 +137,11 @@ pub fn load(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
             ));
         }
         let manifest = Manifest::load(dir, repo_root)?;
-        manifest
-            .check_requirements()
-            .map_err(|e| format!("library `{name}`: {e}"))?;
+        if require_impl {
+            manifest
+                .check_requirements()
+                .map_err(|e| format!("library `{name}`: {e}"))?;
+        }
 
         let mut sources = c_sources(dir)?;
         sources.extend(manifest.extra_sources.iter().cloned());

@@ -162,7 +162,7 @@ fn cmd_emit(rest: &[String]) -> i32 {
             return 2;
         }
     };
-    match compile(&io.input, io.target) {
+    match compile_with(&io.input, io.target, false) {
         Ok((ll, _plan, _t)) => {
             print!("{ll}");
             0
@@ -203,7 +203,10 @@ fn cmd_commands(repo_root: &Path, args: &[String]) -> i32 {
         i += 1;
     }
 
-    let plan = match libload::load(repo_root, &uses) {
+    // Metadata only: listing what exists must not require the ability to link
+    // it, or `openepl commands --use ui` would fail on any machine that has not
+    // vendored the UI stack.
+    let plan = match libload::load_metadata(repo_root, &uses) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("openepl: {e}");
@@ -365,6 +368,18 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
 /// Parse, introspect libraries, validate, and lower to LLVM IR.
 /// Returns the `.ll` text and the implementation sources to static-link.
 fn compile(input: &Path, target_override: Option<Target>) -> Result<(String, libload::LibPlan, Target), String> {
+    compile_with(input, target_override, true)
+}
+
+/// `require_impl` is false when the caller only wants the IR: emitting it
+/// exercises parsing, validation and lowering, none of which need a library to
+/// be linkable. Demanding a vendored UI stack to *print* IR would make the
+/// check unavailable exactly where it is most useful — a fresh checkout.
+fn compile_with(
+    input: &Path,
+    target_override: Option<Target>,
+    require_impl: bool,
+) -> Result<(String, libload::LibPlan, Target), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let mut module = parse(&src).map_err(|e| e.to_string())?;
@@ -383,7 +398,11 @@ fn compile(input: &Path, target_override: Option<Target>) -> Result<(String, lib
 
     // Introspect `core` + each `use`d library for command signatures (the
     // authoritative source — no hard-coded table).
-    let plan = libload::load(&repo_root, &module.uses)?;
+    let plan = if require_impl {
+        libload::load(&repo_root, &module.uses)?
+    } else {
+        libload::load_metadata(&repo_root, &module.uses)?
+    };
 
     if let Err(errs) = validate(&module, &plan.registry) {
         let joined = errs

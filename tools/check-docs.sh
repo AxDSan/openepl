@@ -41,8 +41,14 @@ done
 shopt -s nullglob
 for sample in "$WORK"/*.oir; do
     name="$(basename "$sample" .oir)"
+    # Build when we can — that checks the whole chain including the link. On a
+    # machine without the vendored UI stack (a fresh checkout, or CI), fall back
+    # to emitting IR, which still parses, validates and lowers the sample.
     if out=$("$OPENEPL" build "$sample" -o "$WORK/$name.bin" 2>&1); then
         printf '  %-44s PASS\n' "$name"
+        pass=$((pass + 1))
+    elif grep -q "not vendored" <<<"$out" && out=$("$OPENEPL" emit "$sample" 2>&1 >/dev/null); then
+        printf '  %-44s PASS (validated, not linked)\n' "$name"
         pass=$((pass + 1))
     else
         printf '  %-44s FAIL\n' "$name"
