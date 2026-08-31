@@ -821,8 +821,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div id='splitright' class='split v'/>"
          "<div id='splitbottom' class='split h'/>";
 
-    s << "<div id='status'>RAD is the identity  |  English-first  |  "
-         "Cross-platform  |  Assignment is not an expression"
+    s << "<div id='status'>Design it, wire it, run it  |  Native binaries, nothing to unpack"
          "<span class='right'><span id='statustext'>Ready</span>   "
          "<span class='dot'>●</span></span></div>";
 
