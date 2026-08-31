@@ -12,7 +12,7 @@ form main_window
   background_color = "#1e2233"
 
   label greeting
-    text = "Click the button."
+    text = "Click the buttone."
     left = 40
     top = 50
     width = 400

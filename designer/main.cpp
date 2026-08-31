@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <fstream>
 #include <fcntl.h>
+#include <time.h>
 #include <signal.h>
 #include <sstream>
 #include <sys/wait.h>
@@ -103,6 +104,16 @@ struct Designer {
     /// Read end of the running app's stdout+stderr, so its output lands in the
     /// IDE console instead of the terminal the IDE was launched from.
     int app_output = -1;
+
+    /// The build, when one is in flight. The build MUST be asynchronous: run
+    /// synchronously it blocks the frame loop, so no progress animation can
+    /// play and the compiler's output arrives in one lump at the end instead
+    /// of streaming as it happens.
+    pid_t build_pid = 0;
+    int build_output = -1;
+    bool build_then_run = false;
+    std::string build_target;
+    double build_started = 0.0;
     bool dragging = false;
     int drag_dx = 0, drag_dy = 0;
 
@@ -257,6 +268,8 @@ void mark_dirty() { g.dirty = true; }
 
 void run_app(const std::string& path);
 void stop_app();
+void poll_build();
+void set_activity(const char* what);
 void drain_app_output();
 void log(const std::string& line, const char* cls = nullptr);
 Rml::ElementFormControl* code_editor();
@@ -429,6 +442,19 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     // The editor fills the pane. A textarea has no default appearance in RmlUi,
     // so colours are explicit — the default text colour is white, which on this
     // panel would be invisible.
+    // Indeterminate progress: the bar sweeps because we cannot know how far
+    // through a build we are, and a fake percentage would be a lie.
+    s << "@keyframes sweep{0%{margin-left:0px}100%{margin-left:96px}}";
+    s << "@keyframes pulse{0%{opacity:1}100%{opacity:0.25}}";
+    s << "#activity{position:absolute;right:16px;top:8px;width:220px}";
+    s << "#activitylabel{display:inline-block;font-size:11px;color:" << TEXT_MUTED
+      << ";margin-right:8px;vertical-align:middle}";
+    s << "#activitytrack{display:inline-block;width:128px;height:4px;border-radius:2px;"
+         "background-color:#e5e7eb;vertical-align:middle}";
+    s << "#activitybar{width:32px;height:4px;border-radius:2px;background-color:" << ACCENT
+      << ";animation:1.1s cubic-in-out infinite alternate sweep}";
+    s << "#runlamp{position:absolute;right:250px;top:6px;color:#28c840;font-size:14px;"
+         "animation:0.7s sine-in-out infinite alternate pulse}";
     // RmlUi ships no default scrollbar appearance or size. Left unstyled, a
     // textarea's slider covers the whole control and eats every click — which
     // is what made the code editor impossible to focus, and so impossible to
@@ -567,6 +593,11 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
          "<div class='sep'/>"
          "<div class='tb primary' id='btndesigner' oe-view='designer'>Designer</div>"
          "<div class='tb ghost' id='btncode' oe-view='code'>Code</div>"
+         // Activity indicator: an indeterminate bar while the toolchain works,
+         // and a pulsing lamp for as long as an app is alive.
+         "<div id='activity' style='display:none'><div id='activitylabel'/>"
+         "<div id='activitytrack'><div id='activitybar'/></div></div>"
+         "<span id='runlamp' style='display:none'>●</span>"
          "<div class='sep'/>"
          "<div class='tb run' oe-action='run'>▶ Run</div>"
          "<div class='tb' oe-action='build'>Build Binary</div>"
@@ -1238,29 +1269,123 @@ int run_logged(const std::string& cmd) {
     return pclose(pipe);
 }
 
+/// Seconds since an arbitrary origin, for step timings.
+double now_seconds() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/// Show or hide the activity indicator, and say what it is doing.
+void set_activity(const char* what) {
+    const bool busy = (what != nullptr);
+    if (Rml::Element* e = by_id("activity"))
+        e->SetProperty("display", busy ? "block" : "none");
+    if (Rml::Element* e = by_id("activitylabel"))
+        e->SetInnerRML(busy ? esc(what) : "");
+    // The running indicator pulses for as long as the app is alive.
+    if (Rml::Element* e = by_id("runlamp"))
+        e->SetProperty("display", g.running_app > 0 ? "inline" : "none");
+}
+
+/// Start a build. Returns immediately; poll_build() reports progress.
 void build_binary(bool then_run) {
+    if (g.build_pid > 0) { set_status("a build is already running"); return; }
     save();
     g.log_lines.clear();
-    log("> openepl build " + g.model.path);
-    log("> IR -> LLVM -> ld (system linker)", "muted");
-    log("> Dead-strip unused commands", "muted");
-    const std::string out = "/tmp/openepl_studio_app";
-    const int rc = run_logged(g.openepl_bin + " build " + g.model.path + " -o " + out);
-    if (rc != 0) { log("Build failed.", nullptr); set_status("build failed"); return; }
+
+    g.build_target = "/tmp/openepl_studio_app";
+    const std::string cmd =
+        g.openepl_bin + " build " + g.model.path + " -o " + g.build_target + " 2>&1";
+
+    // Verbose by design: the console should let you see what the toolchain
+    // actually did, not just whether it succeeded.
+    log("> " + g.openepl_bin + " build " + g.model.path + " -o " + g.build_target);
+    log("  stage 1/4  parse + validate .oir", "muted");
+    log("  stage 2/4  lower to LLVM IR", "muted");
+    log("  stage 3/4  clang: assemble + link the runtime", "muted");
+    log("  stage 4/4  dead-strip unused commands (--gc-sections)", "muted");
+
+    int fds[2] = {-1, -1};
+    if (::pipe(fds) != 0) { log("could not create the build pipe", "err"); return; }
+    const pid_t pid = fork();
+    if (pid == 0) {
+        ::close(fds[0]);
+        ::dup2(fds[1], STDOUT_FILENO);
+        ::dup2(fds[1], STDERR_FILENO);
+        ::close(fds[1]);
+        execl("/bin/sh", "sh", "-c", cmd.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    ::close(fds[1]);
+    if (pid < 0) { ::close(fds[0]); log("could not start the build", "err"); return; }
+    ::fcntl(fds[0], F_SETFL, O_NONBLOCK);
+
+    g.build_pid = pid;
+    g.build_output = fds[0];
+    g.build_then_run = then_run;
+    g.build_started = now_seconds();
+    set_status("building...");
+    set_activity("Building");
+}
+
+/// Drain the build's output and, when it finishes, report and maybe run.
+void poll_build() {
+    if (g.build_pid <= 0) return;
+
+    if (g.build_output >= 0) {
+        char buf[1024];
+        ssize_t n;
+        static std::string partial;
+        while ((n = ::read(g.build_output, buf, sizeof buf)) > 0) {
+            partial.append(buf, (size_t)n);
+            size_t nl;
+            while ((nl = partial.find('\n')) != std::string::npos) {
+                log("  " + partial.substr(0, nl), "muted");
+                partial.erase(0, nl + 1);
+            }
+        }
+        if (n == 0) {
+            if (!partial.empty()) { log("  " + partial, "muted"); partial.clear(); }
+            ::close(g.build_output);
+            g.build_output = -1;
+        }
+    }
+
+    int status = 0;
+    if (::waitpid(g.build_pid, &status, WNOHANG) != g.build_pid) return;
+    const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    const double secs = now_seconds() - g.build_started;
+    g.build_pid = 0;
+    if (g.build_output >= 0) { ::close(g.build_output); g.build_output = -1; }
+
+    char line[320];
+    if (rc != 0) {
+        std::snprintf(line, sizeof line, "FAILED  exit %d after %.2fs", rc, secs);
+        log(line, "err");
+        set_status("build failed");
+        set_activity(nullptr);
+        return;
+    }
 
     long bytes = 0;
-    if (FILE* f = std::fopen(out.c_str(), "rb")) {
+    if (FILE* f = std::fopen(g.build_target.c_str(), "rb")) {
         std::fseek(f, 0, SEEK_END);
         bytes = std::ftell(f);
         std::fclose(f);
     }
-    char line[256];
-    std::snprintf(line, sizeof line, "OK  Output: %s — %ld KB (clean native, no runtime unpack)",
-                  out.c_str(), bytes / 1024);
+    std::snprintf(line, sizeof line, "OK  %s — %ld KB in %.2fs (clean native, no runtime unpack)",
+                  g.build_target.c_str(), bytes / 1024, secs);
     log(line, "ok");
-    log("> IR stripped — no decompilation possible", "muted");
+    log("  IR stripped — no decompilation possible", "muted");
     set_status("build succeeded");
-    if (then_run) run_app(out);
+
+    if (g.build_then_run) {
+        g.build_then_run = false;
+        run_app(g.build_target);
+    } else {
+        set_activity(nullptr);
+    }
 }
 
 /// Launch the built app, keeping its pid so Stop can end it. `system()` would
@@ -1288,8 +1413,10 @@ void run_app(const std::string& path) {
     ::fcntl(fds[0], F_SETFL, O_NONBLOCK);
     g.app_output = fds[0];
     g.running_app = pid;
-    log("> running (pid " + std::to_string(pid) + ")", "muted");
+    log("> running: " + path + "  (pid " + std::to_string(pid) + ")", "muted");
+    log("  output below is the program's own stdout/stderr", "muted");
     set_status("running");
+    set_activity("Running");
 }
 
 /// Stop the app started by Run, if it is still alive.
@@ -1308,6 +1435,7 @@ void stop_app() {
     if (g.app_output >= 0) { ::close(g.app_output); g.app_output = -1; }
     g.running_app = 0;
     set_status("stopped");
+    set_activity(nullptr);
 }
 
 /// Reap the app if it exited on its own, so Stop reports honestly.
@@ -1341,6 +1469,7 @@ void poll_app() {
         drain_app_output();      // whatever it printed on the way out
         log("> app exited with code " + std::to_string(WEXITSTATUS(status)), "muted");
         g.running_app = 0;
+        set_activity(nullptr);
     }
 }
 
@@ -1822,12 +1951,55 @@ void run_script(const char* script) {
                 }
             }
             else if (verb == "save") save();
-            else if (verb == "build") build_binary(false);
-            else if (verb == "run") {
+            else if (verb == "buildstart") {
+                // Start a build and leave it running, so a dumped frame shows
+                // the IDE mid-build with its activity indicator up.
+                build_binary(false);
+                auto bar_pos = [&] {
+                    Rml::Element* b = by_id("activitybar");
+                    return b ? b->GetAbsoluteLeft() : -1.f;
+                };
+                for (int i = 0; i < 10; i++) { poll_build(); g.context->Update(); usleep(20000); }
+                const float p1 = bar_pos();
+                for (int i = 0; i < 20; i++) { poll_build(); g.context->Update(); usleep(20000); }
+                const float p2 = bar_pos();
+                std::printf("bar: %.1f -> %.1f  (%s)\n", p1, p2,
+                            p1 != p2 ? "ANIMATING" : "STATIC");
+                std::fflush(stdout);
+            }
+            else if (verb == "runstart") {
                 build_binary(true);
-                // Give the child a moment to produce output, then drain it the
-                // way the frame loop would.
-                for (int i = 0; i < 40; i++) { poll_app(); usleep(50000); }
+                auto lamp = [&] {
+                    Rml::Element* e = by_id("runlamp");
+                    if (!e) return -1.f;
+                    const auto* p = e->GetProperty(Rml::PropertyId::Opacity);
+                    return p ? p->Get<float>() : -1.f;
+                };
+                for (int i = 0; i < 2400 && g.running_app <= 0; i++) {
+                    poll_build(); g.context->Update(); usleep(20000);
+                }
+                for (int i = 0; i < 5; i++) { poll_app(); g.context->Update(); usleep(20000); }
+                const float o1 = lamp();
+                for (int i = 0; i < 15; i++) { poll_app(); g.context->Update(); usleep(20000); }
+                const float o2 = lamp();
+                Rml::Element* e = by_id("runlamp");
+                std::printf("lamp display=%s opacity %.2f -> %.2f (%s)\n",
+                            e ? e->GetProperty(Rml::PropertyId::Display)->ToString().c_str() : "?",
+                            o1, o2, o1 != o2 ? "PULSING" : "STATIC");
+                std::fflush(stdout);
+            }
+            else if (verb == "build" || verb == "run") {
+                build_binary(verb == "run");
+                // Pump the same polls the frame loop does, so a scripted
+                // session exercises the real asynchronous path.
+                for (int i = 0; i < 2400 && (g.build_pid > 0 || g.running_app > 0); i++) {
+                    poll_build();
+                    poll_app();
+                    g.context->Update();
+                    usleep(20000);
+                }
+                poll_build();
+                poll_app();
             }
             else if (verb == "typetest") {
                 // Prove the real editing path: focus the control the way a
@@ -1988,7 +2160,8 @@ int main(int argc, char** argv) {
     // when idle, but while an app is running the user is clicking in *its*
     // window, not ours — and a blocked loop never drains the app's output pipe,
     // so its prints would only appear when you happened to jiggle Studio.
-    while (Backend::ProcessEvents(g.context, &on_key_down, g.running_app <= 0)) {
+    while (Backend::ProcessEvents(g.context, &on_key_down, g.running_app <= 0 && g.build_pid <= 0)) {
+        poll_build();
         poll_app();
         // Follow the OS window. The backend resizes the context; the layout has
         // to follow or everything past the old size is left unpainted.
