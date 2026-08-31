@@ -1,0 +1,65 @@
+name: Documentation
+
+# The reference pages are generated from the toolchain, so the site cannot be
+# built without building the compiler first — that is the point: a command that
+# no longer exists cannot survive in the docs.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Pinned: an unpinned mdBook eventually changes its output or its flags,
+      # and the failure shows up as a broken site rather than a broken build.
+      MDBOOK_VERSION: "0.5.4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install mdBook
+        run: cargo install mdbook --locked --version "$MDBOOK_VERSION"
+
+      - name: Build the compiler
+        run: cargo build --release
+
+      - name: Generate the reference pages
+        run: tools/gen-docs.sh
+
+      - name: Check every documented sample compiles
+        run: tools/check-docs.sh
+
+      - name: Build the site
+        run: mdbook build docs-site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -7,9 +7,9 @@
 A cross-platform, visual-first development environment — with a compiler that
 produces clean native executables, no runtime to install and nothing to unpack.
 
-[Quick start](#quick-start) · [Build targets](#one-project-every-artifact) ·
-[Editor support](#editor-support) · [Building from source](#building-from-source) ·
-[Status](#status)
+**[Documentation](https://axdsan.github.io/openepl/)** · [Quick start](#quick-start) ·
+[Build targets](#one-project-every-artifact) · [Editor support](#editor-support) ·
+[Building from source](#building-from-source) · [Status](#status)
 
 </div>
 
@@ -158,6 +158,20 @@ OpenEPL is young, and honest about it:
 
 What does work, end to end: design a form, wire an event, build it, run it,
 and ship the binary — on Linux, today.
+
+## Documentation
+
+Full documentation — installation, a language guide, the visual designer, and
+generated references for every command and component — is at
+**[axdsan.github.io/openepl](https://axdsan.github.io/openepl/)**.
+
+It is built from `docs-site/`. To work on it locally:
+
+```sh
+cargo install mdbook
+tools/gen-docs.sh          # regenerate the reference pages from the toolchain
+mdbook serve docs-site     # http://localhost:3000
+```
 
 ## Licence
 

@@ -1,16 +1,16 @@
-//! `openepl` — the Phase 0 command-line driver.
+//! `openepl` — the command-line toolchain.
 //!
 //! Subcommands:
 //!   openepl build <in.oir> [-o <out>]   parse -> lower -> clang -> native binary
 //!   openepl run   <in.oir> [-o <out>]   build, then execute it
 //!   openepl emit  <in.oir>              print the generated LLVM IR to stdout
 //!   openepl lsp                         language server (stdio) for editors
+//!   openepl commands                    list available commands and components
 //!   openepl templates                   list project templates
 //!   openepl new <tmpl> <dir>            create a project from a template
 //!
-//! The pipeline is the BlackMoon model with `clang` standing in for the raw
-//! obj-emit + system-linker steps (PRD §5.2): IR -> `.ll` -> `clang` assembles
-//! and links the runtime objects -> a standard native executable.
+//! The pipeline lowers a module to LLVM IR, then has `clang` assemble it and
+//! link the runtime sources, producing an ordinary native executable.
 
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
@@ -24,9 +24,26 @@ use openepl_backend::lower_module;
 use openepl_ir::{parse, validate, Target};
 
 fn main() {
+    // Die quietly when a reader goes away, the way every other command-line
+    // tool does: `openepl commands | head` should not print a panic.
+    #[cfg(unix)]
+    unsafe {
+        libc_signal_default();
+    }
     let args: Vec<String> = std::env::args().collect();
     let code = run(&args[1..]);
     exit(code);
+}
+
+/// Restore the default SIGPIPE disposition, which Rust's runtime overrides.
+#[cfg(unix)]
+unsafe fn libc_signal_default() {
+    // SIG_DFL for SIGPIPE (13). Declared here rather than adding a dependency
+    // on `libc` for one constant.
+    unsafe extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+    }
+    unsafe { signal(13, 0) };
 }
 
 fn run(args: &[String]) -> i32 {
@@ -43,6 +60,13 @@ fn run(args: &[String]) -> i32 {
         "emit" => cmd_emit(rest),
         "inspect" => cmd_inspect(rest),
         "lsp" => lsp::run(),
+        "commands" => match find_repo_root() {
+            Some(root) => cmd_commands(&root, rest),
+            None => {
+                eprintln!("openepl: could not locate the OpenEPL runtime");
+                1
+            }
+        },
         "templates" => match find_repo_root() {
             Some(root) => templates::cmd_list(&root),
             None => {
@@ -71,13 +95,14 @@ fn run(args: &[String]) -> i32 {
 
 fn usage() {
     eprintln!(
-        "openepl (Phase 0)\n\n\
+        "openepl — the OpenEPL toolchain\n\n\
          USAGE:\n  \
          openepl build <in.oir> [-o <out>]   compile to a native binary\n  \
          openepl run   <in.oir> [-o <out>]   compile and run\n  \
          openepl emit  <in.oir>              print generated LLVM IR\n  \
          openepl inspect <in.oir>            dump the form model (for the designer)\n  \
          openepl lsp                         language server over stdio (see docs/editors.md)\n  \
+         openepl commands [--use <lib>]      list the commands and components available\n  \
          openepl templates                   list the available project templates\n  \
          openepl new <template> <dir>        create a project from a template\n"
     );
@@ -147,6 +172,75 @@ fn cmd_emit(rest: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// List everything a program can call or place: commands from the core runtime
+/// plus any `use`d libraries, and the visual components they contribute.
+///
+/// Line-based like `inspect` and `templates`, so it can be read by a script as
+/// easily as by a person — the documentation's reference pages are generated
+/// from this rather than written by hand, which is the only way they stay true.
+fn cmd_commands(repo_root: &Path, args: &[String]) -> i32 {
+    let mut uses: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--use" | "-u" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => uses.push(v.clone()),
+                    None => {
+                        eprintln!("openepl: `--use` needs a library name");
+                        return 2;
+                    }
+                }
+            }
+            s => {
+                eprintln!("openepl: unexpected argument `{s}`");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+
+    let plan = match libload::load(repo_root, &uses) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("openepl: {e}");
+            return 1;
+        }
+    };
+
+    let mut names: Vec<&str> = plan.registry.names().collect();
+    names.sort_unstable();
+    for name in names {
+        let Some(cmd) = plan.registry.get(name) else { continue };
+        let params = cmd
+            .sig
+            .params
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match cmd.sig.ret {
+            Some(r) => println!("command: {name}({params}) -> {}", r.as_str()),
+            None => println!("command: {name}({params})"),
+        }
+    }
+
+    let mut components: Vec<&str> = plan.registry.component_names().collect();
+    components.sort_unstable();
+    for type_name in components {
+        let Some(desc) = plan.registry.component(type_name) else { continue };
+        println!("component: {type_name}");
+        for p in &desc.properties {
+            println!("property: {type_name} {} {}", p.name, p.ty.as_str());
+        }
+        for e in &desc.events {
+            println!("event: {type_name} {e}");
+        }
+    }
+    0
 }
 
 /// Dump a module's form model as plain lines, for the designer to read.

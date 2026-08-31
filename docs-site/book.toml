@@ -1,0 +1,21 @@
+[book]
+title = "OpenEPL"
+description = "Draw an app, wire an event, ship a native binary."
+authors = ["The OpenEPL Contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/AxDSan/openepl"
+edit-url-template = "https://github.com/AxDSan/openepl/edit/main/docs-site/{path}"
+# A project page lives under /openepl/, so every generated link and asset URL
+# has to be built with that prefix. Without it the site deploys "successfully"
+# and then 404s on its own stylesheet.
+site-url = "/openepl/"
+additional-css = ["theme/openepl.css"]
+
+[output.html.fold]
+enable = true
+level = 1

@@ -43,3 +43,6 @@ codedb.snapshot
 
 # Designer scratch
 openepl_dotgrid.tga
+
+# Documentation site build output
+/docs-site/book/
