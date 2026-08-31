@@ -14,6 +14,12 @@ namespace openepl::designer::theme {
 /// Line box for the code editor. Both editor layers must use it: the
 /// highlight layer lines up with the text only if their line heights match.
 constexpr int CODE_LINE_H = 18;
+/// The output pane stacks a PROBLEMS strip over the build log; both need fixed
+/// heights so the log can scroll instead of growing to fit its content.
+constexpr int PANEHEAD_H = 26;
+constexpr int PROBLEMS_H = 72;
+/// Line box in the output console, so the tail calculation is exact.
+constexpr int LOG_LINE_H = 17;
 constexpr int CODE_PAD_X = 10;
 constexpr int CODE_PAD_Y = 8;
 

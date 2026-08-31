@@ -111,6 +111,10 @@ struct Designer {
     /// positioned, so neither the control nor its container will scroll them.
     int code_scroll = 0;
     int code_content_h = 0;
+    /// Set when a line is appended to the console, so the frame loop can scroll
+    /// it to the bottom. Doing it inside log() would force a full layout per
+    /// line, and a build emits many lines per frame.
+    bool log_follow = false;
     /// Read end of the running app's stdout+stderr, so its output lands in the
     /// IDE console instead of the terminal the IDE was launched from.
     int app_output = -1;
@@ -187,6 +191,8 @@ std::string basename_of(const std::string& p) {
 
 Rml::Element* by_id(const char* id) { return g.doc ? g.doc->GetElementById(id) : nullptr; }
 
+void size_output_pane();
+
 /// Apply the current dock sizes to the layout. Geometry lives here rather than
 /// in the stylesheet so the panels can be resized at run time.
 void relayout() {
@@ -250,6 +256,7 @@ void relayout() {
         e->SetProperty("width", Rml::String(std::to_string(half) + "px"));
         e->SetProperty("height", Rml::String(std::to_string(g.bottom_h) + "px"));
     }
+    size_output_pane();
     if (Rml::Element* e = by_id("logpane")) {
         e->SetProperty("left", Rml::String(std::to_string(half) + "px"));
         e->SetProperty("width", Rml::String(std::to_string(centre_w - half) + "px"));
@@ -274,10 +281,56 @@ void log(const std::string& line, const char* cls) {
     g.log_lines.push_back(cls ? "<span class='" + std::string(cls) + "'>" + esc(line) + "</span>"
                               : esc(line));
     if (Rml::Element* e = by_id("log")) {
+        // Render the TAIL, not the whole history. RmlUi clamps a scroll offset
+        // against a box it computes differently from the one it lays the text
+        // out in, so the last lines of a long log stay unreachable however far
+        // you scroll. Drawing only what fits makes the newest output visible by
+        // construction — and the newest line is the one that matters: the error,
+        // or the result. The full history is still in g.log_lines.
+        // How many lines actually fit. Rendering more than that is what put
+        // the newest output beyond RmlUi's reachable scroll range.
+        const float box_h = e->GetBox().GetSize().y;
+        // Measure the row height instead of assuming it. A console entry is
+        // taller than its font suggests once RmlUi has laid it out, and every
+        // guess made here was wrong by enough to push the newest lines out of
+        // sight. Dividing the last render's height by the rows it contained is
+        // self-correcting after a single frame.
+        static float row_h = 17.f;
+        static size_t rendered = 0;
+        if (rendered > 0) {
+            const float measured = (float)e->GetScrollHeight() / (float)rendered;
+            if (measured > 4.f && measured < 200.f) row_h = measured;
+        }
+        const size_t rows = box_h > 0 ? (size_t)(box_h / row_h) : 6;
+        const size_t fits = rows > 1 ? rows - 1 : 1;
+        const size_t keep = std::max<size_t>(6, fits);
+        const size_t first = g.log_lines.size() > keep ? g.log_lines.size() - keep : 0;
         std::string html;
-        for (const auto& l : g.log_lines) html += "<div>" + l + "</div>";
+        for (size_t i = first; i < g.log_lines.size(); i++) {
+            html += "<div>" + g.log_lines[i] + "</div>";
+        }
         e->SetInnerRML(html);
+        rendered = g.log_lines.size() - first;
+        g.log_follow = true;
     }
+}
+
+/// Scroll the console to the newest line. Must run after a layout pass, since
+/// the scroll height is not known until the new lines have been laid out.
+void follow_log() {
+    if (!g.log_follow) return;
+    g.log_follow = false;
+    // Overshoot deliberately: RmlUi clamps to the real maximum, and the scroll
+    // height can lag a layout pass behind the lines just appended. Asking for
+    // more than exists is what reliably lands on the newest line.
+    Rml::Element* e = by_id("log");
+    if (!e) return;
+    // Twice, with a layout between: RmlUi clamps the offset against the box it
+    // last laid out, so the first call can stop short whenever the pane was
+    // just resized. The second lands on the newest line.
+    e->SetScrollTop((float)e->GetScrollHeight() + 4096.f);
+    g.context->Update();
+    e->SetScrollTop((float)e->GetScrollHeight() + 4096.f);
 }
 
 void mark_dirty() { g.dirty = true; }
@@ -288,6 +341,8 @@ void poll_build();
 void set_activity(const char* what);
 void refresh_highlight();
 void sync_highlight_scroll();
+void follow_log();
+void size_output_pane();
 void render_diagnostics();
 Rml::ElementFormControl* code_editor();
 void drain_app_output();
@@ -502,7 +557,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // A bad line is tinted rather than underlined: the server reports whole
     // lines, so a squiggle would claim a precision the diagnostic does not have.
     s << "#codehl div.badline{background-color:#fff0f0;border-left:3px " << DANGER << "}";
-    s << "#problems{max-height:96px;overflow-y:auto;padding:6px 12px}";
+    s << "#problems{height:22px;overflow-y:auto;padding:6px 12px}";
     s << ".problem{font-size:12px;color:" << TEXT << ";padding:2px 0}";
     s << ".problem .pline{color:" << DANGER << ";margin-right:8px}";
     s << ".noproblems{font-size:12px;color:" << TEXT_MUTED << ";font-style:italic}";
@@ -607,10 +662,15 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".k{color:" << SYN_KEYWORD << "}.m{color:" << SYN_METHOD << "}.s{color:" << SYN_STRING
       << "}.i{color:" << SYN_IDENT << "}.c{color:" << SYN_COMMENT << ";font-style:italic}.n{color:"
       << SYN_NUMBER << "}";
-    s << "#log{font-size:12px;padding:6px 10px 0 10px;height:" << (BOTTOM_H - 32)
-      << "px;overflow:auto;color:" << TEXT << "}";
+    // An explicit height, or the div grows to fit its content and the pane
+    // clips it — which looks exactly like a console that will not scroll.
+    s << "#log{font-size:12px;padding:6px 10px 0 10px;height:"
+      << (BOTTOM_H - 2 * PANEHEAD_H - PROBLEMS_H) << "px;overflow-y:auto;color:" << TEXT << "}";
+    // A known line box, so "how many lines fit" is arithmetic rather than a
+    // guess. Left to RmlUi's default the rows were 27px tall, not the ~17 the
+    // tail calculation assumed, and a third of every log was clipped.
     s << "#log .ok{color:" << SUCCESS << "}#log .muted{color:" << TEXT_MUTED << "}";
-    s << "#log div{white-space:nowrap;overflow:hidden;height:17px}";
+    s << "#log div{white-space:nowrap;overflow:hidden;height:" << LOG_LINE_H << "px}";
 
     // ---- status bar -----------------------------------------------------
     s << ".split{position:absolute;background-color:#00000000}";
@@ -1109,6 +1169,38 @@ void refresh_highlight() {
     if (Rml::Element* box = by_id("fullcode")) box->SetProperty("height", px);
 }
 
+/// Split the output pane between PROBLEMS and the build log.
+///
+/// Both need an explicit height or they grow to fit their content and the pane
+/// clips them, which looks exactly like a console that will not scroll. The
+/// problems strip is sized to what it holds, so a clean file gives the log
+/// almost the whole pane instead of reserving space for nothing.
+void size_output_pane() {
+    using namespace theme;
+    const int rows = (int)std::min<size_t>(g.diagnostics.size(), 4);
+    const int problems_h = g.diagnostics.empty() ? 22 : rows * 18 + 12;
+    if (Rml::Element* e = by_id("problems")) {
+        e->SetProperty("height", Rml::String(std::to_string(problems_h) + "px"));
+    }
+    Rml::Element* log_el = by_id("log");
+    Rml::Element* pane = by_id("logpane");
+    if (!log_el || !pane) return;
+
+    // Measure rather than assume. Deriving the height from constants means
+    // guessing the exact height of two pane headers; being 45px out put the
+    // newest lines below the window, where scrolling could never reach them.
+    // The laid-out geometry is the one thing that cannot be wrong.
+    const float top = log_el->GetAbsoluteTop();
+    const float pane_bottom = pane->GetAbsoluteTop() + pane->GetBox().GetSize().y;
+    int h = (int)(pane_bottom - top);
+    if (h <= 0) h = std::max(40, g.bottom_h - 2 * PANEHEAD_H - problems_h);   // before first layout
+    h = std::max(40, h);
+    const std::string px = std::to_string(h) + "px";
+    if (log_el->GetProperty(Rml::PropertyId::Height)->ToString() != px) {
+        log_el->SetProperty("height", px);
+    }
+}
+
 /// Show what the language server reported: a mark against each bad line, and
 /// the messages in the console.
 ///
@@ -1137,6 +1229,7 @@ void render_diagnostics() {
         if (g.diagnostics.empty()) html = "<div class='noproblems'>No problems.</div>";
         box->SetInnerRML(html);
     }
+    size_output_pane();
     if (Rml::Element* tab = by_id("problemcount")) {
         tab->SetInnerRML(g.diagnostics.empty()
                              ? "PROBLEMS"
@@ -2194,6 +2287,7 @@ void run_script(const char* script) {
                     poll_build();
                     poll_app();
                     g.context->Update();
+                    follow_log();
                     usleep(20000);
                 }
                 poll_build();
@@ -2291,6 +2385,20 @@ void run_script(const char* script) {
             else if (verb == "focus") {
                 if (Rml::Element* e = by_id("fullcode")) e->Focus();
                 g.context->Update();
+            }
+            else if (verb == "logscroll") {
+                g.context->Update();
+                size_output_pane();
+                g.context->Update();
+                follow_log();
+                g.context->Update();
+                if (Rml::Element* e = by_id("log")) {
+                    std::printf("log: bottom=%.0f win=%d | top=%.0f height=%.0f box=%.0f lines=%zu\n",
+                                e->GetAbsoluteTop() + e->GetBox().GetSize().y, g.win_h,
+                                e->GetScrollTop(),
+                                (float)e->GetScrollHeight(), e->GetBox().GetSize().y, g.log_lines.size());
+                    std::fflush(stdout);
+                }
             }
             else if (verb == "logdump") {
                 std::printf("logdump-begin\n");
@@ -2640,6 +2748,18 @@ int main(int argc, char** argv) {
     }
 
     if (const char* script = std::getenv("OPENEPL_DESIGNER_SCRIPT")) {
+        // Adopt the window the compositor actually gave us before laying out.
+        // The interactive loop does this every frame; without it a scripted
+        // session lays out for the size we asked for and renders into the size
+        // we got, so dumps show a layout the user would never see.
+        Backend::ProcessEvents(g.context, nullptr, false);
+        const auto dim = g.context->GetDimensions();
+        if (dim.x != g.win_w || dim.y != g.win_h) {
+            g.win_w = dim.x;
+            g.win_h = dim.y;
+            relayout();
+            rebuild_canvas();
+        }
         g.context->Update();
         run_script(script);
         if (g.dirty) {
@@ -2684,6 +2804,8 @@ int main(int argc, char** argv) {
             rebuild_canvas();
         }
         g.context->Update();
+        size_output_pane();
+        follow_log();
         Backend::BeginFrame();
         g.context->Render();
         Backend::PresentFrame();
