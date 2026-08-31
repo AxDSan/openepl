@@ -1131,3 +1131,41 @@ fn new_refuses_a_non_empty_directory() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Text is UTF-8, so character-shaped commands must count and cut CHARACTERS.
+/// Measuring in bytes leaks the encoding into every program: a word with an
+/// accent in it reports the wrong length, and a slice at a byte offset splits
+/// a character and yields text that is no longer valid UTF-8.
+#[test]
+fn text_commands_are_utf8_correct() {
+    let dir = std::env::temp_dir().join("openepl_utf8");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let src = dir.join("utf8.oir");
+    std::fs::write(
+        &src,
+        "module utf8check\ntarget console\n\nsub main\n  \
+         call print_int(length(\"héllo\"))\n  \
+         call print_text(reverse(\"héllo\"))\n  \
+         call print_text(substr(\"héllo\", 0, 2))\n  \
+         call print_int(length(\"日本語\"))\n  \
+         call print_text(substr(\"日本語\", 1, 1))\nend\n",
+    )
+    .expect("write");
+
+    let bin = dir.join("utf8");
+    let out = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", src.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+        .output()
+        .expect("run openepl");
+    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let text = run(&bin);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "5", "length counts characters, not bytes: {text}");
+    assert_eq!(lines[1], "olléh", "reverse must not split a character: {text}");
+    assert_eq!(lines[2], "hé", "substr must not cut mid-character: {text}");
+    assert_eq!(lines[3], "3", "three characters, nine bytes: {text}");
+    assert_eq!(lines[4], "本", "slicing multi-byte text: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

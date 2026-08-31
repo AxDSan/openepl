@@ -15,7 +15,34 @@ void oe_text_eq(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
     r->v.i32 = (strcmp(a, b) == 0) ? 1 : 0;
 }
 
-void oe_length(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){ (void)c; oe_ret_int(r,(int)strlen(nz(oe_arg_text(argv,0)))); }
+/* --- UTF-8 helpers -------------------------------------------------------
+ * Text is UTF-8, so positions and counts are measured in CHARACTERS. Measuring
+ * in bytes leaks the encoding into every program: a name with an accent in it
+ * would have the wrong length, and cutting at a byte offset would split a
+ * character and produce text that is no longer valid UTF-8. */
+static long oe_u8_len(const char *s, long i, long n){
+    unsigned char b = (unsigned char)s[i];
+    long len = 1;
+    if((b&0xE0)==0xC0) len=2; else if((b&0xF0)==0xE0) len=3; else if((b&0xF8)==0xF0) len=4;
+    return (i+len>n) ? 1 : len;              /* truncated: treat as one byte */
+}
+/* Byte offset of character index `chars`, clamped to the end. */
+static long oe_u8_offset(const char *s, long n, long chars){
+    long i=0;
+    while(i<n && chars>0){ i += oe_u8_len(s,i,n); chars--; }
+    return i;
+}
+static long oe_u8_count(const char *s, long n){
+    long i=0, c=0;
+    while(i<n){ i += oe_u8_len(s,i,n); c++; }
+    return c;
+}
+
+/* Characters, not bytes. */
+void oe_length(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
+    (void)c; const char*s=nz(oe_arg_text(argv,0));
+    oe_ret_int(r,(int)oe_u8_count(s,(long)strlen(s)));
+}
 
 void oe_uppercase(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
     (void)c; const char*s=nz(oe_arg_text(argv,0)); long n=(long)strlen(s); char*o=astr(n);
@@ -31,12 +58,16 @@ void oe_trim(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
     const char*e=s+strlen(s); while(e>a && isspace((unsigned char)e[-1])) e--;
     long n=e-a; char*o=astr(n); memcpy(o,a,n); o[n]='\0'; oe_ret_text(r,o);
 }
+/* Start and count are in characters, so a slice can never split one. */
 void oe_substr(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
-    (void)c; const char*s=nz(oe_arg_text(argv,0)); int start=oe_arg_int(argv,1), count=oe_arg_int(argv,2);
+    (void)c; const char*s=nz(oe_arg_text(argv,0));
+    int start=oe_arg_int(argv,1), count=oe_arg_int(argv,2);
     long len=(long)strlen(s);
-    if(start<0)start=0; if(start>len)start=(int)len; if(count<0)count=0;
-    long avail=len-start, n=count<avail?count:avail;
-    char*o=astr(n); memcpy(o,s+start,n); o[n]='\0'; oe_ret_text(r,o);
+    if(start<0)start=0; if(count<0)count=0;
+    long from=oe_u8_offset(s,len,start);
+    long to=oe_u8_offset(s,len,(long)start+count);
+    long n=to-from;
+    char*o=astr(n); memcpy(o,s+from,(size_t)n); o[n]='\0'; oe_ret_text(r,o);
 }
 void oe_find(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
     (void)c; const char*h=nz(oe_arg_text(argv,0)), *n=nz(oe_arg_text(argv,1));
@@ -52,9 +83,21 @@ void oe_repeat(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
     long n=(long)strlen(s), total=n*(long)times; char*o=astr(total); char*p=o;
     for(int i=0;i<times;i++){ memcpy(p,s,n); p+=n; } *p='\0'; oe_ret_text(r,o);
 }
+/* Reverses CHARACTERS, not bytes. Text is UTF-8: reversing bytes splits every
+ * multi-byte character into its pieces and emits them backwards, which is not
+ * a reversed string but a corrupt one. Each character's bytes are copied as a
+ * unit; a malformed byte is copied alone so invalid input degrades rather than
+ * spreading. */
 void oe_reverse(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
-    (void)c; const char*s=nz(oe_arg_text(argv,0)); long n=(long)strlen(s); char*o=astr(n);
-    for(long i=0;i<n;i++) o[i]=s[n-1-i]; o[n]='\0'; oe_ret_text(r,o);
+    (void)c; const char*s=nz(oe_arg_text(argv,0)); long n=(long)strlen(s);
+    char*o=astr(n); long w=n;
+    for(long i=0;i<n;){
+        long len=1; unsigned char b=(unsigned char)s[i];
+        if((b&0xE0)==0xC0) len=2; else if((b&0xF0)==0xE0) len=3; else if((b&0xF8)==0xF0) len=4;
+        if(i+len>n) len=1;                 /* truncated sequence: copy the byte alone */
+        w-=len; memcpy(o+w,s+i,(size_t)len); i+=len;
+    }
+    o[n]='\0'; oe_ret_text(r,o);
 }
 void oe_replace(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
     (void)c;
