@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include <SDL.h>
+
 #include "RmlUi_Backend.h"
 #include "RmlUi_Include_GL3.h"
 #include "RmlUi_Renderer_GL3.h"
@@ -40,7 +42,9 @@ using namespace openepl::designer;
 
 namespace {
 
-constexpr int WIN_W = 1440, WIN_H = 900;
+/// Initial window size. The IDE follows the OS window after that — see
+/// relayout(), which is re-run whenever the context's dimensions change.
+constexpr int INIT_W = 1440, INIT_H = 900;
 
 /// Components named in the design spec that the UI library does not provide
 /// yet. Shown greyed so the toolbox reads as designed while staying honest
@@ -129,6 +133,10 @@ struct Designer {
 
     /// Alignment guides to draw this frame: x positions and y positions.
     std::vector<int> guide_x, guide_y;
+
+    /// Current window size. Layout is recomputed whenever this changes, so the
+    /// IDE fills the OS window instead of leaving unpainted margins.
+    int win_w = INIT_W, win_h = INIT_H;
 };
 Designer g;
 
@@ -147,9 +155,10 @@ Rml::Element* by_id(const char* id) { return g.doc ? g.doc->GetElementById(id) :
 void relayout() {
     using namespace theme;
     if (!g.doc) return;
+    const int W = g.win_w, H = g.win_h;
     const int content_y = TITLEBAR_H + MENUBAR_H + TOOLBAR_H;
-    const int content_h = WIN_H - content_y - STATUS_H;
-    const int centre_w = WIN_W - g.toolbox_w - g.inspect_w;
+    const int content_h = H - content_y - STATUS_H;
+    const int centre_w = W - g.toolbox_w - g.inspect_w;
     const int canvas_h = content_h - TABBAR_H - g.bottom_h;
 
     auto place = [&](const char* id, int x, int y, int w, int h) {
@@ -160,6 +169,24 @@ void relayout() {
             e->SetProperty("height", Rml::String(std::to_string(h) + "px"));
         }
     };
+    // Everything that spans the window has to be re-sized, or the area beyond
+    // the original size stays unpainted (a black margin when the user enlarges
+    // the window).
+    // The body must be sized explicitly: with no size it collapses to 0x0 and
+    // its background paints nothing, leaving the window black wherever no child
+    // covers it. Setting it here (rather than in the stylesheet) is what lets
+    // the IDE follow the OS window.
+    g.doc->SetProperty("width", Rml::String(std::to_string(W) + "px"));
+    g.doc->SetProperty("height", Rml::String(std::to_string(H) + "px"));
+    if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+        g.context->Update();
+        const auto b = g.doc->GetBox().GetSize();
+        std::fprintf(stderr, "designer: relayout W=%d H=%d body=%.0fx%.0f\n", W, H, b.x, b.y);
+    }
+    place("titlebar", 0, 0, W, TITLEBAR_H);
+    place("menubar", 0, TITLEBAR_H, W, MENUBAR_H);
+    place("toolbar", 0, TITLEBAR_H + MENUBAR_H, W, TOOLBAR_H);
+    place("status", 0, H - STATUS_H, W, STATUS_H);
     place("toolbox", 0, content_y, g.toolbox_w, content_h);
     place("centre", g.toolbox_w, content_y, centre_w, content_h);
     place("canvasarea", 0, TABBAR_H, centre_w, canvas_h);
@@ -287,6 +314,7 @@ std::string build_toolbox() {
 /// inspector docks, a split code+output panel, and a status bar.
 std::string build_chrome(const std::string& family, const std::string& dot_tile) {
     using namespace theme;
+    const int WIN_W = g.win_w, WIN_H = g.win_h;
     const int content_y = TITLEBAR_H + MENUBAR_H + TOOLBAR_H;
     const int content_h = WIN_H - content_y - STATUS_H;
     const int centre_w  = WIN_W - TOOLBOX_W - INSPECT_W;
@@ -296,8 +324,8 @@ std::string build_chrome(const std::string& family, const std::string& dot_tile)
     s << "<rml><head><style>";
 
     // ---- base -----------------------------------------------------------
-    s << "body{width:" << WIN_W << "px;height:" << WIN_H << "px;font-family:'" << family
-      << "';font-size:12px;color:" << TEXT << ";background-color:" << CHROME << "}";
+    s << "body{font-family:'" << family << "';font-size:12px;color:" << TEXT
+      << ";background-color:" << CHROME << "}";
     s << "div{display:block}";
     s << "#titlebar,#menubar,#toolbar,#toolbox,#centre,#inspectdock,#bottom,#status,"
          "#canvasarea,#formwin,#overlay,.pane,.wc,.dot,.selbox,.handle,.badge"
@@ -890,9 +918,9 @@ void set_view(const std::string& view) {
     if (Rml::Element* e = by_id("canvasarea")) e->SetProperty("display", code ? "none" : "block");
     if (Rml::Element* e = by_id("codeview")) e->SetProperty("display", code ? "block" : "none");
     if (Rml::Element* e = by_id("codeview")) {
-        const int content_h = WIN_H - (theme::TITLEBAR_H + theme::MENUBAR_H + theme::TOOLBAR_H) -
+        const int content_h = g.win_h - (theme::TITLEBAR_H + theme::MENUBAR_H + theme::TOOLBAR_H) -
                               theme::STATUS_H - theme::TABBAR_H;
-        e->SetProperty("height", Rml::String(std::to_string(content_h) + "px"));
+        e->SetProperty("height", Rml::String(std::to_string(content_h - theme::TABBAR_H) + "px"));
     }
     // Keep the toolbar switcher and the document tabs in step.
     for (const char* id : {"tabdesigner", "tabcode", "btndesigner", "btncode"}) {
@@ -1497,12 +1525,12 @@ void dump_frame() {
         g.context->Render();
         gl3->EndFrame();
     }
-    std::vector<unsigned char> px((size_t)WIN_W * WIN_H * 3);
-    glReadPixels(0, 0, WIN_W, WIN_H, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+    std::vector<unsigned char> px((size_t)g.win_w * g.win_h * 3);
+    glReadPixels(0, 0, g.win_w, g.win_h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
     if (FILE* f = std::fopen(path, "wb")) {
-        std::fprintf(f, "P6\n%d %d\n255\n", WIN_W, WIN_H);
-        for (int y = WIN_H - 1; y >= 0; y--)
-            std::fwrite(&px[(size_t)y * WIN_W * 3], 1, (size_t)WIN_W * 3, f);
+        std::fprintf(f, "P6\n%d %d\n255\n", g.win_w, g.win_h);
+        for (int y = g.win_h - 1; y >= 0; y--)
+            std::fwrite(&px[(size_t)y * g.win_w * 3], 1, (size_t)g.win_w * 3, f);
         std::fclose(f);
     }
     std::printf("designer: wrote %s\n", path);
@@ -1551,6 +1579,26 @@ void run_script(const char* script) {
                         g.dragging = false;
                     }
                 }
+            } else if (verb == "winsize") {
+                // Simulate an OS window resize, so the layout's response to one
+                // can be tested without a window manager.
+                int nw = 0, nh = 0;
+                if (std::sscanf(arg.c_str(), "%dx%d", &nw, &nh) == 2 && nw > 400 && nh > 300) {
+                    // Resize the real window too, or the GL framebuffer stays
+                    // its original size and a screenshot shows phantom black
+                    // margins that the running IDE would not have.
+                    if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
+                        SDL_SetWindowSize(win, nw, nh);
+                        // Let the backend see the resize, so the renderer's
+                        // viewport follows; otherwise only the layout changes.
+                        for (int i = 0; i < 30; i++) Backend::ProcessEvents(g.context);
+                    }
+                    g.win_w = nw;
+                    g.win_h = nh;
+                    g.context->SetDimensions(Rml::Vector2i(nw, nh));
+                    relayout();
+                    rebuild_canvas();
+                }
             } else if (verb == "undo") undo();
             else if (verb == "redo") redo();
             else if (verb == "copy") copy_selection();
@@ -1585,7 +1633,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!Backend::Initialize("OpenEPL Studio", WIN_W, WIN_H, true)) return 1;
+    if (!Backend::Initialize("OpenEPL Studio", INIT_W, INIT_H, true)) return 1;
     Rml::SetSystemInterface(Backend::GetSystemInterface());
     Rml::SetRenderInterface(Backend::GetRenderInterface());
     Rml::Initialise();
@@ -1598,7 +1646,7 @@ int main(int argc, char** argv) {
     }
 
     const std::string dot_tile = write_dot_tile("openepl_dotgrid.tga", 10);
-    g.context = Rml::CreateContext("studio", Rml::Vector2i(WIN_W, WIN_H));
+    g.context = Rml::CreateContext("studio", Rml::Vector2i(INIT_W, INIT_H));
 
     const std::string chrome = build_chrome(family, dot_tile);
     if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
@@ -1660,6 +1708,15 @@ int main(int argc, char** argv) {
 
     while (Backend::ProcessEvents(g.context, nullptr, true)) {
         poll_app();
+        // Follow the OS window. The backend resizes the context; the layout has
+        // to follow or everything past the old size is left unpainted.
+        const auto dim = g.context->GetDimensions();
+        if (dim.x != g.win_w || dim.y != g.win_h) {
+            g.win_w = dim.x;
+            g.win_h = dim.y;
+            relayout();
+            rebuild_canvas();
+        }
         g.context->Update();
         Backend::BeginFrame();
         g.context->Render();

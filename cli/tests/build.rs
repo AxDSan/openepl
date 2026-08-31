@@ -783,3 +783,67 @@ fn dragging_snaps_to_alignment_guides() {
         "did not snap flush to the neighbouring edge:\n{grp}"
     );
 }
+
+/// The IDE must fill the OS window at any size. Layout sizes were compile-time
+/// constants, so enlarging the window left everything past 1440x900 unpainted —
+/// a black frame around the UI.
+#[test]
+fn layout_follows_the_window_size() {
+    let repo = repo();
+    let designer = repo.join("designer/openepl-designer");
+    if !designer.exists() {
+        eprintln!("designer not built; skipping");
+        return;
+    }
+    let project = std::env::temp_dir().join("openepl_resize.oir");
+    std::fs::copy(repo.join("examples/controls.oir"), &project).expect("seed");
+    let dump = std::env::temp_dir().join("openepl_resize.ppm");
+
+    let out = Command::new(&designer)
+        .arg(&project)
+        .arg(repo.join("target/debug/openepl"))
+        .env("OPENEPL_DESIGNER_SCRIPT", "winsize:1700x1000")
+        .env("OPENEPL_DESIGNER_DUMP", &dump)
+        .output()
+        .expect("run designer");
+    assert!(out.status.success());
+
+    let bytes = std::fs::read(&dump).expect("read dump");
+    // Parse the PPM header: P6\n<w> <h>\n255\n
+    let mut nl = 0;
+    let mut i = 0;
+    let mut hdr = String::new();
+    let (mut w, mut h) = (0usize, 0usize);
+    while nl < 3 && i < bytes.len() {
+        if bytes[i] == b'\n' {
+            nl += 1;
+            if nl == 2 {
+                let mut it = hdr.split_whitespace();
+                w = it.next().unwrap().parse().unwrap();
+                h = it.next().unwrap().parse().unwrap();
+            }
+            hdr.clear();
+        } else {
+            hdr.push(bytes[i] as char);
+        }
+        i += 1;
+    }
+    assert_eq!((w, h), (1700, 1000), "the window did not actually resize");
+
+    // Every corner and edge of the enlarged window must be painted.
+    let px = |x: usize, y: usize| {
+        let o = i + (y * w + x) * 3;
+        (bytes[o], bytes[o + 1], bytes[o + 2])
+    };
+    for (name, p) in [
+        ("right edge", px(w - 5, h / 2)),
+        ("bottom edge", px(w / 2, h - 5)),
+        ("bottom-right corner", px(w - 5, h - 5)),
+    ] {
+        assert_ne!(
+            p,
+            (0, 0, 0),
+            "{name} is unpainted — the layout did not follow the window"
+        );
+    }
+}
