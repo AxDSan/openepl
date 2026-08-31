@@ -409,9 +409,9 @@ impl Lowerer<'_> {
     }
 
     fn stmt(&mut self, s: &openepl_ir::Stmt) -> Result<(), LowerError> {
-        use openepl_ir::Stmt;
-        match s {
-            Stmt::Let {
+        use openepl_ir::StmtKind;
+        match &s.kind {
+            StmtKind::Let {
                 name,
                 ty,
                 value,
@@ -436,7 +436,7 @@ impl Lowerer<'_> {
                 self.vars.insert(name.clone(), (slot, *ty));
                 Ok(())
             }
-            Stmt::Assign { name, value } => {
+            StmtKind::Assign { name, value } => {
                 let v = self.eval(value)?;
                 if let Some((slot, ty)) = self.vars.get(name).cloned() {
                     if v.ty != ty {
@@ -457,11 +457,11 @@ impl Lowerer<'_> {
                     err(format!("assignment to undefined variable `{name}`"))
                 }
             }
-            Stmt::Call { cmd, args } => {
+            StmtKind::Call { cmd, args } => {
                 self.eval_call(cmd, args)?; // any return value discarded
                 Ok(())
             }
-            Stmt::If { arms, otherwise } => {
+            StmtKind::If { arms, otherwise } => {
                 let done = self.fresh_label("endif");
                 for (cond, body) in arms {
                     let then = self.fresh_label("then");
@@ -479,7 +479,7 @@ impl Lowerer<'_> {
                 writeln!(self.body, "{done}:").unwrap();
                 Ok(())
             }
-            Stmt::While { cond, body } => {
+            StmtKind::While { cond, body } => {
                 let head = self.fresh_label("while");
                 let inner = self.fresh_label("do");
                 let done = self.fresh_label("done");
@@ -492,7 +492,7 @@ impl Lowerer<'_> {
                 writeln!(self.body, "{done}:").unwrap();
                 Ok(())
             }
-            Stmt::SetProperty {
+            StmtKind::SetProperty {
                 component,
                 property,
                 value,

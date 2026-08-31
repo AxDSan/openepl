@@ -9,21 +9,31 @@
 //!
 //! Collects *all* errors rather than stopping at the first.
 //!
-//! Line numbers are not yet threaded from the parser onto IR nodes; diagnostics
-//! are message-only for now (a documented follow-up).
+//! Every diagnostic carries the source line of the statement it came from, so
+//! an editor (and the language server) can put the squiggle in the right place.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::sema::{check_args_in, property_type, type_of_expr_in, Components};
-use crate::{Component, Expr, Item, Module, Registry, Stmt, Ty};
+use crate::{Component, Expr, Item, Module, Registry, Stmt, StmtKind, Ty};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidateError {
     pub msg: String,
+    /// 1-based source line; 0 when the position is not known. An editor needs
+    /// this to put the squiggle in the right place.
+    pub line: usize,
 }
 impl std::fmt::Display for ValidateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.msg)
+        // Prefix the position when we know it, so a plain `{e}` in the CLI reads
+        // the way a compiler diagnostic should. Consumers that want the parts
+        // separately (the language server) use the fields.
+        if self.line > 0 {
+            write!(f, "line {}: {}", self.line, self.msg)
+        } else {
+            write!(f, "{}", self.msg)
+        }
     }
 }
 
@@ -31,7 +41,9 @@ impl std::fmt::Display for ValidateError {
 /// well-typed IR.
 pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     let mut errs: Vec<ValidateError> = Vec::new();
-    let mut push = |msg: String| errs.push(ValidateError { msg });
+    // Every diagnostic carries a line (0 when the position is not known), so an
+    // editor can put the squiggle where the problem is.
+    let mut push = |msg: String, line: usize| errs.push(ValidateError { msg, line });
 
     let subs: Vec<_> = m.subs().collect();
     let forms: Vec<_> = m.forms().collect();
@@ -40,13 +52,13 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     // --- entry point -----------------------------------------------------
     // A GUI module is entered through its form; a console module needs `main`.
     if forms.is_empty() && !sub_names.contains("main") {
-        push("module has no `main` subroutine and no `form` (nothing to run)".into());
+        push("module has no `main` subroutine and no `form` (nothing to run)".into(), 0);
     }
     if forms.len() > 1 {
         push(format!(
             "v0.2 supports one form per module, found {}",
             forms.len()
-        ));
+        ), 0);
     }
 
     // --- duplicate names -------------------------------------------------
@@ -56,7 +68,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     }
     for (name, n) in seen {
         if n > 1 {
-            push(format!("subroutine `{name}` is defined {n} times"));
+            push(format!("subroutine `{name}` is defined {n} times"), 0);
         }
     }
 
@@ -77,7 +89,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                 push(format!(
                     "form `{}`: duplicate component id `{}`",
                     form.name, child.id
-                ));
+                ), 0);
             }
             check_component(reg, form.name.as_str(), child, &sub_names, &mut push);
         }
@@ -99,7 +111,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         // global: order-dependent global initialisation is a swamp, and a clear
         // error now beats a subtle one later.
         if let Err(e) = check_initializer(&g.value, &global_types) {
-            push(format!("in initializer of `{}`: {e}", g.name));
+            push(format!("in initializer of `{}`: {e}", g.name), 0);
         }
         match type_of_expr_in(&g.value, &HashMap::new(), reg, &components) {
             Ok(got) if got == g.ty => {}
@@ -108,14 +120,14 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                 g.name,
                 g.ty.as_str(),
                 got.as_str()
-            )),
-            Err(e) => push(format!("in initializer of `{}`: {e}", g.name)),
+            ), 0),
+            Err(e) => push(format!("in initializer of `{}`: {e}", g.name), 0),
         }
         if global_types.insert(g.name.clone(), g.ty).is_some() {
             push(format!(
                 "module variable `{}` is declared more than once",
                 g.name
-            ));
+            ), 0);
         }
     }
 
@@ -126,17 +138,17 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         if components.contains_key(name) {
             push(format!(
                 "`{name}` is both a module variable and a component id"
-            ));
+            ), 0);
         }
         if sub_names.contains(name.as_str()) {
             push(format!(
                 "`{name}` is both a module variable and a subroutine"
-            ));
+            ), 0);
         }
     }
     for id in components.keys() {
         if sub_names.contains(id.as_str()) {
-            push(format!("`{id}` is both a component id and a subroutine"));
+            push(format!("`{id}` is both a component id and a subroutine"), 0);
         }
     }
 
@@ -156,8 +168,8 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         let mut stack: Vec<&Vec<Stmt>> = vec![&sub.body];
         while let Some(block) = stack.pop() {
             for stmt in block {
-                match stmt {
-                    Stmt::Let {
+                match &stmt.kind {
+                    StmtKind::Let {
                         name,
                         ty,
                         value,
@@ -170,21 +182,21 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                 sub.name,
                                 ty.as_str(),
                                 got.as_str()
-                            )),
-                            Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                            ), stmt.line),
+                            Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
                         }
                         if vars.insert(name.clone(), *ty).is_some() {
                             push(format!(
                                 "in `{}`: variable `{name}` is defined more than once",
                                 sub.name
-                            ));
+                            ), stmt.line);
                         }
                         local_names.insert(name.clone());
                         if *mutable {
                             mutable_locals.insert(name.clone());
                         }
                     }
-                    Stmt::Assign { name, value } => {
+                    StmtKind::Assign { name, value } => {
                         // Resolve against locals first, then module variables.
                         let target = vars
                             .get(name)
@@ -194,7 +206,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                             None => push(format!(
                                 "in `{}`: assignment to undefined variable `{name}`",
                                 sub.name
-                            )),
+                            ), stmt.line),
                             Some(expected) => {
                                 let is_local = local_names.contains(name);
                                 let is_mutable = if is_local {
@@ -206,7 +218,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                     push(format!(
                                     "in `{}`: `{name}` is immutable — declare it with `var` instead of `let` to allow assignment",
                                     sub.name
-                                ));
+                                ), stmt.line);
                                 }
                                 match type_of_expr_in(value, &vars, reg, &components) {
                                     Ok(got) if got == expected => {}
@@ -215,41 +227,41 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                         sub.name,
                                         expected.as_str(),
                                         got.as_str()
-                                    )),
-                                    Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                                    ), stmt.line),
+                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
                                 }
                             }
                         }
                     }
-                    Stmt::Call { cmd, args } => match reg.get(cmd) {
-                        None => push(format!("in `{}`: unknown command `{cmd}`", sub.name)),
+                    StmtKind::Call { cmd, args } => match reg.get(cmd) {
+                        None => push(format!("in `{}`: unknown command `{cmd}`", sub.name), stmt.line),
                         Some(c) => {
                             if let Err(e) =
                                 check_args_in(cmd, &c.sig.params, args, &vars, reg, &components)
                             {
-                                push(format!("in `{}`: {}", sub.name, e));
+                                push(format!("in `{}`: {}", sub.name, e), stmt.line);
                             }
                         }
                     },
-                    Stmt::If { arms, otherwise } => {
+                    StmtKind::If { arms, otherwise } => {
                         for (cond, body) in arms {
-                            check_condition(cond, &vars, reg, &components, &sub.name, &mut push);
+                            check_condition(cond, &vars, reg, &components, &sub.name, stmt.line, &mut push);
                             stack.push(body);
                         }
                         if let Some(body) = otherwise {
                             stack.push(body);
                         }
                     }
-                    Stmt::While { cond, body } => {
-                        check_condition(cond, &vars, reg, &components, &sub.name, &mut push);
+                    StmtKind::While { cond, body } => {
+                        check_condition(cond, &vars, reg, &components, &sub.name, stmt.line, &mut push);
                         stack.push(body);
                     }
-                    Stmt::SetProperty {
+                    StmtKind::SetProperty {
                         component,
                         property,
                         value,
                     } => match property_type(component, property, reg, &components) {
-                        Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                        Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
                         Ok(expected) => match type_of_expr_in(value, &vars, reg, &components) {
                             Ok(got) if got == expected => {}
                             Ok(got) => push(format!(
@@ -257,8 +269,8 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                 sub.name,
                                 expected.as_str(),
                                 got.as_str()
-                            )),
-                            Err(e) => push(format!("in `{}`: {}", sub.name, e)),
+                            ), stmt.line),
+                            Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
                         },
                     },
                 }
@@ -280,15 +292,16 @@ fn check_condition(
     reg: &Registry,
     components: &Components,
     sub: &str,
-    push: &mut impl FnMut(String),
+    line: usize,
+    push: &mut impl FnMut(String, usize),
 ) {
     match type_of_expr_in(cond, vars, reg, components) {
         Ok(Ty::Bool) => {}
-        Ok(other) => push(format!(
-            "in `{sub}`: condition must be a truth value, found {}",
-            other.as_str()
-        )),
-        Err(e) => push(format!("in `{sub}`: {e}")),
+        Ok(other) => push(
+            format!("in `{sub}`: condition must be a truth value, found {}", other.as_str()),
+            line,
+        ),
+        Err(e) => push(format!("in `{sub}`: {e}"), line),
     }
 }
 
@@ -322,7 +335,7 @@ fn check_component(
     form: &str,
     c: &Component,
     subs: &HashSet<&str>,
-    push: &mut impl FnMut(String),
+    push: &mut impl FnMut(String, usize),
 ) {
     let where_ = format!("{}.{}", form, c.id);
     check_component_like(
@@ -346,7 +359,7 @@ fn check_component_like(
     properties: &[(String, Expr)],
     handlers: &[(String, String)],
     subs: &HashSet<&str>,
-    push: &mut impl FnMut(String),
+    push: &mut impl FnMut(String, usize),
 ) {
     let Some(desc) = reg.component(type_name) else {
         let mut known: Vec<&str> = reg.component_names().collect();
@@ -358,7 +371,7 @@ fn check_component_like(
             } else {
                 format!(" (known: {})", known.join(", "))
             }
-        ));
+        ), 0);
         return;
     };
 
@@ -370,7 +383,7 @@ fn check_component_like(
             push(format!(
                 "`{where_}`: component `{type_name}` has no property `{name}` (has: {})",
                 known.join(", ")
-            ));
+            ), 0);
             continue;
         };
         match type_of_expr_in(value, &empty, reg, &Components::new()) {
@@ -379,8 +392,8 @@ fn check_component_like(
                 "`{where_}`: property `{name}` expects {}, got {}",
                 prop.ty.as_str(),
                 got.as_str()
-            )),
-            Err(e) => push(format!("`{where_}`: property `{name}`: {e}")),
+            ), 0),
+            Err(e) => push(format!("`{where_}`: property `{name}`: {e}"), 0),
         }
     }
 
@@ -394,12 +407,12 @@ fn check_component_like(
                 } else {
                     format!(" (has: {known})")
                 }
-            ));
+            ), 0);
         }
         if !subs.contains(handler.as_str()) {
             push(format!(
                 "`{where_}`: event `{event}` is bound to `{handler}`, which is not a subroutine in this module"
-            ));
+            ), 0);
         }
     }
 }
@@ -460,6 +473,29 @@ mod tests {
             e.iter()
                 .any(|e| e.msg.contains("immutable") && e.msg.contains("var")),
             "the error should name the fix: {e:?}"
+        );
+    }
+
+    /// A diagnostic without a position is useless to an editor: it either has
+    /// no squiggle or squiggles the wrong line. Pin the exact lines so the
+    /// language server can trust them.
+    #[test]
+    fn reports_the_line_of_the_offending_statement() {
+        //            1         2          3                4        5             6
+        let src = "module m\nsub main\n  let x: int = 1\n  x = 2\n  call nope()\nend\n";
+        let m = parse(src).unwrap();
+        let e = validate(&m, &reg()).unwrap_err();
+
+        let immutable = e.iter().find(|e| e.msg.contains("immutable")).unwrap();
+        assert_eq!(immutable.line, 4, "the assignment is on line 4: {e:?}");
+
+        let unknown = e.iter().find(|e| e.msg.contains("unknown command")).unwrap();
+        assert_eq!(unknown.line, 5, "the call is on line 5: {e:?}");
+
+        // And the position must survive into the rendered message.
+        assert!(
+            immutable.to_string().starts_with("line 4:"),
+            "Display should carry the position: {immutable}"
         );
     }
 

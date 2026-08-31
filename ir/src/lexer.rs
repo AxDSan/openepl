@@ -53,6 +53,9 @@ pub enum Tok {
 pub struct Spanned {
     pub tok: Tok,
     pub line: usize,
+    /// 1-based column of the token's first character. Together with `line` this
+    /// is what lets the language server point at a symbol rather than a line.
+    pub col: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,11 +70,17 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
     let bytes = src.as_bytes();
     let mut i = 0usize;
     let n = bytes.len();
+    // Offset of the current line's first byte, so a column is `i - line_start`.
+    let mut line_start = 0usize;
 
-    let push = |out: &mut Vec<Spanned>, tok: Tok, line: usize| out.push(Spanned { tok, line });
+    let push = |out: &mut Vec<Spanned>, tok: Tok, line: usize, col: usize| {
+        out.push(Spanned { tok, line, col })
+    };
 
     while i < n {
         let c = bytes[i];
+        // Column of the token about to be read, for language-server positions.
+        let start_col = i - line_start + 1;
         match c {
             b'\n' => {
                 // Collapse runs of blank lines into a single Newline token so the
@@ -83,10 +92,11 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                         ..
                     }) | None
                 ) {
-                    push(&mut out, Tok::Newline, line);
+                    push(&mut out, Tok::Newline, line, start_col);
                 }
                 line += 1;
                 i += 1;
+                line_start = i;
             }
             b' ' | b'\t' | b'\r' => i += 1,
             b'#' => {
@@ -95,70 +105,70 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                 }
             }
             b'(' => {
-                push(&mut out, Tok::LParen, line);
+                push(&mut out, Tok::LParen, line, start_col);
                 i += 1;
             }
             b')' => {
-                push(&mut out, Tok::RParen, line);
+                push(&mut out, Tok::RParen, line, start_col);
                 i += 1;
             }
             b',' => {
-                push(&mut out, Tok::Comma, line);
+                push(&mut out, Tok::Comma, line, start_col);
                 i += 1;
             }
             b':' => {
-                push(&mut out, Tok::Colon, line);
+                push(&mut out, Tok::Colon, line, start_col);
                 i += 1;
             }
             b'.' => {
-                push(&mut out, Tok::Dot, line);
+                push(&mut out, Tok::Dot, line, start_col);
                 i += 1;
             }
             b'=' => {
-                push(&mut out, Tok::Eq, line);
+                push(&mut out, Tok::Eq, line, start_col);
                 i += 1;
             }
             b'<' => {
                 // `<=` and `<>` before bare `<`.
                 if i + 1 < n && bytes[i + 1] == b'=' {
-                    push(&mut out, Tok::Le, line);
+                    push(&mut out, Tok::Le, line, start_col);
                     i += 2;
                 } else if i + 1 < n && bytes[i + 1] == b'>' {
-                    push(&mut out, Tok::Ne, line);
+                    push(&mut out, Tok::Ne, line, start_col);
                     i += 2;
                 } else {
-                    push(&mut out, Tok::Lt, line);
+                    push(&mut out, Tok::Lt, line, start_col);
                     i += 1;
                 }
             }
             b'>' => {
                 if i + 1 < n && bytes[i + 1] == b'=' {
-                    push(&mut out, Tok::Ge, line);
+                    push(&mut out, Tok::Ge, line, start_col);
                     i += 2;
                 } else {
-                    push(&mut out, Tok::Gt, line);
+                    push(&mut out, Tok::Gt, line, start_col);
                     i += 1;
                 }
             }
             b'+' => {
-                push(&mut out, Tok::Plus, line);
+                push(&mut out, Tok::Plus, line, start_col);
                 i += 1;
             }
             b'-' => {
-                push(&mut out, Tok::Minus, line);
+                push(&mut out, Tok::Minus, line, start_col);
                 i += 1;
             }
             b'*' => {
-                push(&mut out, Tok::Star, line);
+                push(&mut out, Tok::Star, line, start_col);
                 i += 1;
             }
             b'/' => {
-                push(&mut out, Tok::Slash, line);
+                push(&mut out, Tok::Slash, line, start_col);
                 i += 1;
             }
             b'"' => {
                 let (s, ni) = lex_string(bytes, i + 1, line)?;
-                push(&mut out, Tok::Str(s), line);
+                push(&mut out, Tok::Str(s), line, start_col);
                 i = ni;
             }
             _ if c.is_ascii_digit() => {
@@ -178,14 +188,14 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                         line,
                         msg: format!("invalid float literal: {text}"),
                     })?;
-                    push(&mut out, Tok::Float(v), line);
+                    push(&mut out, Tok::Float(v), line, start_col);
                 } else {
                     let text = &src[start..i];
                     let v: i64 = text.parse().map_err(|_| LexError {
                         line,
                         msg: format!("integer literal out of range: {text}"),
                     })?;
-                    push(&mut out, Tok::Int(v), line);
+                    push(&mut out, Tok::Int(v), line, start_col);
                 }
             }
             _ if is_ident_start(c) => {
@@ -214,7 +224,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     "on" => Tok::On,
                     _ => Tok::Ident(word.to_string()),
                 };
-                push(&mut out, tok, line);
+                push(&mut out, tok, line, start_col);
             }
             _ => {
                 return Err(LexError {
@@ -227,6 +237,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
     out.push(Spanned {
         tok: Tok::Eof,
         line,
+        col: i - line_start + 1,
     });
     Ok(out)
 }

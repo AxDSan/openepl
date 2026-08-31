@@ -17,7 +17,8 @@
 
 use crate::lexer::{lex, Spanned, Tok};
 use crate::{
-    BinOp, CmpOp, Component, Expr, Form, GlobalVar, Item, LogicalOp, Module, Stmt, Sub, Ty,
+    BinOp, CmpOp, Component, Expr, Form, GlobalVar, Item, LogicalOp, Module, Stmt, StmtKind, Sub,
+    Ty,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -294,13 +295,14 @@ impl Parser {
 
     /// A statement starting with an identifier: assignment or property-set.
     fn stmt_ident(&mut self) -> Result<Stmt, ParseError> {
+        let stmt_line = self.line();
         let name = self.ident("variable or component name")?;
         match self.peek() {
             Tok::Eq => {
                 self.bump();
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "newline after assignment")?;
-                Ok(Stmt::Assign { name, value })
+                Ok(Stmt::new(StmtKind::Assign { name, value }, stmt_line))
             }
             Tok::Dot => {
                 self.bump();
@@ -308,11 +310,11 @@ impl Parser {
                 self.expect(&Tok::Eq, "`=` in property assignment")?;
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "newline after property assignment")?;
-                Ok(Stmt::SetProperty {
+                Ok(Stmt::new(StmtKind::SetProperty {
                     component: name,
                     property,
                     value,
-                })
+                }, stmt_line))
             }
             other => self.err(format!(
                 "expected `=` (assignment) or `.` (property) after `{name}`, found {other:?}"
@@ -321,6 +323,7 @@ impl Parser {
     }
 
     fn stmt_let(&mut self, mutable: bool) -> Result<Stmt, ParseError> {
+        let stmt_line = self.line();
         self.expect(
             if mutable { &Tok::Var } else { &Tok::Let },
             "`let` or `var`",
@@ -331,12 +334,12 @@ impl Parser {
         self.expect(&Tok::Eq, "`=`")?;
         let value = self.expr()?;
         self.expect(&Tok::Newline, "newline after `let`")?;
-        Ok(Stmt::Let {
+        Ok(Stmt::new(StmtKind::Let {
             name,
             ty,
             value,
             mutable,
-        })
+        }, stmt_line))
     }
 
     /// Statements until one of `terminators`, which is not consumed.
@@ -364,6 +367,7 @@ impl Parser {
 
     /// `if COND NEWLINE ... (else if COND NEWLINE ...)* (else NEWLINE ...)? end`
     fn stmt_if(&mut self) -> Result<Stmt, ParseError> {
+        let stmt_line = self.line();
         self.expect(&Tok::If, "`if`")?;
         let mut arms = Vec::new();
         let mut otherwise = None;
@@ -395,11 +399,12 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline) {
             self.bump();
         }
-        Ok(Stmt::If { arms, otherwise })
+        Ok(Stmt::new(StmtKind::If { arms, otherwise }, stmt_line))
     }
 
     /// `while COND NEWLINE ... end`
     fn stmt_while(&mut self) -> Result<Stmt, ParseError> {
+        let stmt_line = self.line();
         self.expect(&Tok::While, "`while`")?;
         let cond = self.expr()?;
         self.expect(&Tok::Newline, "newline after the condition")?;
@@ -408,16 +413,17 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline) {
             self.bump();
         }
-        Ok(Stmt::While { cond, body })
+        Ok(Stmt::new(StmtKind::While { cond, body }, stmt_line))
     }
 
     fn stmt_call(&mut self) -> Result<Stmt, ParseError> {
+        let stmt_line = self.line();
         self.expect(&Tok::Call, "`call`")?;
         let cmd = self.ident("command name")?;
         self.expect(&Tok::LParen, "`(`")?;
         let args = self.arg_list()?;
         self.expect(&Tok::Newline, "newline after call")?;
-        Ok(Stmt::Call { cmd, args })
+        Ok(Stmt::new(StmtKind::Call { cmd, args }, stmt_line))
     }
 
     /// Parse a comma-separated argument list, assuming the opening `(` has been
@@ -601,8 +607,8 @@ mod tests {
         let Item::Sub(s) = &m.items[0] else {
             panic!("expected a subroutine")
         };
-        match &s.body[0] {
-            Stmt::Let {
+        match &s.body[0].kind {
+            StmtKind::Let {
                 value: Expr::Bin(BinOp::Add, _, r),
                 ..
             } => {

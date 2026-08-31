@@ -184,9 +184,27 @@ pub enum Expr {
     Not(Box<Expr>),
 }
 
+/// A statement plus where it came from.
+///
+/// The line lives on the wrapper rather than inside each variant so that
+/// existing pattern matches keep working, and so that a diagnostic can always
+/// say *where* — an error without a position is nearly useless in an editor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stmt {
+    pub kind: StmtKind,
+    /// 1-based source line; 0 when unknown.
+    pub line: usize,
+}
+
+impl Stmt {
+    pub fn new(kind: StmtKind, line: usize) -> Stmt {
+        Stmt { kind, line }
+    }
+}
+
 /// A single statement inside a subroutine body.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
+pub enum StmtKind {
     /// `let NAME: TY = EXPR` (immutable) or `var NAME: TY = EXPR` (mutable).
     Let {
         name: String,
