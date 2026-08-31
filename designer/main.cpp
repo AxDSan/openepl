@@ -1610,8 +1610,12 @@ void poll_app() {
     int status = 0;
     if (::waitpid(g.running_app, &status, WNOHANG) == g.running_app) {
         drain_app_output();      // whatever it printed on the way out
-        log("> app exited with code " + std::to_string(WEXITSTATUS(status)), "muted");
+        const int code = WEXITSTATUS(status);
+        log("> app exited with code " + std::to_string(code), "muted");
         g.running_app = 0;
+        // A console program finishes in milliseconds. Saying "nothing running"
+        // afterwards reads as though it never started; say how it ended.
+        set_status(code == 0 ? "finished (exit 0)" : "exited with code " + std::to_string(code));
         set_activity(nullptr);
     }
 }
@@ -2548,7 +2552,11 @@ int main(int argc, char** argv) {
         break;
     }
 
-    const std::string dot_tile = write_dot_tile(cache_file("openepl_dotgrid.tga"), 10);
+    // RmlUi resolves a decorator path as a URL and drops the leading slash of
+    // an absolute one, so the tile has to be handed over in a form its URL
+    // parser leaves alone. Doubling the slash survives that normalisation.
+    const std::string tile_path = cache_file("openepl_dotgrid.tga");
+    const std::string dot_tile = write_dot_tile(tile_path, 10).empty() ? "" : "/" + tile_path;
     g.context = Rml::CreateContext("studio", Rml::Vector2i(INIT_W, INIT_H));
 
     // Splash first, and painted before the slow part starts. Loading the

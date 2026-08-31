@@ -141,6 +141,11 @@ bool save_model(const Model& m, const std::vector<std::string>& new_subs,
     while (std::getline(in, line)) lines.push_back(line);
     in.close();
 
+    // A module with no form has nothing to splice. Console programs and
+    // libraries are edited entirely as text, and their saves go through the
+    // code editor — reporting a form error for them is both wrong and alarming.
+    if (m.form_name.empty()) return true;
+
     if (m.form_first_line < 1 || m.form_last_line > (int)lines.size() ||
         m.form_first_line > m.form_last_line) {
         error = "form line span is out of range; refusing to save";
