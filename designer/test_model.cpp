@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include "json.h"
 #include "model.h"
 
 using namespace openepl::designer;
@@ -20,6 +21,8 @@ static std::string slurp(const std::string& p) {
     o << f.rdbuf();
     return o.str();
 }
+
+static void test_json();
 
 int main(int argc, char** argv) {
     const std::string openepl = argc > 1 ? argv[1] : "./target/debug/openepl";
@@ -103,6 +106,47 @@ int main(int argc, char** argv) {
     check("original body still intact", saved2.find(body) != std::string::npos);
     check("new component present", saved2.find("label label1") != std::string::npos);
 
+    test_json();
+
+
     std::printf("\n%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
+}
+
+/* --- JSON: the LSP wire format ------------------------------------------ */
+
+static void test_json() {
+    using namespace openepl;
+
+    // Escaping is where an LSP client breaks silently: one unescaped quote or
+    // backslash corrupts the frame, the server stops answering, and the editor
+    // just looks dead.
+    check("escapes quotes", json::escape("say \"hi\"") == "say \\\"hi\\\"");
+    check("escapes backslashes", json::escape("a\\b") == "a\\\\b");
+    check("escapes newlines", json::escape("a\nb") == "a\\nb");
+    check("escapes control characters", json::escape("a\x01") == "a\\u0001");
+    check("passes UTF-8 through", json::escape("héllo") == "héllo");
+
+    // A document containing all three at once — the realistic worst case for a
+    // source file being sent on every keystroke.
+    const std::string nasty = "call print_text(\"a\\nb\")\n";
+    const std::string round = json::parse("\"" + json::escape(nasty) + "\"").str();
+    check("escape/parse round-trips", round == nasty);
+
+    const json::Value v = json::parse(
+        "{\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///x.oir\","
+        "\"diagnostics\":[{\"range\":{\"start\":{\"line\":7,\"character\":0}},"
+        "\"severity\":1,\"message\":\"unknown command\"}]}}");
+    check("reads the method", v["method"].str() == "textDocument/publishDiagnostics");
+    check("reads a nested line number",
+          v["params"]["diagnostics"].at(0)["range"]["start"]["line"].num(-1) == 7);
+    check("reads the message",
+          v["params"]["diagnostics"].at(0)["message"].str() == "unknown command");
+    check("counts diagnostics", v["params"]["diagnostics"].size() == 1);
+
+    // Missing fields must be null rather than a crash: a malformed message
+    // should degrade, not take the IDE down.
+    check("missing members are null", v["nope"]["deeper"].is_null());
+    check("out-of-range index is null", v["params"]["diagnostics"].at(9).is_null());
+    check("invalid JSON parses to null", json::parse("{oops").is_null());
 }

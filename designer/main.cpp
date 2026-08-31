@@ -39,6 +39,7 @@
 #include "highlight.h"
 #include "model.h"
 #include "theme.h"
+#include "lspclient.h"
 #include "welcome.h"
 #include "ui_mapping.h"
 
@@ -105,9 +106,19 @@ struct Designer {
     /// user is in the middle of typing.
     std::string model_text;
     bool code_dirty = false;
+    /// Editor scroll, in pixels from the top. Ours rather than RmlUi's: a text
+    /// control keeps its own overflow hidden, and both layers are absolutely
+    /// positioned, so neither the control nor its container will scroll them.
+    int code_scroll = 0;
+    int code_content_h = 0;
     /// Read end of the running app's stdout+stderr, so its output lands in the
     /// IDE console instead of the terminal the IDE was launched from.
     int app_output = -1;
+
+    /// The language server. Studio is a client of the same `openepl lsp` that
+    /// other editors use, so it never grows a private second analysis path.
+    openepl::lsp::Client lsp;
+    std::vector<openepl::lsp::Diagnostic> diagnostics;
 
     /// The build, when one is in flight. The build MUST be asynchronous: run
     /// synchronously it blocks the frame loop, so no progress animation can
@@ -222,10 +233,11 @@ void relayout() {
     // property beats the stylesheet — so a `width:100%` rule in the CSS is
     // silently ignored and the editor collapses to its default column width.
     place("codeview", 0, TABBAR_H, centre_w, content_h - TABBAR_H);
-    // RmlUi boxes are content-box, so the editor's own padding has to come off
-    // its width and height — otherwise it is exactly `padding` bigger than the
-    // view that holds it and the pane grows a scrollbar it does not need.
-    place("fullcode", 0, 0, centre_w - 2 * CODE_PAD_X, content_h - TABBAR_H - 2 * CODE_PAD_Y);
+    // Width only: the height comes from the document, and is set whenever the
+    // text changes so the container has something to scroll.
+    if (Rml::Element* e = by_id("fullcode")) {
+        e->SetProperty("width", Rml::String(std::to_string(centre_w - 2 * CODE_PAD_X) + "px"));
+    }
     place("inspectdock", g.toolbox_w + centre_w, content_y, g.inspect_w, content_h);
     place("bottom", g.toolbox_w, content_y + TABBAR_H + canvas_h, centre_w, g.bottom_h);
     place("splitleft", g.toolbox_w - 3, content_y, 6, content_h);
@@ -276,6 +288,7 @@ void poll_build();
 void set_activity(const char* what);
 void refresh_highlight();
 void sync_highlight_scroll();
+void render_diagnostics();
 Rml::ElementFormControl* code_editor();
 void drain_app_output();
 void log(const std::string& line, const char* cls = nullptr);
@@ -484,19 +497,36 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // line-height or padding shows up as text drifting away from its colour.
     s << "#codehl{position:absolute;left:0;top:0;font-family:'" << mono
       << "';font-size:13px;line-height:" << CODE_LINE_H << "px;padding:" << CODE_PAD_Y << "px "
-      << CODE_PAD_X << "px;white-space:pre;color:" << TEXT << "}";
+      << CODE_PAD_X << "px;padding-top:0px;white-space:pre;color:" << TEXT << "}";
     s << "#codehl div{white-space:pre;height:" << CODE_LINE_H << "px}";
-    s << "#codeview{background-color:" << PANEL << "}";
+    // A bad line is tinted rather than underlined: the server reports whole
+    // lines, so a squiggle would claim a precision the diagnostic does not have.
+    s << "#codehl div.badline{background-color:#fff0f0;border-left:3px " << DANGER << "}";
+    s << "#problems{max-height:96px;overflow-y:auto;padding:6px 12px}";
+    s << ".problem{font-size:12px;color:" << TEXT << ";padding:2px 0}";
+    s << ".problem .pline{color:" << DANGER << ";margin-right:8px}";
+    s << ".noproblems{font-size:12px;color:" << TEXT_MUTED << ";font-style:italic}";
+    // The CONTAINER scrolls, not the textarea. RmlUi keeps a text control's
+    // own overflow hidden, so the wheel did nothing there — and mirroring one
+    // layer's scroll onto the other is a sync bug waiting to happen. Sizing
+    // both layers to the content and scrolling their parent means they cannot
+    // drift apart by construction.
+    s << "#codeview{background-color:" << PANEL << ";overflow-y:auto;overflow-x:auto}";
     // Positioned, so it paints ABOVE the highlight layer. Left unpositioned it
     // sits below an absolutely-positioned sibling — taking the caret and the
     // selection with it, which is an editor you cannot see yourself typing in.
     s << "#fullcode{position:absolute;left:0;top:0;font-family:'" << mono << "';line-height:" << CODE_LINE_H << "px;font-size:13px;padding:"
-      << CODE_PAD_Y << "px " << CODE_PAD_X << "px;"
+      // Top padding is zero on BOTH layers: the vertical offset is applied to
+      // each layer's `top` instead. Leaving it on one and not the other put the
+      // two half a line apart — every glyph doubled.
+      << "0px " << CODE_PAD_X << "px;"
          "width:100%;height:100%;background-color:transparent;"
          // Transparent glyphs: the layer underneath supplies the colour. The
          // caret and the selection must stay opaque or the editor looks dead.
-         "color:#00000000;border:0;caret-color:" << TEXT << ";cursor:text;"
-         "selection-color:" << TEXT << ";selection-background-color:#cfe3ff}";
+         "color:#00000000;border:0;caret-color:" << TEXT << ";cursor:text}";
+    // RmlUi styles a text control's selection through a child `selection`
+    // element, not through CSS properties on the control itself.
+    s << "#fullcode selection{background-color:#cfe3ff;color:" << TEXT << "}";
     s << "#canvasarea{left:0;top:" << TABBAR_H << "px;width:" << centre_w << "px;height:" << canvas_h
       << "px;background-color:" << CANVAS << ";decorator:image(\"" << dot_tile << "\" repeat)}";
 
@@ -668,7 +698,9 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div id='code' oe-view='code'/></div>"
          "<div class='pane' id='logpane' style='left:" << half << "px;width:"
       << (centre_w - half) << "px'>"
-         "<div class='panehead'>OUTPUT / BUILD LOG</div><div id='log'/></div>"
+         "<div class='panehead' id='problemcount'>PROBLEMS</div>"
+         "<div id='problems'/>"
+         "<div class='panehead' id='loghead'>OUTPUT / BUILD LOG</div><div id='log'/></div>"
          "</div>";
 
     // Splitters: thin draggable bars between the docks.
@@ -1063,15 +1095,71 @@ void refresh_highlight() {
         start = nl + 1;
     }
     layer->SetInnerRML(html);
+
+    // Size both layers to the text. That is what gives the container something
+    // to scroll, and what keeps the two layers the same height.
+    size_t lines = 1;
+    for (char c : text) {
+        if (c == '\n') lines++;
+    }
+    const int h = (int)lines * theme::CODE_LINE_H;
+    g.code_content_h = h;
+    const std::string px = std::to_string(h) + "px";
+    layer->SetProperty("height", px);
+    if (Rml::Element* box = by_id("fullcode")) box->SetProperty("height", px);
 }
 
-/// Keep the highlight layer under the text as the editor scrolls.
+/// Show what the language server reported: a mark against each bad line, and
+/// the messages in the console.
+///
+/// Diagnostics never touch the editor's text. Writing into the control would
+/// fight the unsaved-changes guard and could destroy what the user typed.
+void render_diagnostics() {
+    Rml::Element* layer = by_id("codehl");
+    if (layer) {
+        // Re-tint the affected lines in place. The highlight layer has one div
+        // per source line, so a diagnostic maps straight onto a child index.
+        for (int i = 0; i < layer->GetNumChildren(); i++) {
+            layer->GetChild(i)->SetAttribute("class", Rml::String(""));
+        }
+        for (const auto& d : g.diagnostics) {
+            if (d.line >= 0 && d.line < layer->GetNumChildren()) {
+                layer->GetChild(d.line)->SetAttribute("class", "badline");
+            }
+        }
+    }
+    if (Rml::Element* box = by_id("problems")) {
+        std::string html;
+        for (const auto& d : g.diagnostics) {
+            html += "<div class='problem'><span class='pline'>line " +
+                    std::to_string(d.line + 1) + "</span>" + esc(d.message) + "</div>";
+        }
+        if (g.diagnostics.empty()) html = "<div class='noproblems'>No problems.</div>";
+        box->SetInnerRML(html);
+    }
+    if (Rml::Element* tab = by_id("problemcount")) {
+        tab->SetInnerRML(g.diagnostics.empty()
+                             ? "PROBLEMS"
+                             : "PROBLEMS (" + std::to_string(g.diagnostics.size()) + ")");
+    }
+}
+
+/// Apply the editor's scroll offset to both layers at once, so they cannot
+/// drift apart, and clamp it to the text that actually exists.
 void sync_highlight_scroll() {
     Rml::Element* layer = by_id("codehl");
     Rml::Element* ed = by_id("fullcode");
-    if (!layer || !ed) return;
-    layer->SetProperty("left", Rml::String(std::to_string(-(int)ed->GetScrollLeft()) + "px"));
-    layer->SetProperty("top", Rml::String(std::to_string(-(int)ed->GetScrollTop()) + "px"));
+    Rml::Element* view = by_id("codeview");
+    if (!layer || !ed || !view) return;
+
+    const int viewport = (int)view->GetBox().GetSize().y;
+    const int max_scroll = std::max(0, g.code_content_h + 2 * theme::CODE_PAD_Y - viewport);
+    if (g.code_scroll < 0) g.code_scroll = 0;
+    if (g.code_scroll > max_scroll) g.code_scroll = max_scroll;
+
+    const std::string top = std::to_string(theme::CODE_PAD_Y - g.code_scroll) + "px";
+    layer->SetProperty("top", top);
+    ed->SetProperty("top", top);
 }
 
 /// Push the editor's text to disk and reload the designer model from it.
@@ -1553,6 +1641,27 @@ struct Listener : Rml::EventListener {
         Rml::Element* el = ev.GetTargetElement();
         const Rml::String type = ev.GetType();
 
+        if (type == "mousescroll") {
+            if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+                std::fprintf(stderr, "wheel: target=<%s> id=%s dy=%.1f\n",
+                             el->GetTagName().c_str(), el->GetId().c_str(),
+                             ev.GetParameter<float>("wheel_delta_y", 0.f));
+            }
+            // Scroll the code editor with the wheel. Three lines a tick, the
+            // conventional amount.
+            for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                if (e->GetId() == "codeview" || e->GetId() == "fullcode" ||
+                    e->GetId() == "codehl") {
+                    g.code_scroll +=
+                        (int)ev.GetParameter<float>("wheel_delta_y", 0.f) * theme::CODE_LINE_H * 3;
+                    sync_highlight_scroll();
+                    ev.StopPropagation();
+                    return;
+                }
+            }
+            return;
+        }
+
         if (type == "change") {
             Rml::Element* src = el;
             const Rml::String cls = src->GetAttribute<Rml::String>("class", "");
@@ -1567,6 +1676,9 @@ struct Listener : Rml::EventListener {
                     set_status("code edited — Ctrl+S to save");
                 }
                 refresh_highlight();
+                // Diagnostics as you type: the server re-checks on every
+                // change, exactly as it does for any other editor.
+                if (auto* ed2 = code_editor()) g.lsp.did_change(ed2->GetValue());
                 return;
             }
             if (src->GetId() == "search") {
@@ -2125,14 +2237,42 @@ void run_script(const char* script) {
                 std::fflush(stdout);
             }
             else if (verb == "scroll") {
-                // Scroll the editor and re-sync, so a dumped frame proves the
-                // highlight layer follows the text rather than sitting still.
+                // Scroll the way a user does — a wheel event over the editor —
+                // rather than by setting the offset directly, which RmlUi
+                // clamps. This is what proves the highlight layer follows.
                 if (Rml::Element* e = by_id("fullcode")) {
                     g.context->Update();
-                    e->SetScrollTop((float)std::atoi(arg.c_str()));
-                    sync_highlight_scroll();
+                    g.context->ProcessMouseMove((int)(e->GetAbsoluteLeft() + 40),
+                                                (int)(e->GetAbsoluteTop() + 40), 0);
+                    Rml::Element* view = by_id("codeview");
+                    const int ticks = arg.empty() ? 5 : std::atoi(arg.c_str());
+                    for (int i = 0; i < ticks; i++) g.context->ProcessMouseWheel(1.f, 0);
                     g.context->Update();
+                    g.context->Update();
+                    (void)view;
+                    std::printf("scroll: offset=%d content=%d\n", g.code_scroll,
+                                g.code_content_h);
+                    std::fflush(stdout);
                 }
+            }
+            else if (verb == "waitdiag") {
+                // Pump the language server the way the frame loop does, so a
+                // scripted session can wait for diagnostics to arrive.
+                const int limit = arg.empty() ? 300 : std::atoi(arg.c_str());
+                for (int i = 0; i < limit; i++) {
+                    g.lsp.poll();
+                    if (g.lsp.has_update()) break;
+                    usleep(20000);
+                }
+                g.lsp.clear_update();
+                g.diagnostics = g.lsp.diagnostics();
+                render_diagnostics();
+                g.context->Update();
+                std::printf("diagnostics: %zu\n", g.diagnostics.size());
+                for (const auto& d : g.diagnostics) {
+                    std::printf("  line %d: %s\n", d.line + 1, d.message.c_str());
+                }
+                std::fflush(stdout);
             }
             else if (verb == "hldebug") {
                 // Make the editor's own glyphs visible in red. Alignment cannot
@@ -2435,6 +2575,23 @@ int main(int argc, char** argv) {
         return 1;
     }
     openepl::welcome::remember_recent(path);
+
+    // The language server, started on the project's directory so it finds the
+    // runtime and the component library the same way the compiler does.
+    {
+        char real[4096];
+        const std::string abs = ::realpath(path.c_str(), real) ? real : path;
+        const size_t slash = abs.find_last_of('/');
+        g.lsp.start(g.openepl_bin, slash == std::string::npos ? "." : abs.substr(0, slash));
+        std::string text;
+        if (FILE* f = std::fopen(abs.c_str(), "rb")) {
+            char buf[4096];
+            size_t n;
+            while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
+            std::fclose(f);
+        }
+        g.lsp.did_open(abs, text);
+    }
     if (splash) splash->Close();
 
     const std::string chrome = build_chrome(family, mono, dot_tile);
@@ -2445,7 +2602,7 @@ int main(int argc, char** argv) {
     if (!g.doc) { std::fprintf(stderr, "designer: chrome failed to load\n"); return 1; }
     g.doc->Show();
 
-    for (const char* e : {"click", "change", "mousedown", "mousemove", "mouseup"}) {
+    for (const char* e : {"click", "change", "mousedown", "mousemove", "mouseup", "mousescroll"}) {
         g.doc->AddEventListener(e, &g_listener);
     }
 
@@ -2503,6 +2660,12 @@ int main(int argc, char** argv) {
         poll_build();
         poll_app();
         if (g.view == "code") sync_highlight_scroll();
+        g.lsp.poll();
+        if (g.lsp.has_update()) {
+            g.lsp.clear_update();
+            g.diagnostics = g.lsp.diagnostics();
+            render_diagnostics();
+        }
         // Follow the OS window. The backend resizes the context; the layout has
         // to follow or everything past the old size is left unpainted.
         const auto dim = g.context->GetDimensions();
@@ -2518,6 +2681,7 @@ int main(int argc, char** argv) {
         Backend::PresentFrame();
     }
     stop_app();
+    g.lsp.stop();
     if (g.dirty) {
         std::printf("designer: unsaved changes — saving before exit\n");
         save();
