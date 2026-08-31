@@ -1579,6 +1579,8 @@ void run_script(const char* script) {
                         g.dragging = false;
                     }
                 }
+            } else if (verb == "view") {
+                set_view(arg);
             } else if (verb == "winsize") {
                 // Simulate an OS window resize, so the layout's response to one
                 // can be tested without a window manager.
