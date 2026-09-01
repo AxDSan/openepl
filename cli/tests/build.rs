@@ -1291,3 +1291,38 @@ fn text_commands_are_utf8_correct() {
     assert_eq!(lines[4], "本", "slicing multi-byte text: {text}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Every support library's example builds, runs, and reports no failure.
+///
+/// The examples are self-checking transcripts: one prints `FAIL` on a check
+/// that did not hold, so the assertion here is that no line says FAIL and that
+/// the program produced output at all. Deliberately not asserting exact stdout
+/// — these examples are documentation first, and pinning every line would mean
+/// editing this test every time one gains a sentence. What must not drift is
+/// that they still run and still pass their own checks.
+///
+/// Without this the ten libraries had examples but no coverage: they were only
+/// ever run by hand, so a regression in any of them would reach a release
+/// unnoticed.
+#[test]
+fn support_library_examples_pass_their_own_checks() {
+    // `net` is excluded deliberately: its example reaches the network, and a
+    // test that fails on a train is a test people learn to ignore.
+    const LIBS: &[&str] = &[
+        "filelib", "systemlib", "textlib", "timelib", "randomlib", "hashlib",
+        "configlib", "processlib", "jsonlib", "mathlib",
+    ];
+    for name in LIBS {
+        let stdout = run(&build_as(name, "selfcheck"));
+        let failures: Vec<&str> = stdout.lines().filter(|l| l.contains("FAIL")).collect();
+        assert!(
+            failures.is_empty(),
+            "{name} reported failures:\n{}",
+            failures.join("\n")
+        );
+        assert!(
+            !stdout.trim().is_empty(),
+            "{name} produced no output — did it run at all?"
+        );
+    }
+}

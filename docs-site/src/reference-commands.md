@@ -207,6 +207,44 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 | `json_stringify_pretty` | int | text |
 | `json_type` | int, text | text |
 
+## math
+
+`use math`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `math_acos` | double | double |
+| `math_asin` | double | double |
+| `math_atan2` | double, double | double |
+| `math_atan` | double | double |
+| `math_cbrt` | double | double |
+| `math_clamp` | double, double, double | double |
+| `math_clamp_int` | int, int, int | int |
+| `math_cosh` | double | double |
+| `math_degrees` | double | double |
+| `math_e` | — | double |
+| `math_factorial` | int | int64 |
+| `math_fmod` | double, double | double |
+| `math_gcd` | int, int | int |
+| `math_hypot` | double, double | double |
+| `math_infinity` | — | double |
+| `math_is_finite` | double | bool |
+| `math_is_nan` | double | bool |
+| `math_is_prime` | int | bool |
+| `math_lcm` | int, int | int64 |
+| `math_lerp` | double, double, double | double |
+| `math_log2` | double | double |
+| `math_log_base` | double, double | double |
+| `math_pi` | — | double |
+| `math_radians` | double | double |
+| `math_round_to` | double, int | double |
+| `math_sign` | double | int |
+| `math_sign_int` | int | int |
+| `math_sinh` | double | double |
+| `math_tanh` | double | double |
+| `math_tau` | — | double |
+| `math_trunc` | double | double |
+
 ## net
 
 `use net`

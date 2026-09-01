@@ -94,6 +94,7 @@ exports must start with one of them:
 | `process` | `process_` |
 | `json` | `json_` |
 | `net` | `net_` |
+| `math` | `math_` |
 
 Core already owns `text_eq`, `text_to_int` and `text_to_double`; the `text`
 library must not redefine them. A collision is a hard build error naming the
