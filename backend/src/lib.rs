@@ -1024,9 +1024,14 @@ impl Lowerer<'_> {
             }
             let raw = self.emit_arg_i64(&v);
             self.aggr_used.insert("oe_ary_set");
+            // `enumerate` counts from 0 and the store counts from 1. Getting
+            // this wrong writes every element one place low and drops the
+            // first, which looks like a broken literal rather than an
+            // off-by-one.
+            let pos = i + 1;
             writeln!(
                 self.body,
-                "  call void @oe_ary_set(ptr {arr}, i32 {i}, i64 {raw})"
+                "  call void @oe_ary_set(ptr {arr}, i32 {pos}, i64 {raw})"
             )
             .unwrap();
         }

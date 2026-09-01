@@ -438,9 +438,16 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                 match type_of_expr_in(index, &vars, reg, &components) {
                                     Ok(Ty::Int) => {
                                         if let Expr::IntLit(v) = index {
-                                            if *v < 0 {
+                                            // Indexing counts from 1. Catching a
+                                            // literal 0 here is worth the special
+                                            // case: it is the one mistake every
+                                            // person arriving from a 0-based
+                                            // language makes, and at run time it
+                                            // would only say "out of range".
+                                            if *v < 1 {
                                                 push(format!(
-                                                    "in `{}`: index {v} is before the start of `{name}`",
+                                                    "in `{}`: index {v} is before the start of `{name}` — \
+                                                     positions count from 1",
                                                     sub.name
                                                 ), stmt.line);
                                             }
@@ -1134,6 +1141,10 @@ mod tests {
             ("let xs: int[] = [1, \"two\"]", "element 2 is text"),
             ("let xs: int[] = [1]\n  let a: int = xs[-1]", "before the start"),
             ("let a: int = [1, 2][5]", "past the end"),
+            // The boundary either side of the new base: [2] is the last
+            // element, [3] is one past it, and [0] no longer exists at all.
+            ("let a: int = [1, 2][3]", "past the end"),
+            ("let a: int = [1, 2][0]", "before the start"),
             ("let xs: int[] = [1]\n  call print_int(xs)", "expects int, got int[]"),
             ("let xs: int[] = [1]\n  let n: int = count(xs, 1)", "expects 1 argument"),
             ("let n: int = count(5)", "expects an array"),
@@ -1190,15 +1201,15 @@ mod tests {
     /// meaning the same array, which is why writing one element is allowed.
     #[test]
     fn an_element_of_a_let_array_may_be_assigned() {
-        let m = parse("module m\nsub main\n  let xs: int[] = [1]\n  xs[0] = 2\nend\n").unwrap();
+        let m = parse("module m\nsub main\n  let xs: int[] = [1]\n  xs[1] = 2\nend\n").unwrap();
         assert!(validate(&m, &reg()).is_ok(), "{:?}", validate(&m, &reg()));
     }
 
     #[test]
     fn a_byte_set_is_indexed_as_numbers() {
         let m = parse(
-            "module m\nsub main\n  var b: bytes = bytes_new(2)\n  b[0] = 65\n  \
-             call print_int(b[0])\nend\n",
+            "module m\nsub main\n  var b: bytes = bytes_new(2)\n  b[1] = 65\n  \
+             call print_int(b[1])\nend\n",
         )
         .unwrap();
         assert!(validate(&m, &reg()).is_ok(), "{:?}", validate(&m, &reg()));

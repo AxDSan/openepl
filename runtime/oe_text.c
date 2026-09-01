@@ -63,15 +63,22 @@ void oe_substr(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
     (void)c; const char*s=nz(oe_arg_text(argv,0));
     int start=oe_arg_int(argv,1), count=oe_arg_int(argv,2);
     long len=(long)strlen(s);
-    if(start<0)start=0; if(count<0)count=0;
-    long from=oe_u8_offset(s,len,start);
-    long to=oe_u8_offset(s,len,(long)start+count);
+    /* Positions count from 1.  A start below that is clamped rather than
+     * rejected: the text commands have never failed, and a substring is not
+     * where to start. */
+    if(start<1)start=1; if(count<0)count=0;
+    long from=oe_u8_offset(s,len,start-1);
+    long to=oe_u8_offset(s,len,(long)start-1+count);
     long n=to-from;
     char*o=astr(n); memcpy(o,s+from,(size_t)n); o[n]='\0'; oe_ret_text(r,o);
 }
 void oe_find(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
     (void)c; const char*h=nz(oe_arg_text(argv,0)), *n=nz(oe_arg_text(argv,1));
-    const char*hit=strstr(h,n); oe_ret_int(r, hit?(int)(hit-h):-1);
+    const char*hit=strstr(h,n);
+    /* A CHARACTER position counting from 1, and 0 when absent.  It returned a
+     * byte offset before, which disagreed with every other position in this
+     * file the moment the text was not ASCII. */
+    oe_ret_int(r, hit ? (int)(oe_u8_count(h,(long)(hit-h)) + 1) : 0);
 }
 void oe_concat(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv){
     (void)c; const char*a=nz(oe_arg_text(argv,0)),*b=nz(oe_arg_text(argv,1));

@@ -1268,9 +1268,9 @@ fn text_commands_are_utf8_correct() {
         "module utf8check\ntarget console\n\nsub main\n  \
          call print_int(length(\"héllo\"))\n  \
          call print_text(reverse(\"héllo\"))\n  \
-         call print_text(substr(\"héllo\", 0, 2))\n  \
+         call print_text(substr(\"héllo\", 1, 2))\n  \
          call print_int(length(\"日本語\"))\n  \
-         call print_text(substr(\"日本語\", 1, 1))\nend\n",
+         call print_text(substr(\"日本語\", 2, 1))\nend\n",
     )
     .expect("write");
 
@@ -1361,7 +1361,7 @@ fn an_out_of_range_index_reports_instead_of_reading_past_the_end() {
          call print_int(last_error_code())\n  \
          xs[9] = 1\n  \
          call print_int(last_error_code())\n  \
-         call print_int(xs[1])\n  \
+         call print_int(xs[2])\n  \
          call print_int(last_error_code())\nend\n",
     )
     .expect("write");
@@ -1385,5 +1385,88 @@ fn an_out_of_range_index_reports_instead_of_reading_past_the_end() {
     assert_eq!(lines[2], "10007", "a failed write reports too: {text}");
     assert_eq!(lines[3], "22", "a good read still works: {text}");
     assert_eq!(lines[4], "0", "success clears the error slot: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Positions count from 1, everywhere, with no exceptions.
+///
+/// This is the convention most likely to be reverted by accident — every
+/// contributor arrives from a 0-based language, and an off-by-one here is
+/// invisible in output that still looks plausible. Each assertion below pins
+/// one surface that had to move: the array type, bytes, core text positions,
+/// and the search commands whose "absent" answer became 0 precisely because
+/// nothing occupies 0 any more.
+#[test]
+fn positions_count_from_one() {
+    let dir = std::env::temp_dir().join("openepl_onebased");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = dir.join("one.oir");
+    std::fs::write(
+        &src,
+        "module one\nsub main\n  \
+         var xs: int[] = [10, 20, 30]\n  \
+         call print_int(xs[1])\n  \
+         call print_int(xs[count(xs)])\n  \
+         call print_int(index_of(xs, 30))\n  \
+         call print_int(index_of(xs, 99))\n  \
+         let b: bytes = bytes_from_text(\"AB\")\n  \
+         call print_int(b[1])\n  \
+         call print_text(substr(\"abcdef\", 1, 2))\n  \
+         call print_int(find(\"abc\", \"a\"))\n  \
+         call print_int(find(\"abc\", \"z\"))\nend\n",
+    )
+    .expect("write");
+
+    let bin = dir.join("one");
+    let out = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", src.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+        .output()
+        .expect("run openepl");
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let text = run(&bin);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "10", "xs[1] is the FIRST element: {text}");
+    assert_eq!(lines[1], "30", "xs[count(xs)] is the last: {text}");
+    assert_eq!(lines[2], "3", "index_of returns a 1-based position: {text}");
+    assert_eq!(lines[3], "0", "absent is 0, not -1: {text}");
+    assert_eq!(lines[4], "65", "the first byte is b[1]: {text}");
+    assert_eq!(lines[5], "ab", "substr starts at position 1: {text}");
+    assert_eq!(lines[6], "1", "find returns a 1-based position: {text}");
+    assert_eq!(lines[7], "0", "find says 0 when absent: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A literal `xs[0]` is rejected at compile time, not at run time.
+///
+/// It is the one mistake every newcomer makes, and the run-time message would
+/// only say "out of range" — which reads as a bug in their loop rather than a
+/// language they guessed wrong about.
+#[test]
+fn a_zero_index_is_a_compile_error() {
+    let dir = std::env::temp_dir().join("openepl_zeroidx");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = dir.join("zero.oir");
+    std::fs::write(
+        &src,
+        "module zero\nsub main\n  var xs: int[] = [1]\n  call print_int(xs[0])\nend\n",
+    )
+    .expect("write");
+    let out = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", src.to_str().unwrap(), "-o", dir.join("z").to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+        .output()
+        .expect("run openepl");
+    assert!(!out.status.success(), "xs[0] must not compile");
+    let msg = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        msg.contains("count from 1"),
+        "the message must say what the base is, got: {msg}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -110,8 +110,12 @@ static int json_path_find(JsonNode *root, const char *path, JsonNode **out) {
         if (rc == 0) { *out = cur; return 1; }
         if (rc < 0) return -1;
         if (is_index) {
-            if (cur->type != JSON_T_ARR || idx >= cur->count) return 0;
-            cur = cur->kids[idx];
+            /* Paths index from 1, like everything else in this language.  That
+             * differs from JSONPath, which counts from 0 — but a language with
+             * two indexing bases is worse than one that differs from a spec
+             * nobody reads while writing `items[1]`. */
+            if (cur->type != JSON_T_ARR || idx < 1 || idx > cur->count) return 0;
+            cur = cur->kids[idx - 1];
         } else {
             long at = json_obj_index_n(cur, ks, kl);
             if (at < 0) return 0;
@@ -152,8 +156,8 @@ static int json_path_parent(JsonNode *root, const char *path, int create,
         JsonNode *next = NULL;
         if (is_index) {
             if (cur->type != JSON_T_ARR) { *why = "an index was applied to something that is not an array"; return 0; }
-            if (idx >= cur->count) { *why = "array index out of range"; return 0; }
-            next = cur->kids[idx];
+            if (idx < 1 || idx > cur->count) { *why = "array index out of range"; return 0; }
+            next = cur->kids[idx - 1];
         } else {
             long at = json_obj_index_n(cur, ks, kl);
             if (at >= 0) {
@@ -197,12 +201,12 @@ static int json_place(JsonNode *root, const char *path, JsonNode *val, const cha
             json_node_free(val);
             return 0;
         }
-        if (idx < parent->count) {
-            json_node_free(parent->kids[idx]);
-            parent->kids[idx] = val;
+        if (idx >= 1 && idx <= parent->count) {
+            json_node_free(parent->kids[idx - 1]);
+            parent->kids[idx - 1] = val;
             return 1;
         }
-        if (idx == parent->count) {                    /* one past the end: append */
+        if (idx == parent->count + 1) {                /* one past the end: append */
             if (!json_arr_push(parent, val)) { *why = "out of memory"; json_node_free(val); return 0; }
             return 1;
         }
@@ -471,9 +475,9 @@ void json_key_at(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     }
     if (at->type != JSON_T_OBJ) { json_fail_text(ret, OE_ERR_INVALID_ARG, "json_key_at: not an object"); return; }
     int32_t i = oe_arg_int(argv, 2);
-    if (i < 0 || (long)i >= at->count) { json_fail_text(ret, OE_ERR_INVALID_ARG, "json_key_at: index out of range"); return; }
+    if (i < 1 || (long)i > at->count) { json_fail_text(ret, OE_ERR_INVALID_ARG, "json_key_at: index out of range"); return; }
     oe_error_clear();
-    json_ret_copy(ret, at->keys[i] ? at->keys[i] : "");
+    json_ret_copy(ret, at->keys[i - 1] ? at->keys[i - 1] : "");
 }
 
 /* --- reading a value --------------------------------------------------- */

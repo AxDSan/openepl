@@ -37,8 +37,8 @@ sub main
   end
 
   # The member names of an object, by position.
-  var i: int = 0
-  while i < json_count(doc, "user")
+  var i: int = 1
+  while i <= json_count(doc, "user")
     call print_text(concat("key: ", json_key_at(doc, "user", i)))
     i = i + 1
   end

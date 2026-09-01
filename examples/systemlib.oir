@@ -58,12 +58,12 @@ sub main
 
   # The block is a count plus an indexed accessor; PATH is in it.
   if env_count() > 0
-    let first: text = env_name_at(0)
+    let first: text = env_name_at(1)
     if last_error_code() = 0 and length(first) > 0 and env_has(first)
       call print_text("environment is not empty")
     end
   end
-  let past_block: text = env_name_at(env_count())
+  let past_block: text = env_name_at(env_count() + 1)
   if last_error_code() <> 0
     call print_text("env index out of range rejected")
   end
@@ -73,10 +73,11 @@ sub main
     call print_text("pid: ok")
   end
 
-  # argv[0] is the program itself, so a program run with no arguments still
-  # has one.  A library target has none at all, and reports 0.
-  if sys_arg_count() >= 1
-    call print_text("arg 0: ok")
+  # sys_arg(1) is the first REAL argument — the program name is not one of
+  # them, and lives in sys_program_path().  So a program run with no arguments
+  # reports 0, which is what anyone would guess.
+  if sys_arg_count() = 0
+    call print_text("no arguments: ok")
   end
   let past_end: text = sys_arg(9999)
   if last_error_code() <> 0

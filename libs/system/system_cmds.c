@@ -158,11 +158,11 @@ void system_env_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 void system_env_name_at(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     int i = oe_arg_int(argv, 0);
-    if (i < 0 || i >= sys_env_total()) {
+    if (i < 1 || i > sys_env_total()) {
         sys_fail_text(ret, OE_ERR_INVALID_ARG, "env_name_at: index out of range");
         return;
     }
-    const char *entry = environ[i];
+    const char *entry = environ[i - 1];
     const char *eq = strchr(entry, '=');
     size_t n = eq ? (size_t)(eq - entry) : strlen(entry);
     char *out = (char *)oe_malloc((long)n + 1);
@@ -278,7 +278,10 @@ void system_os_temp_dir(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
  * pointer nobody set.  It cannot fail, so it never touches the slot. */
 void system_sys_arg_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)argv;
-    oe_ret_int(ret, oe_arg_total());
+    /* The count of REAL arguments, so `sys_arg(1)` .. `sys_arg(sys_arg_count())`
+     * is the whole range and the program name is not quietly one of them. */
+    int total = oe_arg_total();
+    oe_ret_int(ret, total > 0 ? total - 1 : 0);
 }
 
 /* sys_arg(int index) -> text.  Index 0 is the program name as invoked.
@@ -287,7 +290,10 @@ void system_sys_arg_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 void system_sys_arg(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     int i = oe_arg_int(argv, 0);
-    const char *v = oe_arg_at(i);
+    /* sys_arg(1) is the first real argument.  argv[0] is the program name and
+     * is NOT reachable here — sys_program_path() already reports it, and one
+     * way to say a thing is enough. */
+    const char *v = i < 1 ? 0 : oe_arg_at(i);
     if (!v) { sys_fail_text(ret, OE_ERR_INVALID_ARG, "sys_arg: index out of range"); return; }
     oe_error_clear();
     oe_ret_text(ret, sys_dup_text(v));

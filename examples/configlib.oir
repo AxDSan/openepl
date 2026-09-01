@@ -77,12 +77,12 @@ sub main
   call print_text(last_error_text())
 
   # --- walk it: a count plus an indexed accessor -------------------------
-  var s: int = 0
-  while s < config_section_count(h)
+  var s: int = 1
+  while s <= config_section_count(h)
     let name: text = config_section_at(h, s)
     call print_text(concat("[", concat(name, "]")))
-    var k: int = 0
-    while k < config_key_count(h, name)
+    var k: int = 1
+    while k <= config_key_count(h, name)
       let key: text = config_key_at(h, name, k)
       call print_text(concat("  ", concat(key, concat(" = ", config_get(h, name, key)))))
       k = k + 1

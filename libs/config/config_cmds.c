@@ -633,9 +633,9 @@ void config_section_at(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     Config *c = config_of(oe_arg_int(argv, 0));
     if (!c) { oe_ret_text(ret, config_empty()); return; }
-    int32_t want = oe_arg_int(argv, 1), seen = 0;
+    int32_t want = oe_arg_int(argv, 1), seen = 1;
     oe_error_clear();
-    if (want >= 0) {
+    if (want >= 1) {
         for (long i = 0; i < c->n; i++) {
             const char *name = config_declares(c, i);
             if (!name) continue;
@@ -667,9 +667,9 @@ void config_key_at(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     Config *c = config_of(oe_arg_int(argv, 0));
     if (!c) { oe_ret_text(ret, config_empty()); return; }
     const char *section = config_nz(oe_arg_text(argv, 1));
-    int32_t want = oe_arg_int(argv, 2), seen = 0;
+    int32_t want = oe_arg_int(argv, 2), seen = 1;
     oe_error_clear();
-    if (want >= 0) {
+    if (want >= 1) {
         for (long i = 0; i < c->n; i++) {
             if (c->lines[i].kind != CFG_PAIR || !config_ieq(c->lines[i].section, section)) continue;
             if (seen == want) { oe_ret_text(ret, config_text(c->lines[i].key)); return; }

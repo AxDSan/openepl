@@ -52,7 +52,7 @@ void *oe_ary_new(int32_t tag, int32_t len) {
  * than a null pointer, so a failed read stays printable. */
 int64_t oe_ary_get(void *p, int32_t i) {
     OpenEPL_Array *a = (OpenEPL_Array *)p;
-    if (!a || i < 0 || i >= a->len) {
+    if (!a || i < 1 || i > a->len) {
         char msg[96];
         snprintf(msg, sizeof msg, "index %d is outside a list of %d element(s)",
                  (int)i, (int)ary_len(a));
@@ -61,19 +61,19 @@ int64_t oe_ary_get(void *p, int32_t i) {
         return 0;
     }
     oe_error_clear();
-    return elems(a)[i];
+    return elems(a)[i - 1];
 }
 
 void oe_ary_set(void *p, int32_t i, int64_t v) {
     OpenEPL_Array *a = (OpenEPL_Array *)p;
-    if (!a || i < 0 || i >= a->len) {
+    if (!a || i < 1 || i > a->len) {
         char msg[96];
         snprintf(msg, sizeof msg, "index %d is outside a list of %d element(s)",
                  (int)i, (int)ary_len(a));
         oe_error_set(OE_ERR_OUT_OF_RANGE, msg);
         return;
     }
-    elems(a)[i] = v;
+    elems(a)[i - 1] = v;
     oe_error_clear();
 }
 
@@ -89,7 +89,7 @@ void *oe_bin_new(int32_t len) {
 
 int32_t oe_bin_at(void *p, int32_t i) {
     OpenEPL_Bin *b = (OpenEPL_Bin *)p;
-    if (!b || i < 0 || i >= b->len) {
+    if (!b || i < 1 || i > b->len) {
         char msg[96];
         snprintf(msg, sizeof msg, "index %d is outside %d byte(s)",
                  (int)i, b ? (int)b->len : 0);
@@ -97,19 +97,19 @@ int32_t oe_bin_at(void *p, int32_t i) {
         return -1;
     }
     oe_error_clear();
-    return bin_bytes(b)[i];
+    return bin_bytes(b)[i - 1];
 }
 
 void oe_bin_set(void *p, int32_t i, int32_t v) {
     OpenEPL_Bin *b = (OpenEPL_Bin *)p;
-    if (!b || i < 0 || i >= b->len) {
+    if (!b || i < 1 || i > b->len) {
         char msg[96];
         snprintf(msg, sizeof msg, "index %d is outside %d byte(s)",
                  (int)i, b ? (int)b->len : 0);
         oe_error_set(OE_ERR_OUT_OF_RANGE, msg);
         return;
     }
-    bin_bytes(b)[i] = (unsigned char)(v & 0xFF);
+    bin_bytes(b)[i - 1] = (unsigned char)(v & 0xFF);
     oe_error_clear();
 }
 
@@ -185,14 +185,14 @@ void oe_ary_remove(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     (void)c; (void)r;
     OpenEPL_Array *a = arg_ary(argv, 0);
     int32_t i = oe_arg_int(argv, 1);
-    if (!a || i < 0 || i >= a->len) {
+    if (!a || i < 1 || i > a->len) {
         char msg[96];
         snprintf(msg, sizeof msg, "index %d is outside a list of %d element(s)",
                  (int)i, (int)ary_len(a));
         oe_error_set(OE_ERR_OUT_OF_RANGE, msg);
         return;
     }
-    memmove(elems(a) + i, elems(a) + i + 1, (size_t)(a->len - i - 1) * 8);
+    memmove(elems(a) + i - 1, elems(a) + i, (size_t)(a->len - i) * 8);
     a->len--;
     oe_error_clear();
 }
@@ -205,16 +205,19 @@ void oe_ary_sort(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     qsort(elems(a), (size_t)a->len, 8, sort_cmp);
 }
 
+/* Returns a 1-based position, or 0 for absent.  Nothing indexes from 0, so 0
+ * is free to mean "not there" — which retires the -1 that a 0-based language
+ * needs and that reads as a position until you know better. */
 static int32_t find_elem(OpenEPL_Array *a, int64_t want) {
     for (int32_t i = 0; i < ary_len(a); i++) {
-        if (elem_cmp(a->elem_tag, elems(a)[i], want) == 0) return i;
+        if (elem_cmp(a->elem_tag, elems(a)[i], want) == 0) return i + 1;
     }
-    return -1;
+    return 0;
 }
 
 void oe_ary_contains(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     (void)c;
-    oe_ret_bool(r, find_elem(arg_ary(argv, 0), argv[1].v.i64) >= 0);
+    oe_ret_bool(r, find_elem(arg_ary(argv, 0), argv[1].v.i64) > 0);
 }
 
 void oe_ary_index_of(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {

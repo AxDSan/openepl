@@ -51,9 +51,11 @@ sub main
   # A trailing separator makes a real (empty) final field.
   let parts: int = text_split_count("a,,b,", ",")
   call print_int(parts)
+  # Fields count from 1: "a", "", "b", "" — the trailing separator makes the
+  # fourth one real.
   call print_text(concat(concat("[", text_split_at("a,,b,", ",", 1)), "]"))
-  call print_text(text_split_at("a,,b,", ",", 2))
-  call print_text(concat(concat("[", text_split_at("a,,b,", ",", 3)), "]"))
+  call print_text(text_split_at("a,,b,", ",", 3))
+  call print_text(concat(concat("[", text_split_at("a,,b,", ",", 4)), "]"))
 
   # --- failure reporting ---
   # "" from a bad code point, with the reason left in the error slot.

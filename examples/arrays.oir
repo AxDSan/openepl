@@ -32,7 +32,7 @@ end
 
 sub total(xs: int[]): int
   var sum: int = 0
-  for i = 0 to count(xs) - 1
+  for i = 1 to count(xs)
     sum = sum + xs[i]
   end
   return sum
@@ -42,15 +42,18 @@ sub main
   # --- making one ------------------------------------------------------
   # `[]` takes its element type from the declaration, which is the only place
   # an empty list can get one.
+  #
+  # Positions count from 1: `numbers[1]` is the first element, and
+  # `numbers[count(numbers)]` is the last.
   var numbers: int[] = [3, 1, 2]
   var nothing: text[] = []
   call check("count", count(numbers) = 3)
   call check("count of an empty list", count(nothing) = 0)
 
   # --- reading and writing one element ---------------------------------
-  call check("index", numbers[1] = 1)
-  numbers[1] = 8
-  call check("assign to an element", numbers[1] = 8)
+  call check("index", numbers[2] = 1)
+  numbers[2] = 8
+  call check("assign to an element", numbers[2] = 8)
 
   # --- growing and shrinking -------------------------------------------
   # `append` hands back a NEW array rather than growing this one in place, so
@@ -60,27 +63,29 @@ sub main
   call check("append", count(numbers) = 4)
   # `remove` shortens in place — shrinking never has to move anything — so it
   # is a statement and not a value.
-  call remove(numbers, 0)
+  call remove(numbers, 1)
   call check("remove", count(numbers) = 3)
 
   # --- searching and ordering ------------------------------------------
   call check("contains", contains(numbers, 5))
   call check("contains says no", not contains(numbers, 999))
-  call check("index_of", index_of(numbers, 5) = 2)
-  call check("index_of when absent", index_of(numbers, 999) = -1)
+  call check("index_of", index_of(numbers, 5) = 3)
+  # Absent is 0, not -1: nothing sits at 0, so it can mean "not there" without
+  # a magic number that reads like a position.
+  call check("index_of when absent", index_of(numbers, 999) = 0)
   call sort(numbers)
   call check("sort", join(numbers, ",") = "2,5,8")
 
   # --- text in, list out, text again ------------------------------------
   let fields: text[] = split("alpha,beta,gamma", ",")
   call check("split", count(fields) = 3)
-  call check("split keeps order", fields[2] = "gamma")
+  call check("split keeps order", fields[3] = "gamma")
   call check("join", join(fields, " ") = "alpha beta gamma")
 
   # A whole program's worth of work that had nowhere to live before: read
   # lines, keep some, put them back together.
   var kept: text[] = []
-  for i = 0 to count(fields) - 1
+  for i = 1 to count(fields)
     if not text_eq(fields[i], "beta")
       kept = append(kept, fields[i])
     end
@@ -101,7 +106,7 @@ sub main
   let raw: bytes = bytes_from_text("hé")
   call check("bytes_count", bytes_count(raw) = 3)
   call check("length counts characters", length("hé") = 2)
-  call check("a byte reads as a number", raw[0] = 104)
+  call check("a byte reads as a number", raw[1] = 104)
   call check("round trip", text_eq(text_from_bytes(raw), "hé"))
 
   # --- across subroutines, and at module level -------------------------
@@ -111,7 +116,7 @@ sub main
   call check("a module-level array", count(log) = 1)
 
   var blob: bytes = bytes_new(2)
-  blob[0] = 79
-  blob[1] = 75
+  blob[1] = 79
+  blob[2] = 75
   call check("bytes_new and element assignment", text_eq(text_from_bytes(blob), "OK"))
 end

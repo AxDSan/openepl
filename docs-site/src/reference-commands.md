@@ -45,22 +45,32 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 | --- | --- | --- |
 | `abs_double` | double | double |
 | `abs_int` | int | int |
+| `append` | array, element | array |
 | `ask` | text | text |
+| `bytes_at` | bytes, int | int |
+| `bytes_count` | bytes | int |
+| `bytes_from_text` | text | bytes |
+| `bytes_new` | int | bytes |
+| `bytes_set` | bytes, int, int | — |
 | `ceil` | double | double |
 | `concat` | text, text | text |
+| `contains` | array, element | bool |
 | `cos` | double | double |
+| `count` | array | int |
 | `double_to_int` | double | int |
 | `double_to_text` | double | text |
 | `exp` | double | double |
 | `find` | text, text | int |
 | `floor` | double | double |
 | `format_time` | int64, text | text |
+| `index_of` | array, element | int |
 | `input_ended` | — | bool |
 | `int64_to_int` | int64 | int |
 | `int64_to_text` | int64 | text |
 | `int_to_double` | int | double |
 | `int_to_int64` | int | int64 |
 | `int_to_text` | int | text |
+| `join` | array, text | text |
 | `last_error_code` | — | int |
 | `last_error_text` | — | text |
 | `length` | text | int |
@@ -80,15 +90,19 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 | `print_int` | int | — |
 | `print_text` | text | — |
 | `read_line` | — | text |
+| `remove` | array, int | — |
 | `repeat` | text, int | text |
 | `replace` | text, text, text | text |
 | `reverse` | text | text |
 | `round` | double | double |
 | `sin` | double | double |
+| `sort` | array | — |
+| `split` | text, text | text[] |
 | `sqrt` | double | double |
 | `substr` | text, int, int | text |
 | `tan` | double | double |
 | `text_eq` | text, text | bool |
+| `text_from_bytes` | bytes | text |
 | `text_to_double` | text | double |
 | `text_to_int` | text | int |
 | `trim` | text | text |

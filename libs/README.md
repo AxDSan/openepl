@@ -32,6 +32,20 @@ thing_count(x) -> int        # -1 on failure
 thing_at(x, i) -> text       # "" when out of range
 ```
 
+**Positions count from 1.** `thing_at(x, 1)` is the first element and
+`thing_at(x, thing_count(x))` is the last, so a loop runs `1` to the count with
+no `- 1` anywhere. This holds everywhere without exception: arrays, bytes, text
+positions, every indexed accessor, and JSON paths — which means `items[1]` here
+is what JSONPath would call `items[0]`.
+
+It also means **0 is free to mean "not found"**, which is why `index_of` and
+`find` return 0 for absent rather than the -1 a 0-based language needs. A
+position and a failure can never be confused.
+
+EPL counts from 1 and so does the BASIC lineage this sits in; a 0-based array
+in a language aimed at people who are not systems programmers is an inherited
+C accident, not a design.
+
 ## Reporting failure
 
 There are no exceptions and no out-parameters. A command that can fail returns

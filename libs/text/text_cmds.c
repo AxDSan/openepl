@@ -95,7 +95,9 @@ void text_index_of(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     (void)c;
     const char *s = text_nz(oe_arg_text(argv, 0)), *n = text_nz(oe_arg_text(argv, 1));
     const char *hit = strstr(s, n);
-    oe_ret_int(r, hit ? (int32_t)text_u8_count(s, (long)(hit - s)) : -1);
+    /* A position counting from 1, and 0 for absent — 0 is not a position, so
+     * it can carry that meaning without a magic -1. */
+    oe_ret_int(r, hit ? (int32_t)text_u8_count(s, (long)(hit - s)) + 1 : 0);
 }
 
 /* text_last_index_of(text s, text needle) -> int : character index, -1 absent */
@@ -104,9 +106,9 @@ void text_last_index_of(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     const char *s = text_nz(oe_arg_text(argv, 0)), *n = text_nz(oe_arg_text(argv, 1));
     long ln = (long)strlen(n);
     const char *last = 0, *p = s;
-    if (ln == 0) { oe_ret_int(r, (int32_t)text_u8_count(s, (long)strlen(s))); return; }
+    if (ln == 0) { oe_ret_int(r, (int32_t)text_u8_count(s, (long)strlen(s)) + 1); return; }
     while ((p = strstr(p, n))) { last = p; p += 1; }
-    oe_ret_int(r, last ? (int32_t)text_u8_count(s, (long)(last - s)) : -1);
+    oe_ret_int(r, last ? (int32_t)text_u8_count(s, (long)(last - s)) + 1 : 0);
 }
 
 /* text_count(text s, text needle) -> int : non-overlapping occurrences, 0 for
@@ -202,16 +204,16 @@ void text_title_case(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     oe_ret_text(r, o);
 }
 
-/* text_insert(text s, int at, text piece) -> text : `at` is a character index,
- * clamped to [0, length]. */
+/* text_insert(text s, int at, text piece) -> text : `at` is a character
+ * position counting from 1, clamped to [1, length + 1]. */
 void text_insert(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     (void)c;
     const char *s = text_nz(oe_arg_text(argv, 0));
     int32_t at = oe_arg_int(argv, 1);
     const char *piece = text_nz(oe_arg_text(argv, 2));
     long n = (long)strlen(s), lp = (long)strlen(piece), cut;
-    if (at < 0) at = 0;
-    cut = text_u8_offset(s, n, at);
+    if (at < 1) at = 1;
+    cut = text_u8_offset(s, n, at - 1);
     {
         char *o = text_alloc(n + lp);
         memcpy(o, s, (size_t)cut);
@@ -222,16 +224,17 @@ void text_insert(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     }
 }
 
-/* text_remove(text s, int at, int count) -> text : characters, clamped. */
+/* text_remove(text s, int at, int count) -> text : characters from position
+ * `at`, counting from 1, clamped. */
 void text_remove(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     (void)c;
     const char *s = text_nz(oe_arg_text(argv, 0));
     int32_t at = oe_arg_int(argv, 1), count = oe_arg_int(argv, 2);
     long n = (long)strlen(s), from, to;
-    if (at < 0) at = 0;
+    if (at < 1) at = 1;
     if (count < 0) count = 0;
-    from = text_u8_offset(s, n, at);
-    to = text_u8_offset(s, n, (long)at + count);
+    from = text_u8_offset(s, n, at - 1);
+    to = text_u8_offset(s, n, (long)at - 1 + count);
     {
         long out = from + (n - to);
         char *o = text_alloc(out);
@@ -261,36 +264,37 @@ static int32_t text_decode(const char *s, long i, long n, long *len_out) {
     return cp;
 }
 
-/* text_char_at(text s, int i) -> text : the single character at index `i`.
+/* text_char_at(text s, int i) -> text : the single character at position `i`.
  * "" with error code 0 cannot happen — an out-of-range index is a failure. */
 void text_char_at(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     (void)c;
     const char *s = text_nz(oe_arg_text(argv, 0));
     int32_t i = oe_arg_int(argv, 1);
     long n = (long)strlen(s), from, len;
-    if (i < 0 || (long)i >= text_u8_count(s, n)) {
+    if (i < 1 || (long)i > text_u8_count(s, n)) {
         oe_error_set(OE_ERR_INVALID_ARG, "text_char_at: index out of range");
         oe_ret_text(r, text_empty());
         return;
     }
-    from = text_u8_offset(s, n, i);
+    from = text_u8_offset(s, n, i - 1);
     len = text_u8_len(s, from, n);
     oe_error_clear();
     oe_ret_text(r, text_dup(s + from, len));
 }
 
-/* text_char_code(text s, int i) -> int : Unicode code point, -1 on failure. */
+/* text_char_code(text s, int i) -> int : code point at position `i`, counting
+ * from 1; -1 on failure. */
 void text_char_code(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     (void)c;
     const char *s = text_nz(oe_arg_text(argv, 0));
     int32_t i = oe_arg_int(argv, 1);
     long n = (long)strlen(s), from, len;
-    if (i < 0 || (long)i >= text_u8_count(s, n)) {
+    if (i < 1 || (long)i > text_u8_count(s, n)) {
         oe_error_set(OE_ERR_INVALID_ARG, "text_char_code: index out of range");
         oe_ret_int(r, -1);
         return;
     }
-    from = text_u8_offset(s, n, i);
+    from = text_u8_offset(s, n, i - 1);
     oe_error_clear();
     oe_ret_int(r, text_decode(s, from, n, &len));
 }
@@ -363,7 +367,8 @@ void text_split_count(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     oe_ret_int(r, (int32_t)count);
 }
 
-/* text_split_at(text s, text sep, int i) -> text : field `i`, "" on failure. */
+/* text_split_at(text s, text sep, int i) -> text : field `i`, counting from 1;
+ * "" on failure. */
 void text_split_at(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     (void)c;
     const char *s = text_nz(oe_arg_text(argv, 0)), *sep = text_nz(oe_arg_text(argv, 1));
@@ -375,7 +380,7 @@ void text_split_at(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
         oe_ret_text(r, text_empty());
         return;
     }
-    if (i < 0 || !text_field(s, sep, lsep, i, &field, &flen)) {
+    if (i < 1 || !text_field(s, sep, lsep, i - 1, &field, &flen)) {
         oe_error_set(OE_ERR_INVALID_ARG, "text_split_at: index out of range");
         oe_ret_text(r, text_empty());
         return;

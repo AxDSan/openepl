@@ -546,9 +546,9 @@ void dir_entry(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
         oe_ret_text(ret, file_empty());
         return;
     }
-    if (i < 0 || (long)i >= g_snap_n) { oe_error_clear(); oe_ret_text(ret, file_empty()); return; }
+    if (i < 1 || (long)i > g_snap_n) { oe_error_clear(); oe_ret_text(ret, file_empty()); return; }
     oe_error_clear();
-    oe_ret_text(ret, file_text(g_snap[i]));
+    oe_ret_text(ret, file_text(g_snap[i - 1]));
 }
 
 /* --- paths ------------------------------------------------------------

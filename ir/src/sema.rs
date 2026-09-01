@@ -190,11 +190,13 @@ fn type_of_expr_bare(
             // not need to run to reveal. Only the cases visible here are
             // caught; the rest is the run-time bounds check.
             if let Expr::IntLit(v) = **index {
-                if v < 0 {
-                    return err(format!("index {v} is before the start of the list"));
+                if v < 1 {
+                    return err(format!(
+                        "index {v} is before the start of the list — positions count from 1"
+                    ));
                 }
                 if let Expr::ArrayLit(items) = &**base {
-                    if v as usize >= items.len() {
+                    if v as usize > items.len() {
                         return err(format!(
                             "index {v} is past the end of a list of {} element(s)",
                             items.len()
