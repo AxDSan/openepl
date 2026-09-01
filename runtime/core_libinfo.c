@@ -21,6 +21,15 @@ static const int32_t P_TI[]    = { OE_SDT_TEXT, OE_SDT_INT };
 static const int32_t P_TII[]   = { OE_SDT_TEXT, OE_SDT_INT, OE_SDT_INT };
 static const int32_t P_TTT[]   = { OE_SDT_TEXT, OE_SDT_TEXT, OE_SDT_TEXT };
 static const int32_t P_I64T[]  = { OE_SDT_INT64, OE_SDT_TEXT };
+/* Aggregates. ANY_ARRAY/ANY_ELEM keep one `append` instead of one per element
+ * type; the array carries its element tag, and the compiler checks the pair. */
+static const int32_t P_A[]     = { OE_SDT_ANY_ARRAY };
+static const int32_t P_AE[]    = { OE_SDT_ANY_ARRAY, OE_SDT_ANY_ELEM };
+static const int32_t P_AI[]    = { OE_SDT_ANY_ARRAY, OE_SDT_INT };
+static const int32_t P_AT[]    = { OE_SDT_ANY_ARRAY, OE_SDT_TEXT };
+static const int32_t P_B[]     = { OE_SDT_BIN };
+static const int32_t P_BI[]    = { OE_SDT_BIN, OE_SDT_INT };
+static const int32_t P_BII[]   = { OE_SDT_BIN, OE_SDT_INT, OE_SDT_INT };
 
 #define CMD(name, sym, ret, argc, tags) \
     { name, #sym, ret, argc, tags }
@@ -85,6 +94,22 @@ static const OpenEPL_CommandDesc CORE_COMMANDS[] = {
     CMD("now",         oe_now,         OE_SDT_INT64, 0, NULL),
     CMD("year",        oe_year,        OE_SDT_INT,   1, P_I64),
     CMD("format_time", oe_format_time, OE_SDT_TEXT,  2, P_I64T),
+    /* arrays — the operations that cannot be syntax */
+    CMD("count",    oe_ary_count,    OE_SDT_INT,       1, P_A),
+    CMD("append",   oe_ary_append,   OE_SDT_ANY_ARRAY, 2, P_AE),
+    CMD("remove",   oe_ary_remove,   OE_SDT_NULL,      2, P_AI),
+    CMD("sort",     oe_ary_sort,     OE_SDT_NULL,      1, P_A),
+    CMD("contains", oe_ary_contains, OE_SDT_BOOL,      2, P_AE),
+    CMD("index_of", oe_ary_index_of, OE_SDT_INT,       2, P_AE),
+    CMD("join",     oe_ary_join,     OE_SDT_TEXT,      2, P_AT),
+    CMD("split",    oe_ary_split,    OE_SDT_ARRAY_OF(OE_SDT_TEXT), 2, P_TT),
+    /* byte-sets */
+    CMD("bytes_new",       oe_bin_make,      OE_SDT_BIN,  1, P_I),
+    CMD("bytes_count",     oe_bin_size,      OE_SDT_INT,  1, P_B),
+    CMD("bytes_at",        oe_bin_byte,      OE_SDT_INT,  2, P_BI),
+    CMD("bytes_set",       oe_bin_put,       OE_SDT_NULL, 3, P_BII),
+    CMD("bytes_from_text", oe_bin_from_text, OE_SDT_BIN,  1, P_T),
+    CMD("text_from_bytes", oe_bin_to_text,   OE_SDT_TEXT, 1, P_B),
 };
 
 static const OpenEPL_LibInfo CORE_INFO = {

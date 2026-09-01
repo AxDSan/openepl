@@ -10,17 +10,20 @@
 //! return  := "return" expr? NEWLINE
 //! let     := "let" IDENT ":" type "=" expr NEWLINE
 //! call    := "call" IDENT "(" (expr ("," expr)*)? ")" NEWLINE
-//! type    := "int" | "text"
+//! type    := ("int" | "int64" | "double" | "text" | "bool" | "bytes") ("[" "]")?
 //! expr    := term (("+" | "-") term)*
 //! term    := factor (("*" | "/" | "%") factor)*
-//! factor  := "-"? (INT | FLOAT | STRING | call | IDENT | "(" expr ")")
+//! factor  := "-"? postfix
+//! postfix := primary ("[" expr "]")*
+//! primary := INT | FLOAT | STRING | list | call | IDENT | "(" expr ")"
+//! list    := "[" (expr ("," expr)*)? "]"
 //! call    := IDENT "(" (expr ("," expr)*)? ")"
 //! ```
 
 use crate::lexer::{lex, Spanned, Tok};
 use crate::{
-    BinOp, CmpOp, Component, Expr, Form, GlobalVar, Item, LogicalOp, Module, Stmt, StmtKind, Sub,
-    Target, Ty,
+    BinOp, CmpOp, Component, Elem, Expr, Form, GlobalVar, Item, LogicalOp, Module, Stmt, StmtKind,
+    Sub, Target, Ty,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -366,15 +369,42 @@ impl Parser {
         Ok(GlobalVar { name, ty, value })
     }
 
+    /// ```text
+    /// type := IDENT ("[" "]")?
+    /// ```
+    ///
+    /// The `[]` suffix follows the element type rather than wrapping it, so
+    /// `int[]` reads as "ints" in the same left-to-right order the rest of a
+    /// declaration does.
     fn type_keyword(&mut self) -> Result<Ty, ParseError> {
-        match self.bump() {
+        let base = match self.bump() {
             Tok::Ident(w) => match Ty::from_keyword(&w) {
-                Some(t) => Ok(t),
-                None => self.err(format!(
-                    "expected a type (int/int64/double/text), found `{w}`"
-                )),
+                Some(t) => t,
+                None => {
+                    return self.err(format!(
+                        "expected a type (int/int64/double/text/bool/bytes, or `int[]` \
+                         for an array), found `{w}`"
+                    ))
+                }
             },
-            other => self.err(format!("expected a type, found {other:?}")),
+            other => return self.err(format!("expected a type, found {other:?}")),
+        };
+        if !matches!(self.peek(), Tok::LBracket) {
+            return Ok(base);
+        }
+        self.bump();
+        self.expect(&Tok::RBracket, "`]` after `[` in an array type")?;
+        // A second `[]` is caught here rather than left to the checker so the
+        // message names the real limitation instead of the token that follows.
+        if matches!(self.peek(), Tok::LBracket) {
+            return self.err("an array cannot hold arrays — `int[][]` is not a type");
+        }
+        match Elem::from_ty(base) {
+            Some(e) => Ok(Ty::Array(e)),
+            None => self.err(format!(
+                "an array cannot hold {} values",
+                base.as_str()
+            )),
         }
     }
 
@@ -383,6 +413,18 @@ impl Parser {
         let stmt_line = self.line();
         let name = self.ident("variable or component name")?;
         match self.peek() {
+            Tok::LBracket => {
+                self.bump();
+                let index = self.expr()?;
+                self.expect(&Tok::RBracket, "`]` after the index")?;
+                self.expect(&Tok::Eq, "`=` in an element assignment")?;
+                let value = self.expr()?;
+                self.expect(&Tok::Newline, "newline after assignment")?;
+                Ok(Stmt::new(
+                    StmtKind::SetIndex { name, index, value },
+                    stmt_line,
+                ))
+            }
             Tok::Eq => {
                 self.bump();
                 let value = self.expr()?;
@@ -402,7 +444,8 @@ impl Parser {
                 }, stmt_line))
             }
             other => self.err(format!(
-                "expected `=` (assignment) or `.` (property) after `{name}`, found {other:?}"
+                "expected `=` (assignment), `[` (element) or `.` (property) after `{name}`, \
+                 found {other:?}"
             )),
         }
     }
@@ -737,6 +780,49 @@ impl Parser {
                 other => Expr::Neg(Box::new(other)),
             });
         }
+        let primary = self.primary()?;
+        self.postfix(primary)
+    }
+
+    /// `[` … `]` after a value, repeatedly — indexing binds tighter than any
+    /// operator, so `xs[0] + 1` adds to the element and not to the array.
+    fn postfix(&mut self, mut e: Expr) -> Result<Expr, ParseError> {
+        while matches!(self.peek(), Tok::LBracket) {
+            self.bump();
+            let index = self.expr()?;
+            self.expect(&Tok::RBracket, "`]` after the index")?;
+            e = Expr::Index {
+                base: Box::new(e),
+                index: Box::new(index),
+            };
+        }
+        Ok(e)
+    }
+
+    fn primary(&mut self) -> Result<Expr, ParseError> {
+        // `[a, b, c]` — the elements are a plain argument list, so a literal
+        // may hold any expression, not only constants.
+        if matches!(self.peek(), Tok::LBracket) {
+            self.bump();
+            let mut items = Vec::new();
+            if !matches!(self.peek(), Tok::RBracket) {
+                loop {
+                    items.push(self.expr()?);
+                    match self.peek() {
+                        Tok::Comma => {
+                            self.bump();
+                        }
+                        Tok::RBracket => break,
+                        other => {
+                            return self
+                                .err(format!("expected `,` or `]` in a list, found {other:?}"))
+                        }
+                    }
+                }
+            }
+            self.expect(&Tok::RBracket, "`]` closing the list")?;
+            return Ok(Expr::ArrayLit(items));
+        }
         match self.bump() {
             Tok::True => Ok(Expr::BoolLit(true)),
             Tok::False => Ok(Expr::BoolLit(false)),
@@ -955,6 +1041,57 @@ mod tests {
     fn to_and_step_are_still_ordinary_names() {
         let m = parse("module m\nsub main\n  var to: int = 1\n  var step: int = 2\n  to = step\nend\n").unwrap();
         assert_eq!(m.subs().next().unwrap().body.len(), 3);
+    }
+
+    #[test]
+    fn parses_an_array_type_and_an_index() {
+        let m = parse(
+            "module m\nsub f(xs: text[]): int\n  let a: int = xs[0 + 1]\n  return a\nend\n",
+        )
+        .unwrap();
+        let s = m.subs().next().unwrap();
+        assert_eq!(s.params, vec![("xs".into(), Ty::Array(Elem::Text))]);
+        let StmtKind::Let { value, .. } = &s.body[0].kind else {
+            panic!("expected a let")
+        };
+        assert!(matches!(value, Expr::Index { .. }));
+    }
+
+    /// Indexing binds tighter than any operator: `xs[0] + 1` adds to the
+    /// element, and folding it the other way would index the sum.
+    #[test]
+    fn indexing_binds_tighter_than_addition() {
+        let m = parse("module m\nsub main\n  var xs: int[] = [1]\n  let a: int = xs[0] + 1\nend\n")
+            .unwrap();
+        let s = m.subs().next().unwrap();
+        let StmtKind::Let { value, .. } = &s.body[1].kind else {
+            panic!()
+        };
+        let Expr::Bin(BinOp::Add, l, _) = value else {
+            panic!("expected an addition, got {value:?}")
+        };
+        assert!(matches!(**l, Expr::Index { .. }));
+    }
+
+    #[test]
+    fn parses_an_element_assignment() {
+        let m =
+            parse("module m\nsub main\n  var xs: int[] = [1]\n  xs[0] = 2\nend\n").unwrap();
+        let s = m.subs().next().unwrap();
+        assert!(matches!(s.body[1].kind, StmtKind::SetIndex { .. }));
+    }
+
+    /// The limitation is named where it is hit, rather than surfacing as a
+    /// complaint about the token that happens to follow.
+    #[test]
+    fn rejects_an_array_of_arrays() {
+        let e = parse("module m\nsub main\n  let xs: int[][] = []\nend\n").unwrap_err();
+        assert!(e.msg.contains("cannot hold arrays"), "{}", e.msg);
+    }
+
+    #[test]
+    fn rejects_an_array_of_byte_sets() {
+        assert!(parse("module m\nsub main\n  let b: bytes[] = []\nend\n").is_err());
     }
 
     #[test]

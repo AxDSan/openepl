@@ -37,6 +37,33 @@ Console and windowed programs are ordinary executables. The linker drops every
 command the program never calls, so a small program stays small, and there is
 nothing to unpack at start-up.
 
+## Release builds
+
+Every build is a debug build unless you ask otherwise. `--release` is the other
+profile, on `build` and on `run`:
+
+```sh
+openepl build hello.oir --release -o hello
+```
+
+It compiles at `-O2` and adds the hardening a shipped program wants: `_FORTIFY_SOURCE`,
+`-fstack-protector-strong`, position-independent code, read-only relocations
+with every symbol bound at load time, and no symbol table — the names of your
+subroutines, module variables and the runtime commands you linked are gone from
+the file. Dead-stripping still applies, so the program is smaller than the debug
+one as well as faster.
+
+Each flag is offered to the local `clang` before it is used, and one the
+compiler will not take is dropped with a line saying so. A flag accepted in
+silence and ignored would leave you believing in hardening that is not there.
+
+The default stays a debug build because most builds are the one you are about to
+run and delete, and hardening costs compile time. Nothing else changes: the same
+source, the same output, the same behaviour.
+
+A windowed program is the one exception to position independence — the vendored
+UI stack is not built `-fPIC` — and the build tells you when it links without it.
+
 ## Libraries
 
 A library has no entry point. Every subroutine is exported under its own name,

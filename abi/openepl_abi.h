@@ -45,6 +45,51 @@ enum {
     OE_SDT_ALL       = 255  /* _SDT_ALL: any type (declarations only)   */
 };
 
+/* Array-ness is a FLAG above the element tag, not a second block of numbers:
+ * every value above is frozen, so `int[]` has to be expressible without moving
+ * `int`.  `OE_SDT_ARRAY_OF(OE_SDT_TEXT)` is an array of text. */
+enum {
+    OE_SDT_ARRAY_FLAG = 0x100,
+    /* Declarations only, and only for commands the element type does not
+     * change: `count` and `sort` read the element tag from the array itself at
+     * run time.  Without it every such command would need one spelling per
+     * element type. */
+    OE_SDT_ANY_ARRAY  = 0x100 | 255,
+    /* Declarations only: "whatever THIS call's array argument holds", which is
+     * what makes appending text to an array of ints a compile error. */
+    OE_SDT_ANY_ELEM   = 255
+};
+#define OE_SDT_ARRAY_OF(elem_tag) (OE_SDT_ARRAY_FLAG | (elem_tag))
+
+/* --- Array object layout (SDT_ARRAY_OF) --------------------------------
+ * A header followed by the elements, all one runtime-owned allocation:
+ *
+ *     { int32 elem_tag; int32 len; int32 cap; int32 _pad; int64 elems[cap]; }
+ *
+ * One slot-width per element, so an array of text holds pointers exactly the
+ * way an array of int holds ints, and the value read out of an element is
+ * already the 64 bits a slot carries.
+ *
+ * Allocated through oe_malloc like text, so oe_free_all() at exit releases it
+ * and there is one ownership model rather than two.  Nothing ever moves an
+ * array: `append` returns a NEW one, because reallocating would leave every
+ * other name that held it pointing at freed memory. */
+typedef struct OpenEPL_Array {
+    int32_t elem_tag;   /* OE_SDT_* of one element                          */
+    int32_t len;        /* elements in use                                  */
+    int32_t cap;        /* elements allocated; always >= len                */
+    int32_t _pad;       /* keep the elements 8-byte aligned                 */
+} OpenEPL_Array;
+
+/* --- Byte-set layout (SDT_BIN) ----------------------------------------
+ * EPL's one-dimensional byte array: { int32 dims; int32 len; bytes[len] }.
+ * The dimension count is always 1 here and exists so the shape matches what
+ * EPL's own byte-sets carry. */
+typedef struct OpenEPL_Bin {
+    int32_t dims;       /* always 1                                         */
+    int32_t len;
+} OpenEPL_Bin;
+
 /* --- Slot (MDATA_INF analog) — one argument or return value. ----------
  * A tagged 16-byte cell; the 8-byte value union sits at offset 8.  This is the
  * uniform in/out currency of every command. */
@@ -118,7 +163,8 @@ enum {
     OE_ERR_WRONG_KIND  = 10003, /* e.g. a directory handle sent to a file cmd*/
     OE_ERR_TABLE_FULL  = 10004,
     OE_ERR_INVALID_ARG = 10005,
-    OE_ERR_UNSUPPORTED = 10006
+    OE_ERR_UNSUPPORTED = 10006,
+    OE_ERR_OUT_OF_RANGE= 10007  /* an index outside an array or byte-set     */
 };
 
 void    oe_error_clear(void);

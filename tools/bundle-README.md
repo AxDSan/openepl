@@ -65,8 +65,9 @@ Zed, and `editors/vscode/` is a working extension with syntax highlighting.
 ## What this is not, yet
 
 * **Linux x86-64 only.** Windows, macOS and arm64 are not supported yet.
-* **No hardened release profile.** Programs you build are ordinary native
-  binaries; the stripped, non-decompilable release output is still to come.
+* **A release build is hardened, not hidden.** `openepl build --release`
+  optimises, hardens and strips what you build. A native binary can still be
+  disassembled — the flag buys a smaller, harder-to-attack program, not secrecy.
 * **No debugger.** You get a program's output and its exit code in the IDE
   console, not breakpoints or stepping.
 

@@ -253,6 +253,32 @@ impl Registry {
             cmd("now", "oe_now", &[], Some(Int64));
             cmd("year", "oe_year", &[Int64], Some(Int));
             cmd("format_time", "oe_format_time", &[Int64, Text], Some(Text));
+
+            // --- Arrays ------------------------------------------------------
+            // Declared over `AnyArray`/`AnyElem` rather than once per element
+            // type: the array carries its element tag at run time, and the
+            // checker pairs the two so `append(ints, "x")` is still an error.
+            cmd("count", "oe_ary_count", &[AnyArray], Some(Int));
+            cmd("append", "oe_ary_append", &[AnyArray, AnyElem], Some(AnyArray));
+            cmd("remove", "oe_ary_remove", &[AnyArray, Int], None);
+            cmd("sort", "oe_ary_sort", &[AnyArray], None);
+            cmd("contains", "oe_ary_contains", &[AnyArray, AnyElem], Some(Bool));
+            cmd("index_of", "oe_ary_index_of", &[AnyArray, AnyElem], Some(Int));
+            cmd("join", "oe_ary_join", &[AnyArray, Text], Some(Text));
+            cmd(
+                "split",
+                "oe_ary_split",
+                &[Text, Text],
+                Some(Array(crate::Elem::Text)),
+            );
+
+            // --- Byte-sets ---------------------------------------------------
+            cmd("bytes_new", "oe_bin_make", &[Int], Some(Bytes));
+            cmd("bytes_count", "oe_bin_size", &[Bytes], Some(Int));
+            cmd("bytes_at", "oe_bin_byte", &[Bytes, Int], Some(Int));
+            cmd("bytes_set", "oe_bin_put", &[Bytes, Int, Int], None);
+            cmd("bytes_from_text", "oe_bin_from_text", &[Text], Some(Bytes));
+            cmd("text_from_bytes", "oe_bin_to_text", &[Bytes], Some(Text));
         }
         r
     }

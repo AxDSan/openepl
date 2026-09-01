@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Expr, Registry, Signature, Ty};
+use crate::{Elem, Expr, Registry, Signature, Ty};
 
 /// Maps a form's component ids to their component type names. Component ids are
 /// module-scoped (they are not locals), so every subroutine can see them.
@@ -46,6 +46,41 @@ pub fn type_of_expr(
 
 /// As `type_of_expr`, but with component ids in scope so `id.property` resolves.
 pub fn type_of_expr_in(
+    expr: &Expr,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
+    type_of_expr_hinted(expr, None, vars, reg, components)
+}
+
+/// As `type_of_expr_in`, but told what type the surrounding context wants.
+///
+/// Only `[]` needs this: an empty list has no element to infer from, and the
+/// alternative — a construction command per element type — would make the
+/// commonest line in a program (`var lines: text[] = []`) the ugliest. The hint
+/// is never used to *coerce*, only to give an otherwise-typeless literal the
+/// type its destination already declares, so nothing else changes meaning.
+pub fn type_of_expr_hinted(
+    expr: &Expr,
+    hint: Option<Ty>,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
+    match expr {
+        Expr::ArrayLit(items) if items.is_empty() => match hint {
+            Some(Ty::Array(e)) => Ok(Ty::Array(e)),
+            _ => err(
+                "`[]` on its own does not say what it holds — declare the type, \
+                 as in `var xs: text[] = []`",
+            ),
+        },
+        _ => type_of_expr_bare(expr, vars, reg, components),
+    }
+}
+
+fn type_of_expr_bare(
     expr: &Expr,
     vars: &HashMap<String, Ty>,
     reg: &Registry,
@@ -94,11 +129,86 @@ pub fn type_of_expr_in(
             let (what, sig) = callee(cmd, reg).ok_or_else(|| SemaError {
                 msg: format!("unknown command `{cmd}`"),
             })?;
-            let ret = sig.ret.ok_or_else(|| SemaError {
-                msg: format!("{what} `{cmd}` returns nothing and cannot be used in an expression"),
-            })?;
-            check_args_labeled(what, cmd, &sig.params, args, vars, reg, components)?;
-            Ok(ret)
+            if sig.ret.is_none() {
+                return err(format!(
+                    "{what} `{cmd}` returns nothing and cannot be used in an expression"
+                ));
+            }
+            match check_call(what, cmd, &sig, args, vars, reg, components)? {
+                Some(t) => Ok(t),
+                None => err(format!(
+                    "{what} `{cmd}` returns nothing and cannot be used in an expression"
+                )),
+            }
+        }
+        Expr::ArrayLit(items) => {
+            let mut ty: Option<Ty> = None;
+            for (i, item) in items.iter().enumerate() {
+                let got = type_of_expr_bare(item, vars, reg, components)?;
+                match ty {
+                    None => {
+                        if Elem::from_ty(got).is_none() {
+                            return err(format!(
+                                "a list cannot hold {} values",
+                                got.as_str()
+                            ));
+                        }
+                        ty = Some(got);
+                    }
+                    Some(first) if first != got => {
+                        return err(format!(
+                            "every element of a list has one type: element 1 is {}, \
+                             element {} is {}",
+                            first.as_str(),
+                            i + 1,
+                            got.as_str()
+                        ))
+                    }
+                    Some(_) => {}
+                }
+            }
+            // The empty case is handled by `type_of_expr_hinted`; reaching here
+            // means nothing said what it should hold.
+            match ty.and_then(Elem::from_ty) {
+                Some(e) => Ok(Ty::Array(e)),
+                None => err(
+                    "`[]` on its own does not say what it holds — declare the type, \
+                     as in `var xs: text[] = []`",
+                ),
+            }
+        }
+        Expr::Index { base, index } => {
+            let bt = type_of_expr_bare(base, vars, reg, components)?;
+            let it = type_of_expr_bare(index, vars, reg, components)?;
+            if it != Ty::Int {
+                return err(format!(
+                    "an index counts with `int` values, got {}",
+                    it.as_str()
+                ));
+            }
+            // A constant index that is out of range is a bug the program does
+            // not need to run to reveal. Only the cases visible here are
+            // caught; the rest is the run-time bounds check.
+            if let Expr::IntLit(v) = **index {
+                if v < 0 {
+                    return err(format!("index {v} is before the start of the list"));
+                }
+                if let Expr::ArrayLit(items) = &**base {
+                    if v as usize >= items.len() {
+                        return err(format!(
+                            "index {v} is past the end of a list of {} element(s)",
+                            items.len()
+                        ));
+                    }
+                }
+            }
+            match bt {
+                Ty::Array(e) => Ok(e.ty()),
+                // One byte reads as a number, because that is what a byte is
+                // once it is out of the byte-set.
+                Ty::Bytes => Ok(Ty::Int),
+                other => err(format!("{} is not something you can index", other.as_str())),
+            }
         }
         Expr::GetProperty {
             component,
@@ -235,23 +345,108 @@ pub fn check_args_labeled(
     reg: &Registry,
     components: &Components,
 ) -> Result<(), SemaError> {
-    if args.len() != params.len() {
+    let sig = Signature {
+        params: params.to_vec(),
+        ret: None,
+    };
+    check_call(what, cmd, &sig, args, vars, reg, components).map(|_| ())
+}
+
+/// Check an argument list and report what the call's result type actually is.
+///
+/// The result is not always `sig.ret`: the array commands are declared over
+/// `AnyArray`/`AnyElem`, so what `append` gives back depends on what it was
+/// given. Resolving that here, once, is what keeps the validator and the
+/// backend from disagreeing about it.
+#[allow(clippy::too_many_arguments)]
+pub fn check_call(
+    what: &str,
+    cmd: &str,
+    sig: &Signature,
+    args: &[Expr],
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Option<Ty>, SemaError> {
+    if args.len() != sig.params.len() {
         return err(format!(
             "{what} `{cmd}` expects {} argument(s), got {}",
-            params.len(),
+            sig.params.len(),
             args.len()
         ));
     }
-    for (i, (a, expected)) in args.iter().zip(params).enumerate() {
-        let got = type_of_expr_in(a, vars, reg, components)?;
-        if got != *expected {
-            return err(format!(
-                "{what} `{cmd}` argument {} expects {}, got {}",
-                i + 1,
-                expected.as_str(),
-                got.as_str()
-            ));
+    let mut arg_tys = Vec::with_capacity(args.len());
+    // What the array argument turned out to hold; every later `AnyElem` is
+    // measured against it, which is how mixing element types is caught.
+    let mut elem: Option<Elem> = None;
+    for (i, (a, expected)) in args.iter().zip(&sig.params).enumerate() {
+        let hint = match expected {
+            Ty::AnyArray => None,
+            Ty::AnyElem => elem.map(Elem::ty),
+            t => Some(*t),
+        };
+        let got = type_of_expr_hinted(a, hint, vars, reg, components)?;
+        match expected {
+            Ty::AnyArray => match got.elem() {
+                Some(e) => elem = Some(e),
+                None => {
+                    return err(format!(
+                        "{what} `{cmd}` argument {} expects an array, got {}",
+                        i + 1,
+                        got.as_str()
+                    ))
+                }
+            },
+            Ty::AnyElem => {
+                let Some(e) = elem else {
+                    return err(format!(
+                        "{what} `{cmd}` argument {} has no array to take its type from",
+                        i + 1
+                    ));
+                };
+                if got != e.ty() {
+                    return err(format!(
+                        "{what} `{cmd}` argument {} must match what the array holds \
+                         ({}), got {}",
+                        i + 1,
+                        e.as_str(),
+                        got.as_str()
+                    ));
+                }
+            }
+            t => {
+                if got != *t {
+                    return err(format!(
+                        "{what} `{cmd}` argument {} expects {}, got {}",
+                        i + 1,
+                        t.as_str(),
+                        got.as_str()
+                    ));
+                }
+            }
         }
+        arg_tys.push(got);
     }
-    Ok(())
+    Ok(resolve_ret(sig, &arg_tys))
+}
+
+/// The concrete type a call yields, given what its arguments turned out to be.
+///
+/// `None` for a void command. Shared with the backend, which knows its
+/// arguments' types but not the expressions they came from.
+pub fn resolve_ret(sig: &Signature, arg_tys: &[Ty]) -> Option<Ty> {
+    let ret = sig.ret?;
+    let elem = sig
+        .params
+        .iter()
+        .zip(arg_tys)
+        .find_map(|(p, a)| match p {
+            Ty::AnyArray => a.elem(),
+            _ => None,
+        });
+    Some(match (ret, elem) {
+        (Ty::AnyArray, Some(e)) => Ty::Array(e),
+        (Ty::AnyElem, Some(e)) => e.ty(),
+        (t, _) => t,
+    })
 }

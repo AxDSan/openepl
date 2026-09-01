@@ -14,7 +14,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::sema::{callee, check_args_labeled, property_type, type_of_expr_in, Components};
+use crate::sema::{
+    callee, check_args_labeled, property_type, type_of_expr_hinted, type_of_expr_in, Components,
+};
 use crate::{Component, Expr, Item, Module, Registry, Stmt, StmtKind, Sub, Target, Ty};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -179,7 +181,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         if let Err(e) = check_initializer(&g.value, &global_types, reg) {
             push(format!("in initializer of `{}`: {e}", g.name), 0);
         }
-        match type_of_expr_in(&g.value, &HashMap::new(), reg, &components) {
+        match type_of_expr_hinted(&g.value, Some(g.ty), &HashMap::new(), reg, &components) {
             Ok(got) if got == g.ty => {}
             Ok(got) => push(format!(
                 "`var {}` declared {} but its initializer is {}",
@@ -263,7 +265,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                         value,
                         mutable,
                     } => {
-                        match type_of_expr_in(value, &vars, reg, &components) {
+                        match type_of_expr_hinted(value, Some(*ty), &vars, reg, &components) {
                             Ok(got) if got == *ty => {}
                             Ok(got) => push(format!(
                                 "in `{}`: `let {name}` declared {} but expression is {}",
@@ -320,7 +322,9 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                     ), stmt.line);
                                     }
                                 }
-                                match type_of_expr_in(value, &vars, reg, &components) {
+                                match type_of_expr_hinted(
+                                    value, Some(expected), &vars, reg, &components,
+                                ) {
                                     Ok(got) if got == expected => {}
                                     Ok(got) => push(format!(
                                         "in `{}`: `{name}` is {}, cannot assign {}",
@@ -402,7 +406,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                             sub.name, sub.name
                         ), stmt.line),
                         (Some(e), Some(want)) => {
-                            match type_of_expr_in(e, &vars, reg, &components) {
+                            match type_of_expr_hinted(e, Some(want), &vars, reg, &components) {
                                 Ok(got) if got == want => {}
                                 Ok(got) => push(format!(
                                     "in `{}`: `{}` returns {}, but this `return` gives {}",
@@ -415,6 +419,60 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                             }
                         }
                     },
+                    // `xs[i] = v` changes the array, not the binding, so it is
+                    // allowed on a `let` — see StmtKind::SetIndex.
+                    StmtKind::SetIndex { name, index, value } => {
+                        let target = vars.get(name).copied();
+                        match target {
+                            None => push(format!(
+                                "in `{}`: assignment to undefined variable `{name}`",
+                                sub.name
+                            ), stmt.line),
+                            Some(Ty::Array(_)) | Some(Ty::Bytes) => {
+                                let expected = match target {
+                                    Some(Ty::Array(e)) => e.ty(),
+                                    // A byte is written as a number, the same
+                                    // way it is read.
+                                    _ => Ty::Int,
+                                };
+                                match type_of_expr_in(index, &vars, reg, &components) {
+                                    Ok(Ty::Int) => {
+                                        if let Expr::IntLit(v) = index {
+                                            if *v < 0 {
+                                                push(format!(
+                                                    "in `{}`: index {v} is before the start of `{name}`",
+                                                    sub.name
+                                                ), stmt.line);
+                                            }
+                                        }
+                                    }
+                                    Ok(other) => push(format!(
+                                        "in `{}`: an index counts with `int` values, got {}",
+                                        sub.name,
+                                        other.as_str()
+                                    ), stmt.line),
+                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                }
+                                match type_of_expr_hinted(
+                                    value, Some(expected), &vars, reg, &components,
+                                ) {
+                                    Ok(got) if got == expected => {}
+                                    Ok(got) => push(format!(
+                                        "in `{}`: `{name}` holds {} values, cannot store {}",
+                                        sub.name,
+                                        expected.as_str(),
+                                        got.as_str()
+                                    ), stmt.line),
+                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                }
+                            }
+                            Some(other) => push(format!(
+                                "in `{}`: `{name}` is {} — only an array or a byte-set has elements",
+                                sub.name,
+                                other.as_str()
+                            ), stmt.line),
+                        }
+                    }
                     StmtKind::SetProperty {
                         component,
                         property,
@@ -569,6 +627,16 @@ fn check_initializer(
                 check_initializer(a, globals, reg)?;
             }
             Ok(())
+        }
+        Expr::ArrayLit(items) => {
+            for a in items {
+                check_initializer(a, globals, reg)?;
+            }
+            Ok(())
+        }
+        Expr::Index { base, index } => {
+            check_initializer(base, globals, reg)?;
+            check_initializer(index, globals, reg)
         }
         Expr::GetProperty { .. } => {
             Err("cannot read a component property before the form exists".to_string())
@@ -1057,6 +1125,83 @@ mod tests {
             e.iter().any(|e| e.msg.contains("cannot read module variable `a`")),
             "{e:?}"
         );
+    }
+
+    /// The aggregate rules, each with the line of the statement that broke it.
+    #[test]
+    fn array_diagnostics() {
+        for (src, want) in [
+            ("let xs: int[] = [1, \"two\"]", "element 2 is text"),
+            ("let xs: int[] = [1]\n  let a: int = xs[-1]", "before the start"),
+            ("let a: int = [1, 2][5]", "past the end"),
+            ("let xs: int[] = [1]\n  call print_int(xs)", "expects int, got int[]"),
+            ("let xs: int[] = [1]\n  let n: int = count(xs, 1)", "expects 1 argument"),
+            ("let n: int = count(5)", "expects an array"),
+            ("let xs: text[] = []\n  let n: int = index_of(xs, 1)", "must match what the array holds"),
+            ("let xs: int[] = []\n  let a: int = xs[\"one\"]", "an index counts with `int`"),
+            ("let a: int = 1\n  a[0] = 2", "only an array or a byte-set has elements"),
+            ("let xs: int[] = []\n  xs[0] = \"no\"", "holds int values, cannot store text"),
+        ] {
+            let m = parse(&format!("module m\nsub main\n  {src}\nend\n")).unwrap();
+            let errs = validate(&m, &reg()).unwrap_err();
+            assert!(
+                errs.iter().any(|e| e.msg.contains(want) && e.line > 0),
+                "expected {want:?} with a line, got {errs:?}"
+            );
+        }
+    }
+
+    /// An empty list has no element to infer from, so the declaration is the
+    /// only thing that can say what it holds — and without one it must be an
+    /// error rather than a guess.
+    #[test]
+    fn an_empty_list_needs_a_declared_type() {
+        let ok = parse("module m\nsub main\n  var xs: text[] = []\n  call print_int(count(xs))\nend\n")
+            .unwrap();
+        assert!(validate(&ok, &reg()).is_ok(), "{:?}", validate(&ok, &reg()));
+
+        let bad = parse("module m\nsub main\n  call print_int(count([]))\nend\n").unwrap();
+        let errs = validate(&bad, &reg()).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.msg.contains("does not say what it holds")),
+            "{errs:?}"
+        );
+    }
+
+    /// `append` is declared over "any array" and "whatever it holds", so the
+    /// checker has to give the call back the concrete type it was handed.
+    #[test]
+    fn a_generic_command_yields_a_concrete_type() {
+        let m = parse(
+            "module m\nsub main\n  var xs: text[] = []\n  xs = append(xs, \"a\")\n  \
+             call print_text(join(xs, \",\"))\nend\n",
+        )
+        .unwrap();
+        assert!(validate(&m, &reg()).is_ok(), "{:?}", validate(&m, &reg()));
+
+        let bad = parse(
+            "module m\nsub main\n  var xs: text[] = []\n  var ns: int[] = append(xs, \"a\")\nend\n",
+        )
+        .unwrap();
+        assert!(validate(&bad, &reg()).is_err());
+    }
+
+    /// Elements change; the binding does not. `let` promises the name keeps
+    /// meaning the same array, which is why writing one element is allowed.
+    #[test]
+    fn an_element_of_a_let_array_may_be_assigned() {
+        let m = parse("module m\nsub main\n  let xs: int[] = [1]\n  xs[0] = 2\nend\n").unwrap();
+        assert!(validate(&m, &reg()).is_ok(), "{:?}", validate(&m, &reg()));
+    }
+
+    #[test]
+    fn a_byte_set_is_indexed_as_numbers() {
+        let m = parse(
+            "module m\nsub main\n  var b: bytes = bytes_new(2)\n  b[0] = 65\n  \
+             call print_int(b[0])\nend\n",
+        )
+        .unwrap();
+        assert!(validate(&m, &reg()).is_ok(), "{:?}", validate(&m, &reg()));
     }
 
     #[test]

@@ -1326,3 +1326,64 @@ fn support_library_examples_pass_their_own_checks() {
         );
     }
 }
+
+/// Arrays and byte-sets, end to end.
+///
+/// `examples/arrays.oir` is a self-checking transcript: every line prints `ok`
+/// or `FAIL`, so the assertion is that nothing failed and that the file ran at
+/// all. It covers what unit tests cannot — that an out-of-range index really
+/// does report through the error slot in a built binary rather than reading
+/// whatever follows the array.
+#[test]
+fn arrays_example_passes_its_own_checks() {
+    let stdout = run(&build_as("arrays", "selfcheck"));
+    let failures: Vec<&str> = stdout.lines().filter(|l| l.contains("FAIL")).collect();
+    assert!(
+        failures.is_empty(),
+        "arrays reported failures:\n{}",
+        failures.join("\n")
+    );
+    assert!(!stdout.trim().is_empty(), "arrays produced no output");
+}
+
+/// An index past the end must fail loudly and hand back the sentinel — never
+/// the bytes that happen to sit after the array.
+#[test]
+fn an_out_of_range_index_reports_instead_of_reading_past_the_end() {
+    let dir = std::env::temp_dir().join("openepl_bounds_test");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = dir.join("bounds.oir");
+    std::fs::write(
+        &src,
+        "module bounds\nsub main\n  \
+         var xs: int[] = [11, 22]\n  \
+         call print_int(xs[9])\n  \
+         call print_int(last_error_code())\n  \
+         xs[9] = 1\n  \
+         call print_int(last_error_code())\n  \
+         call print_int(xs[1])\n  \
+         call print_int(last_error_code())\nend\n",
+    )
+    .expect("write");
+
+    let bin = dir.join("bounds");
+    let out = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", src.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+        .output()
+        .expect("run openepl");
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let text = run(&bin);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "0", "a failed read yields the sentinel: {text}");
+    assert_eq!(lines[1], "10007", "OE_ERR_OUT_OF_RANGE: {text}");
+    assert_eq!(lines[2], "10007", "a failed write reports too: {text}");
+    assert_eq!(lines[3], "22", "a good read still works: {text}");
+    assert_eq!(lines[4], "0", "success clears the error slot: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

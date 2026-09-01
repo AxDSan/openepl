@@ -3,6 +3,7 @@
 //! Subcommands:
 //!   openepl build <in.oir> [-o <out>]   parse -> lower -> clang -> native binary
 //!   openepl run   <in.oir> [-o <out>]   build, then execute it
+//!     …either with --release            optimised, hardened and stripped
 //!   openepl emit  <in.oir>              print the generated LLVM IR to stdout
 //!   openepl lsp                         language server (stdio) for editors
 //!   openepl commands                    list available commands and components
@@ -99,6 +100,7 @@ fn usage() {
          USAGE:\n  \
          openepl build <in.oir> [-o <out>]   compile to a native binary\n  \
          openepl run   <in.oir> [-o <out>]   compile and run\n  \
+         openepl build|run --release         …optimised, hardened and stripped\n  \
          openepl emit  <in.oir>              print generated LLVM IR\n  \
          openepl inspect <in.oir>            dump the form model (for the designer)\n  \
          openepl lsp                         language server over stdio (see docs/editors.md)\n  \
@@ -114,13 +116,16 @@ struct Io {
     output: Option<PathBuf>,
     /// Overrides the module's own `target` declaration when given.
     target: Option<Target>,
+    /// Optimise, harden and strip the built program.
+    release: bool,
 }
 
-/// Parse `<in.oir> [-o out] [--target kind]` from an argument slice.
+/// Parse `<in.oir> [-o out] [--target kind] [--release]` from an argument slice.
 fn parse_io(rest: &[String]) -> Result<Io, String> {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut target: Option<Target> = None;
+    let mut release = false;
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -136,6 +141,7 @@ fn parse_io(rest: &[String]) -> Result<Io, String> {
                     format!("unknown target `{v}` — expected console, gui, sharedlib or staticlib")
                 })?);
             }
+            "--release" => release = true,
             s if s.starts_with('-') => return Err(format!("unknown flag `{s}`")),
             s => {
                 if input.is_some() {
@@ -151,6 +157,7 @@ fn parse_io(rest: &[String]) -> Result<Io, String> {
         input,
         output,
         target,
+        release,
     })
 }
 
@@ -363,7 +370,7 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
     }
 
     let repo_root = find_repo_root().expect("runtime located during compile()");
-    if let Err(code) = clang_link(&ll_path, &repo_root, &plan, &out_bin, target) {
+    if let Err(code) = clang_link(&ll_path, &repo_root, &plan, &out_bin, target, io.release) {
         return code;
     }
     eprintln!("openepl: wrote {}", out_bin.display());
@@ -456,6 +463,7 @@ fn clang_link(
     plan: &libload::LibPlan,
     out_bin: &Path,
     target: Target,
+    release: bool,
 ) -> Result<(), i32> {
     let cfg = &plan.build;
     let driver = if cfg.needs_cxx { "clang++" } else { "clang" };
@@ -463,7 +471,6 @@ fn clang_link(
     // Flags every invocation needs, whether we are linking a program or
     // compiling one object at a time for an archive.
     let mut common: Vec<String> = vec![
-        "-O0".into(),
         "-ffunction-sections".into(),
         "-fdata-sections".into(),
         "-Wno-override-module".into(),
@@ -472,6 +479,13 @@ fn clang_link(
         "-I".into(),
         repo_root.join("runtime").display().to_string(),
     ];
+    // A debug build is the default and stays exactly as it was: fast to
+    // produce, and the shape a developer iterates on.
+    if release {
+        common.splice(0..0, release_cflags(driver, target.is_executable()));
+    } else {
+        common.insert(0, "-O0".into());
+    }
     for d in &cfg.include_dirs {
         common.push("-I".into());
         common.push(d.display().to_string());
@@ -522,50 +536,209 @@ fn clang_link(
         return build_archive(driver, &common, &inputs, out_bin);
     }
 
-    let mut cmd = Command::new(driver);
-    cmd.args(&common);
-    for (path, lang) in &inputs {
-        if let Some(l) = lang {
-            cmd.arg("-x").arg(l);
-        }
-        cmd.arg(path);
-    }
-    for a in &cfg.link_args {
-        cmd.arg(a);
-    }
+    // Everything after the inputs, in the order the link has always used it.
+    let mut libs: Vec<String> = cfg.link_args.clone();
     match libload::pkg_config_flags(&cfg.pkg_config, "--libs") {
-        Ok(flags) => {
-            for f in flags {
-                cmd.arg(f);
-            }
-        }
+        Ok(flags) => libs.extend(flags),
         Err(e) => {
             eprintln!("openepl: {e}");
             return Err(1);
         }
     }
-    cmd.arg("-lm"); // libm for the floating-point commands
+    libs.push("-lm".into()); // libm for the floating-point commands
     if target == Target::SharedLib {
-        cmd.arg("-shared");
+        libs.push("-shared".into());
     } else {
         // Dead-strip: the headline property of the BlackMoon model.
         // Only for programs — a library must keep exports no host has linked
         // yet, and --gc-sections would drop every one of them.
-        cmd.arg("-Wl,--gc-sections");
+        libs.push("-Wl,--gc-sections".into());
     }
-    cmd.arg("-o").arg(out_bin);
 
-    match cmd.status() {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => {
-            eprintln!("openepl: clang failed with status {s}");
-            Err(1)
+    let link = |common: &[String], ldflags: &[String], quiet: bool| -> Result<bool, i32> {
+        let mut cmd = Command::new(driver);
+        cmd.args(common);
+        for (path, lang) in &inputs {
+            if let Some(l) = lang {
+                cmd.arg("-x").arg(l);
+            }
+            cmd.arg(path);
         }
-        Err(e) => {
-            eprintln!("openepl: could not invoke clang: {e}");
+        cmd.args(&libs);
+        cmd.args(ldflags);
+        cmd.arg("-o").arg(out_bin);
+        if quiet {
+            // Held back rather than dropped: a first attempt that succeeds
+            // still has its warnings to say.
+            match cmd.output() {
+                Ok(o) => {
+                    if o.status.success() {
+                        eprint!("{}", String::from_utf8_lossy(&o.stderr));
+                    }
+                    Ok(o.status.success())
+                }
+                Err(e) => {
+                    eprintln!("openepl: could not invoke {driver}: {e}");
+                    Err(1)
+                }
+            }
+        } else {
+            match cmd.status() {
+                Ok(s) if s.success() => Ok(true),
+                Ok(s) => {
+                    eprintln!("openepl: clang failed with status {s}");
+                    Ok(false)
+                }
+                Err(e) => {
+                    eprintln!("openepl: could not invoke clang: {e}");
+                    Err(1)
+                }
+            }
+        }
+    };
+
+    let ldflags = if release {
+        release_ldflags(driver, &common, target.is_executable())
+    } else {
+        Vec::new()
+    };
+
+    // A probe proves the driver accepts -pie; only the real link proves the
+    // objects allow it. A vendored static library built without -fPIC — the UI
+    // stack is one — cannot go into a position-independent program, and that
+    // is a fact about the dependency, not a reason to fail the build.
+    let pie = ldflags.iter().any(|f| f.ends_with("pie"));
+    if pie {
+        if link(&common, &ldflags, true)? {
+            return Ok(());
+        }
+        eprintln!(
+            "openepl: this program links a library that is not position-independent; \
+             building the release without PIE"
+        );
+        let common: Vec<String> = common.iter().filter(|f| *f != "-fPIE").cloned().collect();
+        let ldflags: Vec<String> = ldflags
+            .iter()
+            .filter(|f| !f.ends_with("pie"))
+            .cloned()
+            .collect();
+        return if link(&common, &ldflags, false)? {
+            Ok(())
+        } else {
             Err(1)
+        };
+    }
+
+    if link(&common, &ldflags, false)? {
+        Ok(())
+    } else {
+        Err(1)
+    }
+}
+
+/// One hardening requirement, as the argument lists that would satisfy it,
+/// best first. `-pie` and `-Wl,-pie` ask the same thing of the driver and of
+/// the linker, and which of them works is a property of the local install:
+/// with GNU ld, `-Wl,-pie` links the non-PIE start files and fails.
+type Requirement = Vec<Vec<String>>;
+
+fn req(alternatives: &[&[&str]]) -> Requirement {
+    alternatives
+        .iter()
+        .map(|alt| alt.iter().map(|s| s.to_string()).collect())
+        .collect()
+}
+
+/// The compile-time half of the release profile, in the order it must be
+/// probed: `_FORTIFY_SOURCE` is a no-op that warns unless optimisation is
+/// already on, so `-O2` has to be accepted before it is offered.
+fn release_cflags(driver: &str, executable: bool) -> Vec<String> {
+    let mut want = vec![
+        req(&[&["-O2"]]),
+        // The distribution may have fortified the compiler already, and
+        // redefining the macro is a warning — which the probe reads as a no.
+        req(&[&["-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2"]]),
+        req(&[&["-fstack-protector-strong"]]),
+    ];
+    // Position independence for a program only: libraries are compiled -fPIC
+    // already, and -fPIE would contradict it.
+    if executable {
+        want.push(req(&[&["-fPIE"]]));
+    }
+    probe(driver, &[], &want, &[])
+}
+
+/// The link-time half, probed on top of the compile flags that were accepted —
+/// `-pie` is only meaningful over objects compiled `-fPIE`.
+///
+/// `-Wl,-s` is the strip: done in the link it needs no second tool and cannot
+/// leave a half-stripped file behind when it fails.
+fn release_ldflags(driver: &str, cflags: &[String], executable: bool) -> Vec<String> {
+    let mut want: Vec<Requirement> = Vec::new();
+    if executable {
+        want.push(req(&[&["-pie"], &["-Wl,-pie"]]));
+    }
+    want.push(req(&[&["-Wl,-z,relro"]]));
+    want.push(req(&[&["-Wl,-z,now"]]));
+    want.push(req(&[&["-Wl,-s"]]));
+    // A linker answers an option it does not know with a warning and carries
+    // on, which would leave us believing in hardening that is not there.
+    probe(driver, cflags, &want, &["-Wl,--fatal-warnings".to_string()])
+}
+
+/// Ask the local toolchain which of `want` it actually accepts, by building a
+/// trivial program with each requirement in turn on top of the ones already
+/// accepted.
+///
+/// A flag this compiler rejects is dropped and said out loud. Passing it
+/// regardless would be worse than leaving it out: the build still succeeds and
+/// the binary is not hardened, which is the failure nobody notices.
+fn probe(driver: &str, base: &[String], want: &[Requirement], extra: &[String]) -> Vec<String> {
+    let dir = std::env::temp_dir().join(format!("openepl_probe_{}", std::process::id()));
+    // The extension picks the language: clang++ handed a .c file treats it as
+    // C++ and says so as a deprecation warning, which -Werror turns into a
+    // rejection of every flag we ask about.
+    let src = dir.join(if driver.ends_with("++") {
+        "probe.cpp"
+    } else {
+        "probe.c"
+    });
+    if std::fs::create_dir_all(&dir).is_err()
+        || std::fs::write(&src, "int main(void){return 0;}\n").is_err()
+    {
+        eprintln!("openepl: cannot write a probe program — building the release unhardened");
+        return Vec::new();
+    }
+    let out = dir.join("probe");
+
+    let mut taken: Vec<String> = Vec::new();
+    for alternatives in want {
+        let accepted = alternatives.iter().find(|alt| {
+            Command::new(driver)
+                .args(base)
+                .args(&taken)
+                .args(*alt)
+                .args(extra)
+                .arg("-Werror")
+                .arg(&src)
+                .arg("-o")
+                .arg(&out)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+        match accepted {
+            Some(alt) => taken.extend(alt.iter().cloned()),
+            None => eprintln!(
+                "openepl: {driver} does not accept {} — building the release without it",
+                alternatives[0].join(" ")
+            ),
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
+    taken
 }
 
 /// Compile each input to its own object and archive them.

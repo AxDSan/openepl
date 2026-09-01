@@ -9,9 +9,9 @@
 # `<root>/runtime` is what makes the tree relocatable with no extra code and no
 # environment variables.
 #
-# NOTE ON THE WORD "RELEASE": this packages the toolchain and the IDE. It is not
-# the G8 hardened release profile for programs *users* build — that is Phase 4
-# and does not exist yet.
+# NOTE ON THE WORD "RELEASE": this packages the toolchain and the IDE. The
+# hardened profile for programs *users* build is a different thing entirely, and
+# it is theirs to ask for: `openepl build --release`.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

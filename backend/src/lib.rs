@@ -16,7 +16,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
-use openepl_ir::{BinOp, CmpOp, Expr, LogicalOp, Module, Registry, Signature, Ty};
+use openepl_ir::sema::resolve_ret;
+use openepl_ir::{BinOp, CmpOp, Elem, Expr, LogicalOp, Module, Registry, Signature, Ty};
 
 /// Accessibility role for a form root (`OE_ROLE_WINDOW`, abi/openepl_abi.h).
 fn form_role() -> i32 {
@@ -43,10 +44,16 @@ fn llvm_ty(t: Ty) -> &'static str {
         Ty::Int => "i32",
         Ty::Int64 => "i64",
         Ty::Double => "double",
-        Ty::Text => "ptr",
+        // Text, byte-sets and arrays are all one pointer to runtime-owned
+        // storage; the aggregates cost the marshaling path nothing because a
+        // pointer already fits the slot's 8-byte value.
+        Ty::Text | Ty::Bytes | Ty::Array(_) => "ptr",
         // Bool is int-sized, matching the ABI's BOOL: `icmp` yields i1, which we
         // widen immediately so slot marshaling has one less width to handle.
         Ty::Bool => "i32",
+        // Signature-only types; `resolve_ret` replaces them with what the call
+        // actually produced before any value carries one.
+        Ty::AnyArray | Ty::AnyElem => "ptr",
     }
 }
 
@@ -90,6 +97,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         vars: HashMap::new(),
         used: BTreeSet::new(),
         ui_used: BTreeSet::new(),
+        aggr_used: BTreeSet::new(),
         globals: HashMap::new(),
         allocas: Vec::new(),
         handles: HashMap::new(),
@@ -97,6 +105,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         tmp: 0,
         label: 0,
         loops: Vec::new(),
+        ret_ty: None,
         needs_notify: false,
     };
     for g in m.globals() {
@@ -120,6 +129,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         lo.vars.clear();
         lo.allocas.clear();
         lo.label = 0;
+        lo.ret_ty = sub.ret;
         // Parameters arrive in SSA registers; copy each into a stack slot so
         // the rest of lowering sees an ordinary local.
         for (i, (name, ty)) in sub.params.iter().enumerate() {
@@ -172,7 +182,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         lo.vars.clear();
         lo.allocas.clear();
         for g in m.globals() {
-            let v = lo.eval(&g.value)?;
+            let v = lo.eval_hinted(&g.value, Some(g.ty))?;
             lo.store_global(&g.name, &v);
         }
         let init = format!(
@@ -194,7 +204,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     lo.allocas.clear();
     // Module variables are initialised before anything else can observe them.
     for g in m.globals() {
-        let v = lo.eval(&g.value)?;
+        let v = lo.eval_hinted(&g.value, Some(g.ty))?;
         lo.store_global(&g.name, &v);
     }
     if let Some(form) = forms.first() {
@@ -261,6 +271,14 @@ struct Lowerer<'a> {
     used: BTreeSet<String>,
     /// UI-interface symbols referenced (declared separately; see finish()).
     ui_used: BTreeSet<&'static str>,
+    /// Array / byte-set helpers referenced.
+    ///
+    /// These are plain C functions rather than slot-ABI commands: indexing is
+    /// syntax, and marshaling an argv array to read one element would cost more
+    /// code than the element access itself. They move raw 64-bit values, which
+    /// is exactly what a slot's value field already holds, so the same
+    /// reinterpretation serves both.
+    aggr_used: BTreeSet<&'static str>,
     /// Component id -> its runtime widget handle.
     ///
     /// Handles are assigned by creation order, and creation order is fully
@@ -277,6 +295,9 @@ struct Lowerer<'a> {
     /// `continue` must land on a `for`'s increment block, not its condition —
     /// jumping to the condition would never advance the counter.
     loops: Vec<(String, String)>,
+    /// The return type of the subroutine being lowered, so `return []` knows
+    /// what an empty list should hold.
+    ret_ty: Option<Ty>,
     /// Whether any lowered code aborts through `oe_notify`, which is declared
     /// only when it is actually called.
     needs_notify: bool,
@@ -513,7 +534,7 @@ impl Lowerer<'_> {
                 value,
                 mutable: _,
             } => {
-                let v = self.eval(value)?;
+                let v = self.eval_hinted(value, Some(*ty))?;
                 if v.ty != *ty {
                     return err(format!(
                         "type mismatch in `let {name}`: declared {}, expression is {}",
@@ -533,7 +554,12 @@ impl Lowerer<'_> {
                 Ok(())
             }
             StmtKind::Assign { name, value } => {
-                let v = self.eval(value)?;
+                let want = self
+                    .vars
+                    .get(name)
+                    .map(|(_, t)| *t)
+                    .or_else(|| self.globals.get(name).copied());
+                let v = self.eval_hinted(value, want)?;
                 if let Some((slot, ty)) = self.vars.get(name).cloned() {
                     if v.ty != ty {
                         return err(format!("cannot assign {} to `{name}`", v.ty.as_str()));
@@ -551,6 +577,58 @@ impl Lowerer<'_> {
                     Ok(())
                 } else {
                     err(format!("assignment to undefined variable `{name}`"))
+                }
+            }
+            StmtKind::SetIndex { name, index, value } => {
+                let target = self.eval(&Expr::Var(name.clone()))?;
+                let i = self.eval(index)?;
+                if i.ty != Ty::Int {
+                    return err(format!(
+                        "an index counts with `int` values, got {}",
+                        i.ty.as_str()
+                    ));
+                }
+                match target.ty {
+                    Ty::Bytes => {
+                        let v = self.eval(value)?;
+                        if v.ty != Ty::Int {
+                            return err(format!(
+                                "a byte is written as an `int`, got {}",
+                                v.ty.as_str()
+                            ));
+                        }
+                        self.aggr_used.insert("oe_bin_set");
+                        writeln!(
+                            self.body,
+                            "  call void @oe_bin_set(ptr {}, i32 {}, i32 {})",
+                            target.operand, i.operand, v.operand
+                        )
+                        .unwrap();
+                        Ok(())
+                    }
+                    Ty::Array(elem) => {
+                        let v = self.eval_hinted(value, Some(elem.ty()))?;
+                        if v.ty != elem.ty() {
+                            return err(format!(
+                                "`{name}` holds {} values, cannot store {}",
+                                elem.as_str(),
+                                v.ty.as_str()
+                            ));
+                        }
+                        let raw = self.emit_arg_i64(&v);
+                        self.aggr_used.insert("oe_ary_set");
+                        writeln!(
+                            self.body,
+                            "  call void @oe_ary_set(ptr {}, i32 {}, i64 {raw})",
+                            target.operand, i.operand
+                        )
+                        .unwrap();
+                        Ok(())
+                    }
+                    other => err(format!(
+                        "`{name}` is {} — only an array or a byte-set has elements",
+                        other.as_str()
+                    )),
                 }
             }
             StmtKind::Call { cmd, args } => {
@@ -663,7 +741,7 @@ impl Lowerer<'_> {
                 match value {
                     None => writeln!(self.body, "  ret void").unwrap(),
                     Some(e) => {
-                        let v = self.eval(e)?;
+                        let v = self.eval_hinted(e, self.ret_ty)?;
                         writeln!(self.body, "  ret {} {}", llvm_ty(v.ty), v.operand).unwrap();
                     }
                 }
@@ -707,7 +785,11 @@ impl Lowerer<'_> {
         match v.ty {
             Ty::Text => Ok(v.operand.clone()),
             Ty::Bool => err("cannot use a truth value where text is expected"),
-            Ty::Int | Ty::Int64 | Ty::Double => {
+            other if !other.is_numeric() => err(format!(
+                "cannot use {} where text is expected",
+                other.as_str()
+            )),
+            _ => {
                 let sym = match v.ty {
                     Ty::Int => "oe_int_to_text",
                     Ty::Int64 => "oe_int64_to_text",
@@ -891,7 +973,120 @@ impl Lowerer<'_> {
     }
 
     fn eval(&mut self, e: &Expr) -> Result<Val, LowerError> {
+        self.eval_hinted(e, None)
+    }
+
+    /// As `eval`, told the type the destination declares.
+    ///
+    /// Only an empty `[]` needs it — there is no element to take a type from,
+    /// so the destination's declaration is the only thing that knows. The
+    /// validator has already agreed the hint fits.
+    fn eval_hinted(&mut self, e: &Expr, hint: Option<Ty>) -> Result<Val, LowerError> {
+        if let Expr::ArrayLit(items) = e {
+            let elem = match (items.first(), hint) {
+                (Some(first), _) => {
+                    let v = self.eval(first)?;
+                    Elem::from_ty(v.ty).ok_or_else(|| LowerError {
+                        msg: format!("a list cannot hold {} values", v.ty.as_str()),
+                    })?
+                }
+                (None, Some(Ty::Array(elem))) => elem,
+                (None, _) => {
+                    return err("`[]` here does not say what it holds");
+                }
+            };
+            return self.eval_array_lit(elem, items);
+        }
+        self.eval_inner(e)
+    }
+
+    /// `[a, b, c]` — one allocation of the right length, then one store per
+    /// element. Building it through `oe_ary_set` rather than a constant
+    /// initializer is what lets an element be any expression.
+    fn eval_array_lit(&mut self, elem: Elem, items: &[Expr]) -> Result<Val, LowerError> {
+        self.aggr_used.insert("oe_ary_new");
+        let arr = self.fresh();
+        writeln!(
+            self.body,
+            "  {arr} = call ptr @oe_ary_new(i32 {}, i32 {})",
+            elem.ty().sdt_tag(),
+            items.len()
+        )
+        .unwrap();
+        for (i, item) in items.iter().enumerate() {
+            let v = self.eval(item)?;
+            if v.ty != elem.ty() {
+                return err(format!(
+                    "every element of a list has one type: expected {}, got {}",
+                    elem.as_str(),
+                    v.ty.as_str()
+                ));
+            }
+            let raw = self.emit_arg_i64(&v);
+            self.aggr_used.insert("oe_ary_set");
+            writeln!(
+                self.body,
+                "  call void @oe_ary_set(ptr {arr}, i32 {i}, i64 {raw})"
+            )
+            .unwrap();
+        }
+        Ok(Val {
+            ty: Ty::Array(elem),
+            operand: arr,
+        })
+    }
+
+    /// Read one element. The bounds check lives in the runtime helper, which
+    /// reports through the error slot — reading past the end must never reach
+    /// whatever is next in memory.
+    fn eval_index(&mut self, base: &Expr, index: &Expr) -> Result<Val, LowerError> {
+        let b = self.eval(base)?;
+        let i = self.eval(index)?;
+        if i.ty != Ty::Int {
+            return err(format!(
+                "an index counts with `int` values, got {}",
+                i.ty.as_str()
+            ));
+        }
+        match b.ty {
+            Ty::Bytes => {
+                self.aggr_used.insert("oe_bin_at");
+                let t = self.fresh();
+                writeln!(
+                    self.body,
+                    "  {t} = call i32 @oe_bin_at(ptr {}, i32 {})",
+                    b.operand, i.operand
+                )
+                .unwrap();
+                Ok(Val {
+                    ty: Ty::Int,
+                    operand: t,
+                })
+            }
+            Ty::Array(elem) => {
+                self.aggr_used.insert("oe_ary_get");
+                let raw = self.fresh();
+                writeln!(
+                    self.body,
+                    "  {raw} = call i64 @oe_ary_get(ptr {}, i32 {})",
+                    b.operand, i.operand
+                )
+                .unwrap();
+                let res = self.emit_ret_from_i64(elem.ty(), &raw);
+                Ok(Val {
+                    ty: elem.ty(),
+                    operand: res,
+                })
+            }
+            other => err(format!("{} is not something you can index", other.as_str())),
+        }
+    }
+
+    fn eval_inner(&mut self, e: &Expr) -> Result<Val, LowerError> {
         match e {
+            // Intercepted by `eval_hinted`, which is the only caller.
+            Expr::ArrayLit(_) => err("`[]` here does not say what it holds"),
+            Expr::Index { base, index } => self.eval_index(base, index),
             Expr::IntLit(v) => {
                 if let Ok(v32) = i32::try_from(*v) {
                     Ok(Val {
@@ -1180,7 +1375,7 @@ impl Lowerer<'_> {
                 writeln!(self.body, "  {t} = bitcast double {} to i64", v.operand).unwrap();
                 t
             }
-            Ty::Text => {
+            _ => {
                 let t = self.fresh();
                 writeln!(self.body, "  {t} = ptrtoint ptr {} to i64", v.operand).unwrap();
                 t
@@ -1202,7 +1397,7 @@ impl Lowerer<'_> {
                 writeln!(self.body, "  {t} = bitcast i64 {raw} to double").unwrap();
                 t
             }
-            Ty::Text => {
+            _ => {
                 let t = self.fresh();
                 writeln!(self.body, "  {t} = inttoptr i64 {raw} to ptr").unwrap();
                 t
@@ -1281,19 +1476,51 @@ impl Lowerer<'_> {
         }
 
         // Lower and type-check each argument first (may emit arithmetic).
-        let mut arg_vals = Vec::new();
+        // `AnyArray`/`AnyElem` parameters take their meaning from the array
+        // argument this call was given; `resolve_ret` reads the same thing back
+        // out for the result, so the two cannot drift.
+        let mut arg_vals: Vec<Val> = Vec::new();
+        let mut elem: Option<Elem> = None;
         for (i, a) in args.iter().enumerate() {
-            let v = self.eval(a)?;
-            if v.ty != sig.params[i] {
-                return err(format!(
-                    "command `{cmd}` argument {} expects {}, got {}",
-                    i + 1,
-                    sig.params[i].as_str(),
-                    v.ty.as_str()
-                ));
+            let want = match sig.params[i] {
+                Ty::AnyArray => None,
+                Ty::AnyElem => elem.map(Elem::ty),
+                t => Some(t),
+            };
+            let v = self.eval_hinted(a, want)?;
+            match sig.params[i] {
+                Ty::AnyArray => match v.ty.elem() {
+                    Some(e) => elem = Some(e),
+                    None => {
+                        return err(format!(
+                            "command `{cmd}` argument {} expects an array, got {}",
+                            i + 1,
+                            v.ty.as_str()
+                        ))
+                    }
+                },
+                Ty::AnyElem => {
+                    if Some(v.ty) != elem.map(Elem::ty) {
+                        return err(format!(
+                            "command `{cmd}` argument {} does not match what the array holds",
+                            i + 1
+                        ));
+                    }
+                }
+                t if v.ty != t => {
+                    return err(format!(
+                        "command `{cmd}` argument {} expects {}, got {}",
+                        i + 1,
+                        t.as_str(),
+                        v.ty.as_str()
+                    ))
+                }
+                _ => {}
             }
             arg_vals.push(v);
         }
+        let arg_tys: Vec<Ty> = arg_vals.iter().map(|v| v.ty).collect();
+        let ret_ty = resolve_ret(&sig, &arg_tys);
 
         let argc = arg_vals.len();
         // Return slot (always allocated; ignored for void commands).
@@ -1345,7 +1572,7 @@ impl Lowerer<'_> {
         )
         .unwrap();
 
-        match sig.ret {
+        match ret_ty {
             None => Ok(None),
             Some(rt) => {
                 let valp = self.fresh();
@@ -1393,7 +1620,7 @@ impl Lowerer<'_> {
         for (name, ty) in gnames {
             let zero = match ty {
                 Ty::Double => "0.0",
-                Ty::Text => "null",
+                t if t.is_pointer() => "null",
                 _ => "0",
             };
             writeln!(
@@ -1447,6 +1674,21 @@ impl Lowerer<'_> {
             writeln!(out, "{decl}").unwrap();
         }
         if !self.ui_used.is_empty() {
+            out.push('\n');
+        }
+
+        for sym in &self.aggr_used {
+            let decl = match *sym {
+                "oe_ary_new" => "declare ptr @oe_ary_new(i32, i32)",
+                "oe_ary_get" => "declare i64 @oe_ary_get(ptr, i32)",
+                "oe_ary_set" => "declare void @oe_ary_set(ptr, i32, i64)",
+                "oe_bin_at" => "declare i32 @oe_bin_at(ptr, i32)",
+                "oe_bin_set" => "declare void @oe_bin_set(ptr, i32, i32)",
+                other => panic!("undeclared aggregate symbol {other}"),
+            };
+            writeln!(out, "{decl}").unwrap();
+        }
+        if !self.aggr_used.is_empty() {
             out.push('\n');
         }
 
@@ -1652,6 +1894,56 @@ mod tests {
         assert_eq!(ends.len(), 2, "{ll}");
         let inner = ends[0].trim_end_matches(':');
         assert!(ll.contains(&format!("br label %{inner}")), "{ll}");
+    }
+
+    /// Indexing must NOT go through the slot ABI: marshaling an argv array to
+    /// read one element would cost more code than the read.
+    #[test]
+    fn indexing_calls_the_helper_directly() {
+        let ll = lower(
+            "module m\nsub main\n  var xs: int[] = [7, 8]\n  xs[0] = xs[1]\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("call ptr @oe_ary_new(i32 3, i32 2)"), "{ll}");
+        assert!(ll.contains("call i64 @oe_ary_get(ptr"), "{ll}");
+        assert!(ll.contains("call void @oe_ary_set(ptr"), "{ll}");
+        assert!(ll.contains("declare i64 @oe_ary_get(ptr, i32)"), "{ll}");
+    }
+
+    /// An array is a pointer in the slot's 8-byte value field, marshalled
+    /// exactly the way text already is — that is what let aggregates arrive
+    /// without widening anything.
+    #[test]
+    fn an_array_marshals_as_a_pointer() {
+        let ll = lower(
+            "module m\nsub main\n  var xs: int[] = [1]\n  call print_int(count(xs))\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("ptrtoint ptr"), "{ll}");
+        // OE_SDT_ARRAY_FLAG | OE_SDT_INT
+        assert!(ll.contains("store i32 259,"), "{ll}");
+    }
+
+    #[test]
+    fn a_byte_set_indexes_through_its_own_helper() {
+        let ll = lower(
+            "module m\nsub main\n  var b: bytes = bytes_new(1)\n  b[0] = 65\n  \
+             call print_int(b[0])\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("call void @oe_bin_set(ptr"), "{ll}");
+        assert!(ll.contains("call i32 @oe_bin_at(ptr"), "{ll}");
+    }
+
+    /// A module-level array starts as no array at all, and a pointer's zero is
+    /// `null` — `0` would not even assemble.
+    #[test]
+    fn a_module_level_array_is_null_initialised() {
+        let ll = lower(
+            "module m\nvar xs: int[] = [1]\nsub main\n  call print_int(count(xs))\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("= internal global ptr null"), "{ll}");
     }
 
     #[test]

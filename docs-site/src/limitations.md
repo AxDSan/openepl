@@ -11,9 +11,16 @@ platform's convention, but no other platform is tested or shipped.
 
 ## Programs you build
 
-**No hardened release profile.** Programs are ordinary native binaries. The
-stripped, hard-to-decompile release output is not implemented yet, so do not
-rely on a built program to keep its source shape private.
+**A release build is hardened, not hidden.** `openepl build --release`
+compiles at `-O2` with `_FORTIFY_SOURCE`, a stack protector, full RELRO with
+symbols bound at load time, position independence, and no symbol table — see
+[Build targets](./build-targets.md). That is a smaller, faster, harder-to-attack
+program; it is not obfuscation. A native binary can always be disassembled, so
+do not rely on one to keep an algorithm secret.
+
+**A windowed release build is not position independent.** The vendored UI stack
+is compiled without `-fPIC` and cannot go into a PIE, so a `gui` release says so
+and links without it. Console programs and libraries are unaffected.
 
 **No debugger.** You get a program's output and its exit code in the console,
 not breakpoints, stepping or variable inspection.

@@ -23,8 +23,51 @@ pub use parser::{parse, ParseError};
 pub use registry::Registry;
 pub use validate::{validate, ValidateError};
 
+/// What an array holds.  A separate, deliberately small enum rather than a
+/// `Box<Ty>`: arrays of arrays are out of scope, and spelling that in the type
+/// itself means the checker never has to discover it — `Ty` also stays `Copy`,
+/// which is what every `vars.get(..).copied()` in the checker relies on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Elem {
+    Int,
+    Int64,
+    Double,
+    Text,
+    Bool,
+}
+
+impl Elem {
+    /// The element type as an ordinary type.
+    pub fn ty(self) -> Ty {
+        match self {
+            Elem::Int => Ty::Int,
+            Elem::Int64 => Ty::Int64,
+            Elem::Double => Ty::Double,
+            Elem::Text => Ty::Text,
+            Elem::Bool => Ty::Bool,
+        }
+    }
+
+    /// The element types a scalar can be stored as; `None` for anything an
+    /// array cannot hold (an array, a byte-set).
+    pub fn from_ty(t: Ty) -> Option<Elem> {
+        Some(match t {
+            Ty::Int => Elem::Int,
+            Ty::Int64 => Elem::Int64,
+            Ty::Double => Elem::Double,
+            Ty::Text => Elem::Text,
+            Ty::Bool => Elem::Bool,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.ty().as_str()
+    }
+}
+
 /// Slot data-type tags — the ABI type system.  Phase 1
-/// exposes the numeric + text core.
+/// exposes the numeric + text core; Phase 3 adds the aggregates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// `SDT_INT` — 32-bit signed integer.
@@ -38,6 +81,23 @@ pub enum Ty {
     /// `SDT_BOOL` — truth value. Carried as an int-sized value, matching the
     /// ABI's `BOOL`, so slot marshaling has one less width to juggle.
     Bool,
+    /// `SDT_BIN` — a byte-set: raw bytes, the type a PNG lives in.
+    Bytes,
+    /// An array of `Elem`. The value in the slot is a pointer to a
+    /// runtime-owned array object, exactly as text is a pointer.
+    Array(Elem),
+    /// **Signature-only**: "an array, whatever it holds".
+    ///
+    /// `count`, `sort` and `join` do not care what is in the array — the array
+    /// carries its element tag at run time. Without this they would need one
+    /// command per element type, which is five spellings of one idea. It never
+    /// names a variable: there is no surface syntax for it.
+    AnyArray,
+    /// **Signature-only**: "whatever THIS call's array argument holds".
+    ///
+    /// This is what makes `append(xs, 5)` on a `text[]` an error with a line
+    /// number instead of a silently mistyped element.
+    AnyElem,
 }
 
 impl Ty {
@@ -49,10 +109,22 @@ impl Ty {
             Ty::Double => "double",
             Ty::Text => "text",
             Ty::Bool => "bool",
+            Ty::Bytes => "bytes",
+            Ty::Array(Elem::Int) => "int[]",
+            Ty::Array(Elem::Int64) => "int64[]",
+            Ty::Array(Elem::Double) => "double[]",
+            Ty::Array(Elem::Text) => "text[]",
+            Ty::Array(Elem::Bool) => "bool[]",
+            // Read in a signature, not in a sentence: `openepl commands` shows
+            // `append(array, element) -> array`. The diagnostics that need a
+            // phrase spell it out themselves.
+            Ty::AnyArray => "array",
+            Ty::AnyElem => "element",
         }
     }
 
-    /// Parse a type keyword; `None` if unknown.
+    /// Parse a type keyword; `None` if unknown.  The `[]` suffix is the
+    /// parser's business — it is syntax, not a keyword.
     pub fn from_keyword(s: &str) -> Option<Ty> {
         Some(match s {
             "int" => Ty::Int,
@@ -60,6 +132,7 @@ impl Ty {
             "double" => Ty::Double,
             "text" => Ty::Text,
             "bool" => Ty::Bool,
+            "bytes" => Ty::Bytes,
             _ => return None,
         })
     }
@@ -69,26 +142,63 @@ impl Ty {
         matches!(self, Ty::Int | Ty::Int64 | Ty::Double)
     }
 
+    /// What this array holds, or `None` if it is not one array in particular.
+    pub fn elem(self) -> Option<Elem> {
+        match self {
+            Ty::Array(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Whether a value of this type is a pointer in the slot's value union —
+    /// text and both aggregates. The backend marshals all of them identically.
+    pub fn is_pointer(self) -> bool {
+        matches!(
+            self,
+            Ty::Text | Ty::Bytes | Ty::Array(_) | Ty::AnyArray | Ty::AnyElem
+        )
+    }
+
     /// The ABI `SDT_*` numeric tag (must match `abi/openepl_abi.h`).
+    ///
+    /// Array-ness is a flag bit above the element tag rather than a block of
+    /// new numbers, because every `SDT_*` value is frozen: `int[]` has to be
+    /// expressible without moving `int`.
     pub fn sdt_tag(self) -> i32 {
+        const ARRAY: i32 = 0x100; // OE_SDT_ARRAY_FLAG
+        const ALL: i32 = 255; // OE_SDT_ALL
         match self {
             Ty::Int => 3,    // OE_SDT_INT
             Ty::Int64 => 4,  // OE_SDT_INT64
             Ty::Double => 6, // OE_SDT_DOUBLE
             Ty::Text => 9,   // OE_SDT_TEXT
             Ty::Bool => 8,   // OE_SDT_BOOL
+            Ty::Bytes => 10, // OE_SDT_BIN
+            Ty::Array(e) => ARRAY | e.ty().sdt_tag(),
+            Ty::AnyArray => ARRAY | ALL,
+            Ty::AnyElem => ALL,
         }
     }
 
     /// Map an ABI `SDT_*` tag back to an IR type; `None` for tags not modeled in
     /// this phase (or `OE_SDT_NULL`, used for void returns).
     pub fn from_sdt_tag(tag: i32) -> Option<Ty> {
+        const ARRAY: i32 = 0x100;
+        const ALL: i32 = 255;
+        if tag == ARRAY | ALL {
+            return Some(Ty::AnyArray);
+        }
+        if tag & ARRAY != 0 {
+            return Elem::from_ty(Ty::from_sdt_tag(tag & !ARRAY)?).map(Ty::Array);
+        }
         Some(match tag {
             3 => Ty::Int,
             4 => Ty::Int64,
             6 => Ty::Double,
             9 => Ty::Text,
             8 => Ty::Bool,
+            10 => Ty::Bytes,
+            ALL => Ty::AnyElem,
             _ => return None,
         })
     }
@@ -186,6 +296,17 @@ pub enum Expr {
     Logical(LogicalOp, Box<Expr>, Box<Expr>),
     /// `not EXPR`.
     Not(Box<Expr>),
+    /// `xs[i]` — one element of an array, or one byte of a byte-set (which
+    /// reads as an `int` 0..255). Bounds are checked at run time; a constant
+    /// index the checker can see is checked before the program is built.
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+    },
+    /// `[a, b, c]` — a new array. Every element must share one type; an empty
+    /// `[]` takes its type from where it is going, which is why the checker
+    /// carries an expected type rather than inferring bottom-up alone.
+    ArrayLit(Vec<Expr>),
     /// `-EXPR` — arithmetic negation of a numeric value.
     ///
     /// Negated *literals* never reach here: the parser folds `-5` into
@@ -228,6 +349,16 @@ pub enum StmtKind {
     /// `call CMD(args...)` — a call in statement position; a non-void return is
     /// discarded.
     Call { cmd: String, args: Vec<Expr> },
+    /// `xs[i] = EXPR` — replace one element in place.
+    ///
+    /// This changes the array, not the name, so it is allowed on a `let`: the
+    /// binding still refers to the same array. `let` promises the name will
+    /// not be re-pointed, exactly as it does for a component id.
+    SetIndex {
+        name: String,
+        index: Expr,
+        value: Expr,
+    },
     /// `ok_button.text = EXPR` — assign a component property at run time.
     SetProperty {
         component: String,

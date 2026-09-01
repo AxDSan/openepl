@@ -48,6 +48,22 @@ OE_CMD(oe_text_eq); OE_CMD(oe_length); OE_CMD(oe_uppercase); OE_CMD(oe_lowercase
 OE_CMD(oe_find); OE_CMD(oe_replace); OE_CMD(oe_concat); OE_CMD(oe_repeat); OE_CMD(oe_reverse);
 /* datetime */
 OE_CMD(oe_now); OE_CMD(oe_year); OE_CMD(oe_format_time);
+/* arrays */
+OE_CMD(oe_ary_count); OE_CMD(oe_ary_append); OE_CMD(oe_ary_remove); OE_CMD(oe_ary_sort);
+OE_CMD(oe_ary_contains); OE_CMD(oe_ary_index_of); OE_CMD(oe_ary_join); OE_CMD(oe_ary_split);
+/* byte-sets */
+OE_CMD(oe_bin_make); OE_CMD(oe_bin_size); OE_CMD(oe_bin_byte); OE_CMD(oe_bin_put);
+OE_CMD(oe_bin_from_text); OE_CMD(oe_bin_to_text);
+
+/* Aggregate access, NOT commands: indexing is syntax, so the backend calls
+ * these directly rather than marshaling an argv array to read one element.
+ * They move raw 64-bit values — what a slot's value field already holds. */
+void   *oe_ary_new(int32_t tag, int32_t len);
+int64_t oe_ary_get(void *a, int32_t i);
+void    oe_ary_set(void *a, int32_t i, int64_t v);
+void   *oe_bin_new(int32_t len);
+int32_t oe_bin_at(void *b, int32_t i);
+void    oe_bin_set(void *b, int32_t i, int32_t v);
 
 /* Shared internals, not commands.  The error slot and handle table are declared
  * in the ABI header so libraries reach them the same way the core does; these
