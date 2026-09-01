@@ -1,0 +1,104 @@
+# The `system` library: the environment the program runs in.
+#
+#   openepl run examples/systemlib.oir
+module systemlib
+use system
+
+sub main
+  # --- the machine ---
+  call print_text(concat("os: ", os_name()))
+  call print_text(concat("arch: ", os_arch()))
+
+  # A host name and a home directory always exist on a working machine, so
+  # print whether the query succeeded rather than the values themselves —
+  # the output has to be the same on every machine to be checkable.
+  let host: text = os_host_name()
+  if last_error_code() = 0 and length(host) > 0
+    call print_text("host name: ok")
+  else
+    call print_text(concat("host name failed: ", last_error_text()))
+  end
+
+  let home: text = os_home_dir()
+  if last_error_code() = 0 and length(home) > 0
+    call print_text("home dir: ok")
+  end
+
+  # --- the environment block ---
+  if env_set("OPENEPL_DEMO", "hello")
+    call print_text(concat("OPENEPL_DEMO = ", env_get("OPENEPL_DEMO")))
+  end
+
+  # A variable set to nothing and a variable that is absent both read as "".
+  # env_has is what tells them apart.
+  if env_set("OPENEPL_EMPTY", "")
+    call print_text("set to empty")
+  end
+  if env_has("OPENEPL_EMPTY") and text_eq(env_get("OPENEPL_EMPTY"), "")
+    call print_text("empty but present")
+  end
+  if env_unset("OPENEPL_EMPTY")
+    if env_has("OPENEPL_EMPTY")
+      call print_text("still there?")
+    else
+      call print_text("absent after unset")
+    end
+  end
+
+  # An unset variable is a "no", not a failure: the error slot stays clear.
+  let missing: text = env_get("OPENEPL_NOT_SET_ANYWHERE")
+  call print_int(last_error_code())
+  call print_int(length(missing))
+
+  # A name that cannot address a variable at all IS a failure.
+  let bad: text = env_get("")
+  if last_error_code() <> 0
+    call print_text(concat("rejected: ", last_error_text()))
+  end
+
+  # The block is a count plus an indexed accessor; PATH is in it.
+  if env_count() > 0
+    let first: text = env_name_at(0)
+    if last_error_code() = 0 and length(first) > 0 and env_has(first)
+      call print_text("environment is not empty")
+    end
+  end
+  let past_block: text = env_name_at(env_count())
+  if last_error_code() <> 0
+    call print_text("env index out of range rejected")
+  end
+
+  # --- this process ---
+  if sys_process_id() > 0
+    call print_text("pid: ok")
+  end
+
+  # argv[0] is the program itself, so a program run with no arguments still
+  # has one.  A library target has none at all, and reports 0.
+  if sys_arg_count() >= 1
+    call print_text("arg 0: ok")
+  end
+  let past_end: text = sys_arg(9999)
+  if last_error_code() <> 0
+    call print_text("out of range rejected")
+  end
+
+  if length(sys_program_dir()) > 0 and last_error_code() = 0
+    call print_text("program dir: ok")
+  end
+
+  # --- timing ---
+  let t0: int64 = sys_tick_count()
+  call sys_sleep_ms(60)
+  let t1: int64 = sys_tick_count()
+  let waited: int = int64_to_int(t1 - t0)
+  if waited >= 50 and waited < 2000
+    call print_text("slept about 60ms")
+  else
+    call print_text(concat("suspicious wait: ", int_to_text(waited)))
+  end
+
+  call print_text("done")
+  call sys_quit(0)
+  call print_text("unreachable")
+end

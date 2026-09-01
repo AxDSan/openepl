@@ -1,0 +1,96 @@
+# Reading and writing JSON.
+#
+# A document is a handle; a place inside it is named by a dotted path —
+# "user.name", "items[2].id" — because OpenEPL has no record type.
+#
+#   openepl run examples/jsonlib.oir
+module jsonlib
+use json
+
+sub main
+  # --- reading ---------------------------------------------------------
+  let src: text = "{\"user\":{\"name\":\"Ada\",\"age\":36,\"admin\":true},\"items\":[{\"id\":10},{\"id\":20},{\"id\":30}],\"ratio\":0.5}"
+  let doc: int = json_parse(src)
+  if doc = 0
+    call print_text(concat("parse failed: ", last_error_text()))
+  end
+
+  call print_text(json_get_text(doc, "user.name"))
+  call print_int(json_get_int(doc, "user.age"))
+  call print_double(json_get_double(doc, "ratio"))
+  call print_int(json_get_int(doc, "items[1].id"))
+  call print_int(json_count(doc, "items"))
+  call print_text(json_type(doc, "user"))
+  call print_text(json_type(doc, "items[0]"))
+  call print_text(json_type(doc, "user.nickname"))
+
+  if json_get_bool(doc, "user.admin")
+    call print_text("admin: yes")
+  else
+    call print_text("admin: no")
+  end
+
+  if json_has(doc, "user.email")
+    call print_text("has an email")
+  else
+    call print_text("no email")
+  end
+
+  # The member names of an object, by position.
+  var i: int = 0
+  while i < json_count(doc, "user")
+    call print_text(concat("key: ", json_key_at(doc, "user", i)))
+    i = i + 1
+  end
+
+  # Every element of an array, the count-plus-accessor way.
+  var total: int = 0
+  var k: int = 0
+  while k < json_count(doc, "items")
+    total = total + json_get_int(doc, concat(concat("items[", int_to_text(k)), "].id"))
+    k = k + 1
+  end
+  call print_text(concat("total = ", int_to_text(total)))
+
+  # --- asking for the wrong thing --------------------------------------
+  let missing: text = json_get_text(doc, "user.nickname")
+  call print_text(concat("missing -> code ", int_to_text(last_error_code())))
+  call print_text(json_get_text(doc, "user.age"))
+  call print_text(last_error_text())
+
+  # --- building --------------------------------------------------------
+  let out: int = json_new_object()
+  let ok0: bool = json_set_text(out, "name", "OpenEPL")
+  let ok1: bool = json_set_int(out, "version.major", 0)
+  let ok2: bool = json_set_int(out, "version.minor", 1)
+  let ok3: bool = json_set_bool(out, "open", true)
+  let ok4: bool = json_set_double(out, "score", 9.25)
+  let ok5: bool = json_set_array(out, "tags")
+  let ok6: bool = json_set_text(out, "tags[0]", "rad")
+  let ok7: bool = json_set_text(out, "tags[1]", "native")
+  call print_text(json_stringify(out))
+
+  # Removing: false with code 0 is a genuine "it was not there".
+  let gone: bool = json_remove(out, "score")
+  call print_text(json_stringify(out))
+  let again: bool = json_remove(out, "score")
+  call print_text(concat("second remove -> code ", int_to_text(last_error_code())))
+
+  # --- round-tripping through a file -----------------------------------
+  let saved: bool = json_save(out, "/tmp/openepl_jsonlib.json")
+  let back: int = json_parse_file("/tmp/openepl_jsonlib.json")
+  call print_text(json_get_text(back, "name"))
+  call print_int(json_get_int(back, "version.minor"))
+  call print_text(json_stringify_pretty(back))
+
+  # --- malformed input is refused, with the byte offset ----------------
+  let bad: int = json_parse("{\"a\": 1,}")
+  call print_text(concat("bad -> handle ", int_to_text(bad)))
+  call print_text(last_error_text())
+
+  let bad2: int = json_parse("[1, 2")
+  call print_text(last_error_text())
+
+  let closed: bool = json_close(doc)
+  call print_int(json_close_all())
+end

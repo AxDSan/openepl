@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Expr, Registry, Ty};
+use crate::{Expr, Registry, Signature, Ty};
 
 /// Maps a form's component ids to their component type names. Component ids are
 /// module-scoped (they are not locals), so every subroutine can see them.
@@ -61,7 +61,19 @@ pub fn type_of_expr_in(
         Expr::Bin(op, l, r) => {
             let lt = type_of_expr_in(l, vars, reg, components)?;
             let rt = type_of_expr_in(r, vars, reg, components)?;
+            // `+` joins two texts. It is the same operation `concat` performs
+            // — this spelling exists so that building a message does not nest
+            // three calls deep.
+            if lt == Ty::Text && rt == Ty::Text && *op == crate::BinOp::Add {
+                return Ok(Ty::Text);
+            }
             if !lt.is_numeric() {
+                if lt == Ty::Text {
+                    return err(format!(
+                        "text supports `+` (joining) but not `{}`",
+                        op.symbol()
+                    ));
+                }
                 return err(format!(
                     "operator `{}` needs numeric operands, left is {}",
                     op.symbol(),
@@ -79,13 +91,13 @@ pub fn type_of_expr_in(
             Ok(lt)
         }
         Expr::Call { cmd, args } => {
-            let c = reg.get(cmd).ok_or_else(|| SemaError {
+            let (what, sig) = callee(cmd, reg).ok_or_else(|| SemaError {
                 msg: format!("unknown command `{cmd}`"),
             })?;
-            let ret = c.sig.ret.ok_or_else(|| SemaError {
-                msg: format!("command `{cmd}` returns nothing and cannot be used in an expression"),
+            let ret = sig.ret.ok_or_else(|| SemaError {
+                msg: format!("{what} `{cmd}` returns nothing and cannot be used in an expression"),
             })?;
-            check_args_in(cmd, &c.sig.params, args, vars, reg, components)?;
+            check_args_labeled(what, cmd, &sig.params, args, vars, reg, components)?;
             Ok(ret)
         }
         Expr::GetProperty {
@@ -129,6 +141,13 @@ pub fn type_of_expr_in(
             }
             Ok(Ty::Bool)
         }
+        Expr::Neg(e) => {
+            let t = type_of_expr_in(e, vars, reg, components)?;
+            if !t.is_numeric() {
+                return err(format!("`-` negates numbers, got {}", t.as_str()));
+            }
+            Ok(t)
+        }
         Expr::Not(e) => {
             let t = type_of_expr_in(e, vars, reg, components)?;
             if t != Ty::Bool {
@@ -137,6 +156,18 @@ pub fn type_of_expr_in(
             Ok(Ty::Bool)
         }
     }
+}
+
+/// Resolve a called name to what it is and what it takes.
+///
+/// Library commands are looked up first, so a user subroutine can never change
+/// the meaning of an existing command name — the validator has already rejected
+/// that collision by the time anything is lowered.
+pub fn callee(name: &str, reg: &Registry) -> Option<(&'static str, Signature)> {
+    if let Some(c) = reg.get(name) {
+        return Some(("command", c.sig.clone()));
+    }
+    reg.sub(name).map(|s| ("subroutine", s.clone()))
 }
 
 /// The declared type of `component.property`, or a diagnostic.
@@ -188,9 +219,25 @@ pub fn check_args_in(
     reg: &Registry,
     components: &Components,
 ) -> Result<(), SemaError> {
+    check_args_labeled("command", cmd, params, args, vars, reg, components)
+}
+
+/// As `check_args_in`, but says whether the callee is a command or a
+/// subroutine — "subroutine `add` expects 2 argument(s)" is the message the
+/// author of `add` needs to read.
+#[allow(clippy::too_many_arguments)]
+pub fn check_args_labeled(
+    what: &str,
+    cmd: &str,
+    params: &[Ty],
+    args: &[Expr],
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<(), SemaError> {
     if args.len() != params.len() {
         return err(format!(
-            "command `{cmd}` expects {} argument(s), got {}",
+            "{what} `{cmd}` expects {} argument(s), got {}",
             params.len(),
             args.len()
         ));
@@ -199,7 +246,7 @@ pub fn check_args_in(
         let got = type_of_expr_in(a, vars, reg, components)?;
         if got != *expected {
             return err(format!(
-                "command `{cmd}` argument {} expects {}, got {}",
+                "{what} `{cmd}` argument {} expects {}, got {}",
                 i + 1,
                 expected.as_str(),
                 got.as_str()

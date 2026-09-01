@@ -16,6 +16,9 @@ pub enum Tok {
     If,
     Else,
     While,
+    For,
+    Break,
+    Continue,
     And,
     Or,
     Not,
@@ -24,6 +27,7 @@ pub enum Tok {
     Use,
     Form,
     On,
+    Return,
     // Literals / identifiers
     Ident(String),
     Int(i64),
@@ -40,6 +44,7 @@ pub enum Tok {
     Minus,
     Star,
     Slash,
+    Percent,
     Lt,
     Le,
     Gt,
@@ -166,6 +171,10 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                 push(&mut out, Tok::Slash, line, start_col);
                 i += 1;
             }
+            b'%' => {
+                push(&mut out, Tok::Percent, line, start_col);
+                i += 1;
+            }
             b'"' => {
                 let (s, ni) = lex_string(bytes, i + 1, line)?;
                 push(&mut out, Tok::Str(s), line, start_col);
@@ -213,6 +222,9 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     "if" => Tok::If,
                     "else" => Tok::Else,
                     "while" => Tok::While,
+                    "for" => Tok::For,
+                    "break" => Tok::Break,
+                    "continue" => Tok::Continue,
                     "and" => Tok::And,
                     "or" => Tok::Or,
                     "not" => Tok::Not,
@@ -222,6 +234,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     "use" => Tok::Use,
                     "form" => Tok::Form,
                     "on" => Tok::On,
+                    "return" => Tok::Return,
                     _ => Tok::Ident(word.to_string()),
                 };
                 push(&mut out, tok, line, start_col);

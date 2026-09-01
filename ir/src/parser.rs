@@ -4,14 +4,16 @@
 //! ```text
 //! module  := "module" IDENT NEWLINE item*
 //! item    := sub
-//! sub     := "sub" IDENT NEWLINE stmt* "end" NEWLINE
-//! stmt    := let | call
+//! sub     := "sub" IDENT params? (":" type)? NEWLINE stmt* "end" NEWLINE
+//! params  := "(" (IDENT ":" type ("," IDENT ":" type)*)? ")"
+//! stmt    := let | call | return | for | break | continue
+//! return  := "return" expr? NEWLINE
 //! let     := "let" IDENT ":" type "=" expr NEWLINE
 //! call    := "call" IDENT "(" (expr ("," expr)*)? ")" NEWLINE
 //! type    := "int" | "text"
 //! expr    := term (("+" | "-") term)*
-//! term    := factor (("*" | "/") factor)*
-//! factor  := INT | FLOAT | STRING | call | IDENT | "(" expr ")"
+//! term    := factor (("*" | "/" | "%") factor)*
+//! factor  := "-"? (INT | FLOAT | STRING | call | IDENT | "(" expr ")")
 //! call    := IDENT "(" (expr ("," expr)*)? ")"
 //! ```
 
@@ -150,9 +152,56 @@ impl Parser {
         Ok(Module { name, target, uses, items })
     }
 
+    /// ```text
+    /// sub := "sub" IDENT params? (":" type)? NEWLINE stmt* "end" NEWLINE
+    /// ```
+    ///
+    /// Both the parameter list and the return type are optional, so `sub main`
+    /// — an entry point or an event handler — still means exactly what it did
+    /// before parameters existed.
     fn sub(&mut self) -> Result<Sub, ParseError> {
+        let sub_line = self.line();
         self.expect(&Tok::Sub, "`sub`")?;
         let name = self.ident("subroutine name")?;
+
+        // `sub name(a: int, b: text)`; `sub name()` is the same as `sub name`.
+        let mut params: Vec<(String, Ty)> = Vec::new();
+        if matches!(self.peek(), Tok::LParen) {
+            self.bump();
+            if !matches!(self.peek(), Tok::RParen) {
+                loop {
+                    let pname = self.ident("parameter name")?;
+                    self.expect(&Tok::Colon, "`:` after parameter name")?;
+                    let pty = self.type_keyword()?;
+                    if params.iter().any(|(n, _)| *n == pname) {
+                        return self.err(format!(
+                            "subroutine `{name}` declares parameter `{pname}` twice"
+                        ));
+                    }
+                    params.push((pname, pty));
+                    match self.peek() {
+                        Tok::Comma => {
+                            self.bump();
+                        }
+                        Tok::RParen => break,
+                        other => {
+                            return self
+                                .err(format!("expected `,` or `)` in parameters, found {other:?}"))
+                        }
+                    }
+                }
+            }
+            self.expect(&Tok::RParen, "`)` after parameters")?;
+        }
+
+        // `: type` — the same `name: type` shape a `let` uses, so a return type
+        // reads like the declaration it is.
+        let ret = if matches!(self.peek(), Tok::Colon) {
+            self.bump();
+            Some(self.type_keyword()?)
+        } else {
+            None
+        };
         self.expect(&Tok::Newline, "newline after subroutine name")?;
 
         let mut body = Vec::new();
@@ -168,6 +217,10 @@ impl Parser {
                 Tok::Call => body.push(self.stmt_call()?),
                 Tok::If => body.push(self.stmt_if()?),
                 Tok::While => body.push(self.stmt_while()?),
+                Tok::For => body.push(self.stmt_for()?),
+                Tok::Break => body.push(self.stmt_jump(true)?),
+                Tok::Continue => body.push(self.stmt_jump(false)?),
+                Tok::Return => body.push(self.stmt_return()?),
                 // Either `name = expr` or `component.property = expr`; one
                 // token of lookahead past the identifier tells them apart.
                 Tok::Ident(_) => body.push(self.stmt_ident()?),
@@ -179,7 +232,13 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline) {
             self.bump();
         }
-        Ok(Sub { name, body })
+        Ok(Sub {
+            name,
+            params,
+            ret,
+            line: sub_line,
+            body,
+        })
     }
 
     /// ```text
@@ -382,6 +441,10 @@ impl Parser {
                 Tok::Call => body.push(self.stmt_call()?),
                 Tok::If => body.push(self.stmt_if()?),
                 Tok::While => body.push(self.stmt_while()?),
+                Tok::For => body.push(self.stmt_for()?),
+                Tok::Break => body.push(self.stmt_jump(true)?),
+                Tok::Continue => body.push(self.stmt_jump(false)?),
+                Tok::Return => body.push(self.stmt_return()?),
                 Tok::Ident(_) => body.push(self.stmt_ident()?),
                 Tok::Eof => return self.err("unexpected end of file (missing `end`)"),
                 other => {
@@ -440,6 +503,103 @@ impl Parser {
             self.bump();
         }
         Ok(Stmt::new(StmtKind::While { cond, body }, stmt_line))
+    }
+
+    /// ```text
+    /// for := "for" IDENT "=" expr "to" expr ("step" INT)? NEWLINE stmt* "end"
+    /// ```
+    ///
+    /// `to` and `step` are **soft** keywords, matched as identifiers in these
+    /// two positions only — reserving them would steal two ordinary words from
+    /// every variable and property name in the language.
+    fn stmt_for(&mut self) -> Result<Stmt, ParseError> {
+        let stmt_line = self.line();
+        self.expect(&Tok::For, "`for`")?;
+        let var = self.ident("loop variable name")?;
+        self.expect(&Tok::Eq, "`=` after the loop variable")?;
+        let start = self.expr()?;
+        if !matches!(self.peek(), Tok::Ident(w) if w == "to") {
+            return self.err(format!(
+                "expected `to` after the start value, found {:?}",
+                self.peek()
+            ));
+        }
+        self.bump();
+        let limit = self.expr()?;
+
+        // `step K`. The step is a literal so that the loop's direction — and
+        // therefore whether it counts while `i <= limit` or `i >= limit` — is
+        // known without a run-time test.
+        let mut step = 1i64;
+        if matches!(self.peek(), Tok::Ident(w) if w == "step") {
+            self.bump();
+            let line = self.line();
+            match self.expr()? {
+                Expr::IntLit(0) => {
+                    return Err(ParseError {
+                        line,
+                        msg: "`step 0` never advances the loop variable".into(),
+                    })
+                }
+                Expr::IntLit(v) => step = v,
+                _ => {
+                    return Err(ParseError {
+                        line,
+                        msg: "`step` needs a whole-number literal, such as `step 2` or `step -1`"
+                            .into(),
+                    })
+                }
+            }
+        }
+        self.expect(&Tok::Newline, "newline after the loop header")?;
+        let body = self.block(&[Tok::End])?;
+        self.expect(&Tok::End, "`end`")?;
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(Stmt::new(
+            StmtKind::For {
+                var,
+                start,
+                limit,
+                step,
+                body,
+            },
+            stmt_line,
+        ))
+    }
+
+    /// `break` / `continue`.
+    fn stmt_jump(&mut self, is_break: bool) -> Result<Stmt, ParseError> {
+        let stmt_line = self.line();
+        self.bump();
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(Stmt::new(
+            if is_break {
+                StmtKind::Break
+            } else {
+                StmtKind::Continue
+            },
+            stmt_line,
+        ))
+    }
+
+    /// `return` or `return EXPR`. A bare `return` is the one that leaves a sub
+    /// with no return type early; anything else on the line is the value.
+    fn stmt_return(&mut self) -> Result<Stmt, ParseError> {
+        let stmt_line = self.line();
+        self.expect(&Tok::Return, "`return`")?;
+        let value = if matches!(self.peek(), Tok::Newline | Tok::Eof) {
+            None
+        } else {
+            Some(self.expr()?)
+        };
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(Stmt::new(StmtKind::Return { value }, stmt_line))
     }
 
     fn stmt_call(&mut self) -> Result<Stmt, ParseError> {
@@ -552,6 +712,7 @@ impl Parser {
             let op = match self.peek() {
                 Tok::Star => BinOp::Mul,
                 Tok::Slash => BinOp::Div,
+                Tok::Percent => BinOp::Rem,
                 _ => break,
             };
             self.bump();
@@ -561,7 +722,21 @@ impl Parser {
         Ok(lhs)
     }
 
+    /// A factor, optionally negated. Unary `-` binds tighter than `*`, so
+    /// `-a * b` is `(-a) * b`, and a negated literal is folded into the literal
+    /// itself — see `Expr::Neg`.
     fn factor(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek(), Tok::Minus) {
+            self.bump();
+            return Ok(match self.factor()? {
+                Expr::IntLit(v) => match v.checked_neg() {
+                    Some(n) => Expr::IntLit(n),
+                    None => return self.err("integer literal out of range"),
+                },
+                Expr::DoubleLit(v) => Expr::DoubleLit(-v),
+                other => Expr::Neg(Box::new(other)),
+            });
+        }
         match self.bump() {
             Tok::True => Ok(Expr::BoolLit(true)),
             Tok::False => Ok(Expr::BoolLit(false)),
@@ -624,6 +799,162 @@ mod tests {
             vec![("click".to_string(), "handler".to_string())]
         );
         assert!(m.is_gui());
+    }
+
+    #[test]
+    fn parses_parameters_and_a_return_type() {
+        let m = parse("module m\nsub add(a: int, b: text): double\n  return 1.0\nend\n").unwrap();
+        let s = m.subs().next().unwrap();
+        assert_eq!(
+            s.params,
+            vec![("a".into(), Ty::Int), ("b".into(), Ty::Text)]
+        );
+        assert_eq!(s.ret, Some(Ty::Double));
+        assert_eq!(s.line, 2);
+    }
+
+    /// The old shape must keep parsing untouched: an entry point and an event
+    /// handler are subs with no parameters and no return type.
+    #[test]
+    fn a_bare_sub_is_still_a_sub() {
+        for src in [
+            "module m\nsub main\n  call print_int(1)\nend\n",
+            "module m\nsub main()\n  call print_int(1)\nend\n",
+        ] {
+            let s = parse(src).unwrap().subs().next().unwrap().clone();
+            assert!(s.is_plain(), "{src}");
+            assert_eq!(s.signature().params.len(), 0);
+        }
+    }
+
+    #[test]
+    fn parses_return_with_and_without_a_value() {
+        let m = parse("module m\nsub main\n  if true\n    return\n  end\n  return\nend\n")
+            .unwrap();
+        let s = m.subs().next().unwrap();
+        assert!(matches!(
+            s.body.last().unwrap().kind,
+            StmtKind::Return { value: None }
+        ));
+        // The `return` nested inside the `if` must be reached too — the body
+        // loop and the block loop are separate code paths.
+        let StmtKind::If { arms, .. } = &s.body[0].kind else {
+            panic!("expected an if")
+        };
+        assert!(matches!(
+            arms[0].1[0].kind,
+            StmtKind::Return { value: None }
+        ));
+    }
+
+    #[test]
+    fn rejects_a_duplicate_parameter() {
+        assert!(parse("module m\nsub f(a: int, a: int)\nend\n").is_err());
+    }
+
+    #[test]
+    fn folds_a_negative_literal_into_the_literal() {
+        // `-5` must BE the literal -5, not a negation of 5: only then does it
+        // type `int` at the extremes and stay usable as a form property.
+        let m = parse("module m\nsub main\n  let x: int = -2147483648\nend\n").unwrap();
+        let s = m.subs().next().unwrap();
+        assert!(matches!(
+            s.body[0].kind,
+            StmtKind::Let {
+                value: Expr::IntLit(-2147483648),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn negates_a_non_literal() {
+        let m = parse("module m\nsub main\n  let x: int = 1\n  let y: int = -x\nend\n").unwrap();
+        let s = m.subs().next().unwrap();
+        assert!(matches!(
+            s.body[1].kind,
+            StmtKind::Let {
+                value: Expr::Neg(_),
+                ..
+            }
+        ));
+    }
+
+    /// Unary minus binds tighter than `*`: `-2 * 3` is `(-2) * 3`, which is
+    /// -6 either way, but `-a * b` and `-(a * b)` differ in the general case
+    /// only by association — what must not happen is the `-` swallowing the
+    /// multiplication's right operand.
+    #[test]
+    fn unary_minus_binds_tighter_than_multiplication() {
+        let m = parse("module m\nsub main\n  let x: int = -2 * 3\nend\n").unwrap();
+        let s = m.subs().next().unwrap();
+        let StmtKind::Let { value, .. } = &s.body[0].kind else {
+            panic!()
+        };
+        assert_eq!(
+            *value,
+            Expr::Bin(
+                BinOp::Mul,
+                Box::new(Expr::IntLit(-2)),
+                Box::new(Expr::IntLit(3))
+            )
+        );
+    }
+
+    #[test]
+    fn parses_remainder() {
+        let m = parse("module m\nsub main\n  let x: int = 7 % 2\nend\n").unwrap();
+        let s = m.subs().next().unwrap();
+        let StmtKind::Let { value, .. } = &s.body[0].kind else {
+            panic!()
+        };
+        assert!(matches!(value, Expr::Bin(BinOp::Rem, _, _)));
+    }
+
+    #[test]
+    fn parses_for_with_and_without_a_step() {
+        let m = parse("module m\nsub main\n  for i = 1 to 10\n  end\n  for j = 9 to 0 step -3\n  end\nend\n").unwrap();
+        let s = m.subs().next().unwrap();
+        let StmtKind::For { var, step, .. } = &s.body[0].kind else {
+            panic!("expected a for")
+        };
+        assert_eq!((var.as_str(), *step), ("i", 1));
+        let StmtKind::For { var, step, .. } = &s.body[1].kind else {
+            panic!("expected a for")
+        };
+        assert_eq!((var.as_str(), *step), ("j", -3));
+    }
+
+    #[test]
+    fn rejects_a_zero_step_and_a_non_literal_step() {
+        assert!(parse("module m\nsub main\n  for i = 1 to 3 step 0\n  end\nend\n").is_err());
+        assert!(parse("module m\nsub main\n  var k: int = 2\n  for i = 1 to 3 step k\n  end\nend\n").is_err());
+        assert!(parse("module m\nsub main\n  for i = 1 10\n  end\nend\n").is_err());
+    }
+
+    /// `break` and `continue` must be reachable from BOTH statement loops —
+    /// the one inside `sub` and the one inside `block` — which are separate
+    /// code paths that each enumerate statement heads.
+    #[test]
+    fn parses_break_and_continue_in_both_statement_loops() {
+        let m = parse(
+            "module m\nsub main\n  break\n  while true\n    continue\n  end\nend\n",
+        )
+        .unwrap();
+        let s = m.subs().next().unwrap();
+        assert!(matches!(s.body[0].kind, StmtKind::Break));
+        let StmtKind::While { body, .. } = &s.body[1].kind else {
+            panic!()
+        };
+        assert!(matches!(body[0].kind, StmtKind::Continue));
+    }
+
+    /// `to` and `step` are soft keywords: they must stay usable as ordinary
+    /// names everywhere else, or adding `for` would break existing files.
+    #[test]
+    fn to_and_step_are_still_ordinary_names() {
+        let m = parse("module m\nsub main\n  var to: int = 1\n  var step: int = 2\n  to = step\nend\n").unwrap();
+        assert_eq!(m.subs().next().unwrap().body.len(), 3);
     }
 
     #[test]

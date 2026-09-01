@@ -283,7 +283,24 @@ fn cmd_inspect(rest: &[String]) -> i32 {
         println!("use: {u}");
     }
     for sub in module.subs() {
+        // `sub:` stays the bare name — the designer reads the rest of the line
+        // as a handler name and binds `on click: <that>`. Parameters and a
+        // return type go on their own line, and only when there are any, so a
+        // reader that predates them sees exactly what it saw before.
         println!("sub: {}", sub.name);
+        if !sub.is_plain() {
+            let params: Vec<String> = sub
+                .params
+                .iter()
+                .map(|(n, t)| format!("{n}:{}", t.as_str()))
+                .collect();
+            println!(
+                "subsig: {} ({}) {}",
+                sub.name,
+                params.join(", "),
+                sub.ret.map_or("-", |t| t.as_str())
+            );
+        }
     }
     for form in module.forms() {
         println!(

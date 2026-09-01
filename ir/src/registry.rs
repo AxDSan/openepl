@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Signature, Ty};
+use crate::{Module, Signature, Ty};
 
 /// A component property, as declared in a library's `ComponentDesc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +51,13 @@ pub struct Command {
 pub struct Registry {
     map: HashMap<String, Command>,
     components: HashMap<String, ComponentDesc>,
+    /// Subroutines defined in the module being compiled, by name.
+    ///
+    /// They live beside the commands rather than among them so a user sub can
+    /// never quietly take a library command's name: `register_subs` reports the
+    /// collision instead of overwriting. Lookup order is commands first, then
+    /// these, and `get` still means "library command" for every existing caller.
+    subs: HashMap<String, Signature>,
 }
 
 impl Registry {
@@ -58,7 +65,38 @@ impl Registry {
         Registry {
             map: HashMap::new(),
             components: HashMap::new(),
+            subs: HashMap::new(),
         }
+    }
+
+    /// Record every subroutine in `m` as callable, returning the names that
+    /// collide with a library command (the caller reports them — the validator
+    /// has the line numbers).
+    pub fn register_subs(&mut self, m: &Module) -> Vec<String> {
+        let mut collisions = Vec::new();
+        for sub in m.subs() {
+            if self.map.contains_key(&sub.name) {
+                collisions.push(sub.name.clone());
+                continue;
+            }
+            self.subs.insert(sub.name.clone(), sub.signature());
+        }
+        collisions
+    }
+
+    /// The signature of a user subroutine, if `name` is one.
+    pub fn sub(&self, name: &str) -> Option<&Signature> {
+        self.subs.get(name)
+    }
+
+    /// Whether `name` names a user subroutine.
+    pub fn is_sub(&self, name: &str) -> bool {
+        self.subs.contains_key(name)
+    }
+
+    /// User subroutine names, for diagnostics.
+    pub fn sub_names(&self) -> impl Iterator<Item = &str> {
+        self.subs.keys().map(|s| s.as_str())
     }
 
     /// Look up a component type by its surface name.
@@ -146,6 +184,13 @@ impl Registry {
             cmd("print_int64", "oe_print_int64", &[Int64], None);
             cmd("print_double", "oe_print_double", &[Double], None);
             cmd("print_text", "oe_print_text", &[Text], None);
+            cmd("read_line", "oe_read_line", &[], Some(Text));
+            cmd("input_ended", "oe_input_ended", &[], Some(Bool));
+            cmd("ask", "oe_ask", &[Text], Some(Text));
+
+            // --- Errors ------------------------------------------------------
+            cmd("last_error_code", "oe_last_error_code", &[], Some(Int));
+            cmd("last_error_text", "oe_last_error_text", &[], Some(Text));
 
             // --- Integer math ------------------------------------------------
             cmd("abs_int", "oe_abs_int", &[Int], Some(Int));

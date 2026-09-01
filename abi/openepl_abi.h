@@ -92,6 +92,85 @@ static inline void  oe_mfree(void *p)               { oe_notify(OE_NRS_MFREE, p,
 static inline void *oe_mrealloc(void *p, long size) { return oe_notify(OE_NRS_MREALLOC, p, (void *)(size_t)size); }
 static inline void  oe_runtime_error(const char *m) { oe_notify(OE_NRS_RUNTIME_ERR, (void *)m, 0); }
 
+/* --- Error slot -------------------------------------------------------
+ * A language with no out-parameters and no exceptions still has to report why
+ * something failed.  A fallible command returns a sentinel (0 for a handle, -1
+ * for a count, "" for text, false for a yes/no) and leaves the detail here, to
+ * be read by the `last_error_code` / `last_error_text` core commands.
+ *
+ * The contract every fallible command follows: exactly one of oe_error_clear()
+ * (success) or oe_error_set*() (failure) on every exit path.  Infallible
+ * commands never touch the slot, so an error survives intervening arithmetic.
+ * That is what lets `false` be read precisely: false with code 0 is a genuine
+ * "no", false with a non-zero code is a failure.
+ *
+ * Plain externs rather than new OE_NRS_* messages: oe_notify carries two void*
+ * and returns one, which cannot express the handle API below (three inputs plus
+ * a function pointer, and function pointers do not portably round-trip through
+ * void*).  Every NRS number is frozen forever; oe_notify is itself a plain
+ * extern, so these are the same mechanism, not a new one. */
+enum {
+    OE_ERR_NONE        = 0,
+    /* errno values pass through unchanged, so runtime codes start well clear
+     * of any of them. */
+    OE_ERR_BAD_HANDLE  = 10001, /* malformed, or index out of range          */
+    OE_ERR_STALE       = 10002, /* generation mismatch: closed, maybe reused */
+    OE_ERR_WRONG_KIND  = 10003, /* e.g. a directory handle sent to a file cmd*/
+    OE_ERR_TABLE_FULL  = 10004,
+    OE_ERR_INVALID_ARG = 10005,
+    OE_ERR_UNSUPPORTED = 10006
+};
+
+void    oe_error_clear(void);
+void    oe_error_set(int32_t code, const char *msg);
+/* `saved_errno` is a required parameter, and there is deliberately no argless
+ * "capture errno now" variant: an author cannot use this without having copied
+ * errno to a local first, which turns "I forgot to save it" from a wrong
+ * message into a compile error.  The house rule is that the line immediately
+ * after a failing call is `int e = errno;`, and the slot is written LAST, after
+ * cleanup — fclose() and free() are exactly what clobber errno. */
+void    oe_error_set_errno(int32_t saved_errno, const char *what);
+int32_t oe_error_code(void);
+const char *oe_error_message(void);   /* never NULL; "" when clear           */
+
+/* --- Handle table -----------------------------------------------------
+ * Resources a program holds across commands (an open file, a directory scan)
+ * are named by a small positive int, never by an address: a program cannot
+ * forge one, cannot dereference one, and cannot be handed a dangling one.
+ *
+ * The int is laid out (MSB first) sign:1 | kind:4 | generation:11 | index:16.
+ * Bit 31 is always 0, so a handle is always positive.  Slot 0 is reserved and
+ * kind 0 is OE_HK_NONE, so 0 is never a live handle and an uninitialised `int`
+ * is rejected with no special case.  The generation is bumped on CLOSE, so a
+ * handle outlives its resource detectably rather than silently addressing
+ * whatever took the slot next.
+ *
+ * Limits, stated rather than discovered: 65535 live handles, 15 kinds, and a
+ * generation that wraps after 2048 close/reuse cycles of one slot.
+ *
+ * Kinds are a flat namespace assigned HERE, not in library sources — there is
+ * no link-time collision check for them the way there is for command names. */
+enum {
+    OE_HK_NONE   = 0,   /* reserved: never a valid kind                     */
+    OE_HK_FILE   = 1,
+    OE_HK_DIR    = 2,
+    OE_HK_SOCKET = 3,
+    OE_HK_PROC   = 4,
+    OE_HK_CONFIG = 5,
+    OE_HK_JSON   = 6
+    /* 7..15 unassigned */
+};
+
+typedef void (*OpenEPL_HandleCloseFn)(void *payload);
+
+/* All four set the error slot themselves on failure, so no library invents its
+ * own bad-handle text and every family reports stale/wrong-kind identically. */
+int32_t oe_handle_new(int32_t kind, void *payload, OpenEPL_HandleCloseFn close_fn);
+void   *oe_handle_resolve(int32_t h, int32_t kind);  /* NULL on any failure  */
+int32_t oe_handle_close(int32_t h, int32_t kind);    /* 1 ok, 0 failed       */
+int32_t oe_handle_close_kind(int32_t kind);          /* -> count closed      */
+void    oe_handle_close_all(void);                   /* idempotent           */
+
 /* --- Library metadata (LibInfo / GetNewInf analog). -------------------
  * Design-time metadata: names, signatures, versions.  It references command
  * symbols by NAME (`symbol`), not by pointer, so it can live in a metadata-only
@@ -176,6 +255,8 @@ static inline void oe_ret_int(OpenEPL_Slot *r, int32_t x)   { r->tag = OE_SDT_IN
 static inline void oe_ret_int64(OpenEPL_Slot *r, int64_t x) { r->tag = OE_SDT_INT64;  r->v.i64 = x; }
 static inline void oe_ret_double(OpenEPL_Slot *r, double x) { r->tag = OE_SDT_DOUBLE; r->v.d   = x; }
 static inline void oe_ret_text(OpenEPL_Slot *r, char *p)    { r->tag = OE_SDT_TEXT;   r->v.ptr = p; }
+static inline void oe_ret_bool(OpenEPL_Slot *r, int32_t x)  { r->tag = OE_SDT_BOOL;   r->v.i32 = x ? 1 : 0; }
+static inline int32_t oe_arg_bool(OpenEPL_Slot *argv, int i) { return argv[i].v.i32 != 0; }
 
 #ifdef __cplusplus
 }

@@ -30,6 +30,9 @@ void *E_MRealloc(void *p, long size);
 
 /* I/O */
 OE_CMD(oe_print_int); OE_CMD(oe_print_int64); OE_CMD(oe_print_double); OE_CMD(oe_print_text);
+OE_CMD(oe_read_line); OE_CMD(oe_input_ended); OE_CMD(oe_ask);
+/* errors */
+OE_CMD(oe_last_error_code); OE_CMD(oe_last_error_text);
 /* integer math */
 OE_CMD(oe_abs_int); OE_CMD(oe_min_int); OE_CMD(oe_max_int); OE_CMD(oe_mod_int); OE_CMD(oe_pow_int);
 /* float math */
@@ -45,5 +48,14 @@ OE_CMD(oe_text_eq); OE_CMD(oe_length); OE_CMD(oe_uppercase); OE_CMD(oe_lowercase
 OE_CMD(oe_find); OE_CMD(oe_replace); OE_CMD(oe_concat); OE_CMD(oe_repeat); OE_CMD(oe_reverse);
 /* datetime */
 OE_CMD(oe_now); OE_CMD(oe_year); OE_CMD(oe_format_time);
+
+/* Shared internals, not commands.  The error slot and handle table are declared
+ * in the ABI header so libraries reach them the same way the core does; these
+ * are the few pieces that stay runtime-private. */
+char *oe_empty_text(void);              /* from oe_error.c  */
+int32_t oe_handle_kind_of(int32_t h);   /* from oe_handle.c */
+void oe_set_args(int argc, char **argv);/* from oe_args.c   */
+int   oe_arg_total(void);
+const char *oe_arg_at(int i);
 
 #endif /* OPENEPL_CORE_H */

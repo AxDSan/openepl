@@ -20,13 +20,20 @@ not breakpoints, stepping or variable inspection.
 
 ## The language
 
-- Subroutines take no parameters, return nothing, and cannot be called from
-  other code — they are entry points (`main`) and event handlers. Handlers
-  share work through module variables.
 - No user-defined types, arrays or collections.
 - One form per module.
 - Local variables are visible for the whole subroutine, not just the block
-  they were declared in.
+  they were declared in. A `for` loop's variable follows the same rule, so two
+  loops in one subroutine need two different variable names.
+- No named constants: a module-level `let` does not parse, only `var`.
+- No mixing of numeric types in one expression: `d + 1` where `d` is a
+  `double` is an error, not an implicit conversion. Write
+  `d + int_to_double(1)`.
+- A form or component property value must be a literal, so a window title
+  cannot be computed or translated at start-up.
+- Memory taken by text results — `concat`, `int_to_text`, `substr`,
+  `file_read_text` — is reclaimed when the program exits, not before, so a
+  window that runs all day grows.
 
 ## The component library
 

@@ -144,6 +144,9 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// `%` — remainder. On integers this is `mod_int`'s operator spelling; on
+    /// doubles it is the IEEE remainder.
+    Rem,
 }
 
 impl BinOp {
@@ -153,6 +156,7 @@ impl BinOp {
             BinOp::Sub => '-',
             BinOp::Mul => '*',
             BinOp::Div => '/',
+            BinOp::Rem => '%',
         }
     }
 }
@@ -182,6 +186,13 @@ pub enum Expr {
     Logical(LogicalOp, Box<Expr>, Box<Expr>),
     /// `not EXPR`.
     Not(Box<Expr>),
+    /// `-EXPR` — arithmetic negation of a numeric value.
+    ///
+    /// Negated *literals* never reach here: the parser folds `-5` into
+    /// `IntLit(-5)` so that it types `int` (an unfolded `2147483648` would
+    /// type `int64` and make `let x: int = -2147483648` fail), and so that a
+    /// form property, which must be a literal, can be negative.
+    Neg(Box<Expr>),
 }
 
 /// A statement plus where it came from.
@@ -233,14 +244,63 @@ pub enum StmtKind {
     },
     /// `while COND ... end`.
     While { cond: Expr, body: Vec<Stmt> },
+    /// `for NAME = START to LIMIT [step K] ... end`.
+    ///
+    /// `NAME` is an `int` that exists for the loop and is immutable inside it.
+    /// `start` and `limit` are evaluated **once**, before the first iteration,
+    /// so a loop cannot be lengthened by its own body. `step` is a non-zero
+    /// integer literal: knowing its sign at compile time is what lets the
+    /// comparison be `<=` for a counting-up loop and `>=` for a counting-down
+    /// one, with no run-time test.
+    For {
+        var: String,
+        start: Expr,
+        limit: Expr,
+        step: i64,
+        body: Vec<Stmt>,
+    },
+    /// `break` — leave the innermost loop.
+    Break,
+    /// `continue` — skip to the innermost loop's next iteration.
+    Continue,
+    /// `return` (from a sub with no return type) or `return EXPR`.
+    Return { value: Option<Expr> },
 }
 
-/// A subroutine (EPL 子程序).  v0.1 subs take no params and return nothing;
-/// `main` is the program entry, lowered to `ECodeStart`.
+/// A subroutine (EPL 子程序).
+///
+/// `main` and event handlers are subs with an empty parameter list and no
+/// return type — the shape every sub had before parameters existed, which is
+/// why `sub main` keeps parsing and lowering exactly as it did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sub {
     pub name: String,
+    /// Declared parameters, in order: `(name, type)`. Parameters are immutable
+    /// inside the body, like a `let`.
+    pub params: Vec<(String, Ty)>,
+    /// Declared return type; `None` is a sub that returns nothing and may only
+    /// be invoked with `call`.
+    pub ret: Option<Ty>,
+    /// 1-based source line of the `sub` keyword; 0 when unknown.
+    pub line: usize,
     pub body: Vec<Stmt>,
+}
+
+impl Sub {
+    /// The sub's signature, in the same shape a library command has — so one
+    /// argument checker serves both.
+    pub fn signature(&self) -> Signature {
+        Signature {
+            params: self.params.iter().map(|(_, t)| *t).collect(),
+            ret: self.ret,
+        }
+    }
+
+    /// Whether this sub has the shape an entry point or an event handler needs:
+    /// nothing in, nothing out.
+    pub fn is_plain(&self) -> bool {
+        self.params.is_empty() && self.ret.is_none()
+    }
 }
 
 /// One component instance inside a form: a type, an id, literal property

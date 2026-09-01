@@ -14,12 +14,13 @@
 namespace openepl::designer {
 
 inline bool is_keyword(const std::string& w) {
-    // `target` is a soft keyword in the grammar — highlighted, but still
-    // usable as an identifier elsewhere.
+    // `target`, `to` and `step` are soft keywords in the grammar — highlighted,
+    // but still usable as identifiers elsewhere.
     static const char* kw[] = {"module", "use",  "form", "sub",  "end",  "let",   "var",
                                "target", "sharedlib", "staticlib", "console", "gui",
                                "call",   "on",   "if",   "else", "while", "and",  "or",
-                               "not",    "true", "false", "int", "int64", "double", "text", "bool"};
+                               "not",    "true", "false", "int", "int64", "double", "text", "bool",
+                               "return", "for",  "break", "continue", "to", "step"};
     for (const char* k : kw) {
         if (w == k) return true;
     }

@@ -16,7 +16,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
-use openepl_ir::{BinOp, CmpOp, Expr, LogicalOp, Module, Registry, Ty};
+use openepl_ir::{BinOp, CmpOp, Expr, LogicalOp, Module, Registry, Signature, Ty};
 
 /// Accessibility role for a form root (`OE_ROLE_WINDOW`, abi/openepl_abi.h).
 fn form_role() -> i32 {
@@ -66,6 +66,13 @@ fn llvm_ty(t: Ty) -> &'static str {
 /// event handler can be bound by pointer. Handler names never appear as data —
 /// there is no name-based dispatch at runtime (G8).
 pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
+    // User subroutines are callable names too. The validator has already proven
+    // none of them collides with a library command, so registering them here
+    // cannot change what any existing call means.
+    let mut with_subs = reg.clone();
+    with_subs.register_subs(m);
+    let reg = &with_subs;
+
     let target = m.target();
     let subs: Vec<_> = m.subs().collect();
     let forms: Vec<_> = m.forms().collect();
@@ -89,6 +96,8 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         component_types: HashMap::new(),
         tmp: 0,
         label: 0,
+        loops: Vec::new(),
+        needs_notify: false,
     };
     for g in m.globals() {
         lo.globals.insert(g.name.clone(), g.ty);
@@ -101,21 +110,38 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         lo.map_components(form);
     }
 
-    // Each subroutine becomes its own function.
+    // Each subroutine becomes its own function, with its declared parameters
+    // and return type as a plain native signature — so a call is a call, and
+    // recursion needs nothing special. A sub with neither (an entry point, an
+    // event handler) still lowers to exactly `void @oe_user_x()`.
     let mut functions = String::new();
     for sub in &subs {
         lo.body.clear();
         lo.vars.clear();
         lo.allocas.clear();
         lo.label = 0;
+        // Parameters arrive in SSA registers; copy each into a stack slot so
+        // the rest of lowering sees an ordinary local.
+        for (i, (name, ty)) in sub.params.iter().enumerate() {
+            let slot = lo.alloca(*ty);
+            writeln!(lo.body, "  store {} %p{i}, ptr {slot}", llvm_ty(*ty)).unwrap();
+            lo.vars.insert(name.clone(), (slot, *ty));
+        }
         for stmt in &sub.body {
             lo.stmt(stmt)?;
         }
+        // A value-returning sub ends in `unreachable`: the validator has proven
+        // every path returns, so falling off the end cannot happen.
+        let (ret_ty, tail) = match sub.ret {
+            None => ("void", "  ret void\n"),
+            Some(t) => (llvm_ty(t), "  unreachable\n"),
+        };
         functions.push_str(&format!(
-            "define void @{}() {{\nentry:\n{}{}  ret void\n}}\n\n",
+            "define {ret_ty} @{}({}) {{\nentry:\n{}{}{tail}}}\n\n",
             user_symbol(&sub.name),
+            param_decls(&sub.params, "p"),
             lo.allocas.join(""),
-            lo.body
+            lo.body,
         ));
     }
 
@@ -124,11 +150,20 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     // so a host links against `greet` and internal calls still resolve.
     if !target.is_executable() {
         for sub in &subs {
-            functions.push_str(&format!(
-                "define void @{}() {{\nentry:\n  call void @{}()\n  ret void\n}}\n\n",
-                sub.name,
-                user_symbol(&sub.name)
-            ));
+            let decls = param_decls(&sub.params, "a");
+            let args = param_args(&sub.params, "a");
+            let inner = user_symbol(&sub.name);
+            functions.push_str(&match sub.ret {
+                None => format!(
+                    "define void @{}({decls}) {{\nentry:\n  call void @{inner}({args})\n  ret void\n}}\n\n",
+                    sub.name
+                ),
+                Some(t) => format!(
+                    "define {t2} @{}({decls}) {{\nentry:\n  %r = call {t2} @{inner}({args})\n  ret {t2} %r\n}}\n\n",
+                    sub.name,
+                    t2 = llvm_ty(t)
+                ),
+            });
         }
         // Module variables still need initialising, but a library has no moment
         // that is obviously "start-up". Exported explicitly so the host can say
@@ -181,6 +216,22 @@ fn user_symbol(name: &str) -> String {
     format!("oe_user_{name}")
 }
 
+/// `i32 %p0, ptr %p1` — a parameter list for a `define`.
+fn param_decls(params: &[(String, Ty)], prefix: &str) -> String {
+    params
+        .iter()
+        .enumerate()
+        .map(|(i, (_, t))| format!("{} %{prefix}{i}", llvm_ty(*t)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The same list as call arguments (identical text here, but named separately
+/// so the two uses cannot drift apart silently).
+fn param_args(params: &[(String, Ty)], prefix: &str) -> String {
+    param_decls(params, prefix)
+}
+
 /// Symbol for a module variable. `internal` linkage, so it is not exported and
 /// the name is dropped by `strip` in release builds (G8).
 fn global_symbol(name: &str) -> String {
@@ -222,6 +273,13 @@ struct Lowerer<'a> {
     tmp: usize,
     /// Basic-block label counter. Labels must be unique within a function.
     label: usize,
+    /// Enclosing loops, innermost last: `(continue target, break target)`.
+    /// `continue` must land on a `for`'s increment block, not its condition —
+    /// jumping to the condition would never advance the counter.
+    loops: Vec<(String, String)>,
+    /// Whether any lowered code aborts through `oe_notify`, which is declared
+    /// only when it is actually called.
+    needs_notify: bool,
 }
 
 impl Lowerer<'_> {
@@ -525,9 +583,95 @@ impl Lowerer<'_> {
                 writeln!(self.body, "{head}:").unwrap();
                 self.branch_on(cond, &inner, &done)?;
                 writeln!(self.body, "{inner}:").unwrap();
-                self.block(body)?;
+                // A `while` re-tests its condition, so `continue` goes to the
+                // head; `break` leaves.
+                self.loops.push((head.clone(), done.clone()));
+                let r = self.block(body);
+                self.loops.pop();
+                r?;
                 writeln!(self.body, "  br label %{head}").unwrap();
                 writeln!(self.body, "{done}:").unwrap();
+                Ok(())
+            }
+            StmtKind::For {
+                var,
+                start,
+                limit,
+                step,
+                body,
+            } => {
+                // Both bounds are read once, into stack slots, before the loop
+                // starts: `for i = 1 to n` where the body changes `n` still
+                // runs the number of times it said it would.
+                let iv = self.alloca(Ty::Int);
+                let sv = self.eval(start)?;
+                writeln!(self.body, "  store i32 {}, ptr {iv}", sv.operand).unwrap();
+                let lv = self.alloca(Ty::Int);
+                let lval = self.eval(limit)?;
+                writeln!(self.body, "  store i32 {}, ptr {lv}", lval.operand).unwrap();
+                self.vars.insert(var.clone(), (iv.clone(), Ty::Int));
+
+                let head = self.fresh_label("for");
+                let inner = self.fresh_label("fordo");
+                let next = self.fresh_label("fornext");
+                let done = self.fresh_label("forend");
+                writeln!(self.body, "  br label %{head}").unwrap();
+                writeln!(self.body, "{head}:").unwrap();
+                let i = self.fresh();
+                writeln!(self.body, "  {i} = load i32, ptr {iv}").unwrap();
+                let l = self.fresh();
+                writeln!(self.body, "  {l} = load i32, ptr {lv}").unwrap();
+                let c = self.fresh();
+                // The step's sign is a compile-time fact, so which way the
+                // loop counts costs nothing at run time.
+                let pred = if *step > 0 { "sle" } else { "sge" };
+                writeln!(self.body, "  {c} = icmp {pred} i32 {i}, {l}").unwrap();
+                writeln!(self.body, "  br i1 {c}, label %{inner}, label %{done}").unwrap();
+                writeln!(self.body, "{inner}:").unwrap();
+                self.loops.push((next.clone(), done.clone()));
+                let r = self.block(body);
+                self.loops.pop();
+                r?;
+                writeln!(self.body, "  br label %{next}").unwrap();
+                writeln!(self.body, "{next}:").unwrap();
+                let cur = self.fresh();
+                writeln!(self.body, "  {cur} = load i32, ptr {iv}").unwrap();
+                let inc = self.fresh();
+                writeln!(self.body, "  {inc} = add i32 {cur}, {step}").unwrap();
+                writeln!(self.body, "  store i32 {inc}, ptr {iv}").unwrap();
+                writeln!(self.body, "  br label %{head}").unwrap();
+                writeln!(self.body, "{done}:").unwrap();
+                Ok(())
+            }
+            StmtKind::Break | StmtKind::Continue => {
+                let is_break = matches!(s.kind, StmtKind::Break);
+                let Some((next, done)) = self.loops.last().cloned() else {
+                    return err(format!(
+                        "`{}` outside a loop",
+                        if is_break { "break" } else { "continue" }
+                    ));
+                };
+                let target = if is_break { done } else { next };
+                writeln!(self.body, "  br label %{target}").unwrap();
+                // The jump terminates this block; whatever follows it in the
+                // source is unreachable but still needs somewhere to live.
+                let dead = self.fresh_label("postjump");
+                writeln!(self.body, "{dead}:").unwrap();
+                Ok(())
+            }
+            StmtKind::Return { value } => {
+                match value {
+                    None => writeln!(self.body, "  ret void").unwrap(),
+                    Some(e) => {
+                        let v = self.eval(e)?;
+                        writeln!(self.body, "  ret {} {}", llvm_ty(v.ty), v.operand).unwrap();
+                    }
+                }
+                // `ret` terminates the block. Anything the author wrote after it
+                // is unreachable, but LLVM still needs somewhere to put it — so
+                // open a fresh block rather than emitting into a closed one.
+                let dead = self.fresh_label("postret");
+                writeln!(self.body, "{dead}:").unwrap();
                 Ok(())
             }
             StmtKind::SetProperty {
@@ -577,6 +721,81 @@ impl Lowerer<'_> {
 
     /// Compare two text values by content via the runtime, yielding i32 0/1.
     fn call_text_eq(&mut self, a: &Val, b: &Val) -> Result<String, LowerError> {
+        self.call_symbol_2("oe_text_eq", a, b, Ty::Bool)
+    }
+
+    /// Abort with a runtime error message. `oe_notify(OE_NRS_RUNTIME_ERR, ...)`
+    /// prints and exits, so the block ends `unreachable`.
+    fn runtime_error(&mut self, message: &str) {
+        let m = self.cstr(message);
+        self.needs_notify = true;
+        writeln!(self.body, "  call ptr @oe_notify(i32 5, ptr {m}, ptr null)").unwrap();
+        writeln!(self.body, "  unreachable").unwrap();
+    }
+
+    /// Emit the checks integer `/` and `%` need before the hardware sees them:
+    /// a zero divisor, and the one overflowing case (the most negative value
+    /// divided by -1). A literal divisor is checked here at compile time, so
+    /// `x / 2` still lowers to a bare `sdiv`.
+    fn guard_divisor(&mut self, op: BinOp, lv: &Val, rv: &Val) -> Result<(), LowerError> {
+        let what = if op == BinOp::Div { "division" } else { "remainder" };
+        let ity = llvm_ty(lv.ty);
+        let literal = rv.operand.parse::<i64>().ok();
+        if literal == Some(0) {
+            return err(format!("{what} by zero"));
+        }
+        if literal.is_none() {
+            let bad = self.fresh();
+            writeln!(self.body, "  {bad} = icmp eq {ity} {}, 0", rv.operand).unwrap();
+            let trap = self.fresh_label("divzero");
+            let ok = self.fresh_label("divok");
+            writeln!(self.body, "  br i1 {bad}, label %{trap}, label %{ok}").unwrap();
+            writeln!(self.body, "{trap}:").unwrap();
+            self.runtime_error(&format!("{what} by zero"));
+            writeln!(self.body, "{ok}:").unwrap();
+        }
+        // `MIN / -1` has no representable answer and faults just as hard as a
+        // zero divisor. Only reachable when the divisor can be -1.
+        if literal.is_none() || literal == Some(-1) {
+            let min = if lv.ty == Ty::Int64 {
+                i64::MIN.to_string()
+            } else {
+                i32::MIN.to_string()
+            };
+            let is_min = self.fresh();
+            writeln!(self.body, "  {is_min} = icmp eq {ity} {}, {min}", lv.operand).unwrap();
+            let bad = if literal == Some(-1) {
+                is_min
+            } else {
+                let neg1 = self.fresh();
+                writeln!(self.body, "  {neg1} = icmp eq {ity} {}, -1", rv.operand).unwrap();
+                let both = self.fresh();
+                writeln!(self.body, "  {both} = and i1 {is_min}, {neg1}").unwrap();
+                both
+            };
+            let trap = self.fresh_label("divover");
+            let ok = self.fresh_label("divok");
+            writeln!(self.body, "  br i1 {bad}, label %{trap}, label %{ok}").unwrap();
+            writeln!(self.body, "{trap}:").unwrap();
+            self.runtime_error(&format!(
+                "{what} overflowed: the most negative {} divided by -1",
+                lv.ty.as_str()
+            ));
+            writeln!(self.body, "{ok}:").unwrap();
+        }
+        Ok(())
+    }
+
+    /// Call a two-argument slot-ABI runtime command and return its result
+    /// operand. `call_text_eq` and text `+` are both this call with different
+    /// symbols.
+    fn call_symbol_2(
+        &mut self,
+        symbol: &str,
+        a: &Val,
+        b: &Val,
+        ret: Ty,
+    ) -> Result<String, LowerError> {
         let argv = self.fresh();
         writeln!(self.body, "  {argv} = alloca [2 x %Slot]").unwrap();
         for (i, v) in [a, b].iter().enumerate() {
@@ -593,7 +812,7 @@ impl Lowerer<'_> {
                 "  {tagp} = getelementptr %Slot, ptr {slot}, i32 0, i32 0"
             )
             .unwrap();
-            writeln!(self.body, "  store i32 {}, ptr {tagp}", Ty::Text.sdt_tag()).unwrap();
+            writeln!(self.body, "  store i32 {}, ptr {tagp}", v.ty.sdt_tag()).unwrap();
             let valp = self.fresh();
             writeln!(
                 self.body,
@@ -608,25 +827,23 @@ impl Lowerer<'_> {
             "  {base} = getelementptr [2 x %Slot], ptr {argv}, i64 0, i64 0"
         )
         .unwrap();
-        let ret = self.fresh();
-        writeln!(self.body, "  {ret} = alloca %Slot").unwrap();
-        self.used.insert("oe_text_eq".to_string());
+        let ret_slot = self.fresh();
+        writeln!(self.body, "  {ret_slot} = alloca %Slot").unwrap();
+        self.used.insert(symbol.to_string());
         writeln!(
             self.body,
-            "  call void @oe_text_eq(ptr {ret}, i32 2, ptr {base})"
+            "  call void @{symbol}(ptr {ret_slot}, i32 2, ptr {base})"
         )
         .unwrap();
         let valp = self.fresh();
         writeln!(
             self.body,
-            "  {valp} = getelementptr %Slot, ptr {ret}, i32 0, i32 2"
+            "  {valp} = getelementptr %Slot, ptr {ret_slot}, i32 0, i32 2"
         )
         .unwrap();
         let raw = self.fresh();
         writeln!(self.body, "  {raw} = load i64, ptr {valp}").unwrap();
-        let t = self.fresh();
-        writeln!(self.body, "  {t} = trunc i64 {raw} to i32").unwrap();
-        Ok(t)
+        Ok(self.emit_ret_from_i64(ret, &raw))
     }
 
     /// Call a one-argument slot-ABI runtime command and return its text result.
@@ -727,18 +944,36 @@ impl Lowerer<'_> {
             Expr::Bin(op, l, r) => {
                 let lv = self.eval(l)?;
                 let rv = self.eval(r)?;
+                // `+` on text is concatenation, not arithmetic: it forwards to
+                // the same `concat` command an author could call by name.
+                if lv.ty == Ty::Text && rv.ty == Ty::Text && *op == BinOp::Add {
+                    let t = self.call_symbol_2("oe_concat", &lv, &rv, Ty::Text)?;
+                    return Ok(Val {
+                        ty: Ty::Text,
+                        operand: t,
+                    });
+                }
                 if lv.ty != rv.ty || !lv.ty.is_numeric() {
                     return err("arithmetic requires matching numeric operands");
+                }
+                // Integer division and remainder trap on the two inputs the
+                // hardware cannot answer. Without this the process dies of
+                // SIGFPE with nothing said; the runtime has an error channel,
+                // so use it.
+                if matches!(op, BinOp::Div | BinOp::Rem) && lv.ty != Ty::Double {
+                    self.guard_divisor(*op, &lv, &rv)?;
                 }
                 let opcode = match (op, lv.ty) {
                     (BinOp::Add, Ty::Double) => "fadd",
                     (BinOp::Sub, Ty::Double) => "fsub",
                     (BinOp::Mul, Ty::Double) => "fmul",
                     (BinOp::Div, Ty::Double) => "fdiv",
+                    (BinOp::Rem, Ty::Double) => "frem",
                     (BinOp::Add, _) => "add",
                     (BinOp::Sub, _) => "sub",
                     (BinOp::Mul, _) => "mul",
                     (BinOp::Div, _) => "sdiv",
+                    (BinOp::Rem, _) => "srem",
                 };
                 let t = self.fresh();
                 writeln!(
@@ -764,6 +999,22 @@ impl Lowerer<'_> {
                 ty: Ty::Bool,
                 operand: (*b as i32).to_string(),
             }),
+            Expr::Neg(e) => {
+                let v = self.eval(e)?;
+                if !v.ty.is_numeric() {
+                    return err(format!("`-` negates numbers, got {}", v.ty.as_str()));
+                }
+                let t = self.fresh();
+                if v.ty == Ty::Double {
+                    writeln!(self.body, "  {t} = fneg double {}", v.operand).unwrap();
+                } else {
+                    writeln!(self.body, "  {t} = sub {} 0, {}", llvm_ty(v.ty), v.operand).unwrap();
+                }
+                Ok(Val {
+                    ty: v.ty,
+                    operand: t,
+                })
+            }
             Expr::Not(e) => {
                 let v = self.eval(e)?;
                 let t = self.fresh();
@@ -959,8 +1210,62 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Lower a call to a user subroutine: a direct native call, not the slot
+    /// ABI. Nothing is marshalled, so recursion and a value return are exactly
+    /// what LLVM already does for a C function.
+    fn eval_user_call(
+        &mut self,
+        name: &str,
+        sig: &Signature,
+        args: &[Expr],
+    ) -> Result<Option<Val>, LowerError> {
+        if args.len() != sig.params.len() {
+            return err(format!(
+                "subroutine `{name}` expects {} argument(s), got {}",
+                sig.params.len(),
+                args.len()
+            ));
+        }
+        let mut ops = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let v = self.eval(a)?;
+            if v.ty != sig.params[i] {
+                return err(format!(
+                    "subroutine `{name}` argument {} expects {}, got {}",
+                    i + 1,
+                    sig.params[i].as_str(),
+                    v.ty.as_str()
+                ));
+            }
+            ops.push(format!("{} {}", llvm_ty(v.ty), v.operand));
+        }
+        let arglist = ops.join(", ");
+        let symbol = user_symbol(name);
+        match sig.ret {
+            None => {
+                writeln!(self.body, "  call void @{symbol}({arglist})").unwrap();
+                Ok(None)
+            }
+            Some(t) => {
+                let r = self.fresh();
+                writeln!(self.body, "  {r} = call {} @{symbol}({arglist})", llvm_ty(t)).unwrap();
+                Ok(Some(Val {
+                    ty: t,
+                    operand: r,
+                }))
+            }
+        }
+    }
+
     /// Lower a command call via the slot ABI; returns the result if non-void.
     fn eval_call(&mut self, cmd: &str, args: &[Expr]) -> Result<Option<Val>, LowerError> {
+        // Commands win the name; the validator has already rejected any user
+        // sub that tried to take one.
+        if self.reg.get(cmd).is_none() {
+            if let Some(sig) = self.reg.sub(cmd).cloned() {
+                return self.eval_user_call(cmd, &sig, args);
+            }
+        }
         let command = self.reg.get(cmd).ok_or_else(|| LowerError {
             msg: format!("unknown command `{cmd}`"),
         })?;
@@ -1145,6 +1450,12 @@ impl Lowerer<'_> {
             out.push('\n');
         }
 
+        // The runtime notification channel (abi/openepl_abi.h), used to abort
+        // with a message. Declared only when something actually aborts.
+        if self.needs_notify {
+            writeln!(out, "declare ptr @oe_notify(i32, ptr, ptr)\n").unwrap();
+        }
+
         out.push_str(functions);
 
         if entry {
@@ -1208,6 +1519,139 @@ mod tests {
                 .unwrap();
         assert!(ll.contains("bitcast double 0x")); // arg store
         assert!(ll.contains("bitcast i64")); // return reinterpret
+    }
+
+    /// A subroutine call is a direct native call, not a slot-ABI marshalling
+    /// dance — which is what makes recursion cost nothing special.
+    #[test]
+    fn user_subs_lower_to_native_functions() {
+        let ll = lower(
+            "module m\nsub fib(n: int): int\n  if n < 2\n    return n\n  end\n  return fib(n - 1) + fib(n - 2)\nend\nsub main\n  call print_int(fib(10))\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("define i32 @oe_user_fib(i32 %p0)"), "{ll}");
+        assert!(ll.contains("call i32 @oe_user_fib(i32 "), "{ll}");
+        assert!(ll.contains("ret i32 "), "{ll}");
+        // The fall-through past the last `return` is proven dead.
+        assert!(ll.contains("unreachable"), "{ll}");
+        // A user sub is defined, never declared: a declare + define of the same
+        // symbol is not a valid module.
+        assert!(!ll.contains("declare void @oe_user_fib"), "{ll}");
+    }
+
+    /// Entry points and event handlers must lower to exactly the shape they did
+    /// before parameters existed, or a handler bound by pointer would be called
+    /// through a mismatched signature.
+    #[test]
+    fn a_plain_sub_lowers_unchanged() {
+        let ll = lower("module m\nsub main\n  call print_int(1)\nend\n").unwrap();
+        assert!(ll.contains("define void @oe_user_main() {"), "{ll}");
+        assert!(ll.contains("call void @oe_user_main()"), "{ll}");
+    }
+
+    #[test]
+    fn a_library_export_forwards_its_arguments() {
+        let ll = lower(
+            "module m\ntarget sharedlib\nsub twice(n: int): int\n  return n + n\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("define i32 @twice(i32 %a0)"), "{ll}");
+        assert!(ll.contains("call i32 @oe_user_twice(i32 %a0)"), "{ll}");
+    }
+
+    #[test]
+    fn text_plus_lowers_to_the_concat_command() {
+        let ll = lower("module m\nsub main\n  call print_text(\"a\" + \"b\")\nend\n").unwrap();
+        assert!(ll.contains("declare void @oe_concat(ptr, i32, ptr)"));
+        assert!(ll.contains("call void @oe_concat(ptr %"));
+    }
+
+    /// Each side of a text `+` must be evaluated exactly once. Forwarding the
+    /// original expressions to `concat` instead of the values would make
+    /// `read_line() + \"!\"` read two lines.
+    #[test]
+    fn text_plus_evaluates_each_side_once() {
+        let ll = lower("module m\nsub main\n  call print_text(read_line() + \"!\")\nend\n")
+            .unwrap();
+        assert_eq!(ll.matches("call void @oe_read_line(").count(), 1);
+    }
+
+    #[test]
+    fn a_literal_divisor_needs_no_guard() {
+        let ll = lower("module m\nsub main\n  var n: int = 9\n  call print_int(n / 3)\nend\n")
+            .unwrap();
+        assert!(ll.contains("sdiv"));
+        assert!(!ll.contains("oe_notify"), "a constant 3 cannot be zero");
+    }
+
+    /// A divisor that is not a literal is checked for the two values the
+    /// hardware faults on: zero, and -1 against the most negative dividend.
+    #[test]
+    fn a_variable_divisor_is_guarded_both_ways() {
+        let ll = lower(
+            "module m\nsub main\n  var d: int = 0\n  call print_int(10 / d)\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("declare ptr @oe_notify(i32, ptr, ptr)"));
+        assert!(ll.contains("call ptr @oe_notify(i32 5,"));
+        assert!(ll.contains("icmp eq i32 %"));
+        assert!(ll.contains("-2147483648"), "the overflow check is missing");
+        assert!(ll.contains("unreachable"));
+    }
+
+    #[test]
+    fn remainder_lowers_to_srem_and_frem() {
+        let i = lower("module m\nsub main\n  call print_int(7 % 2)\nend\n").unwrap();
+        assert!(i.contains("srem i32"));
+        let d = lower("module m\nsub main\n  call print_double(7.5 % 2.0)\nend\n").unwrap();
+        assert!(d.contains("frem double"));
+    }
+
+    #[test]
+    fn negation_uses_fneg_on_doubles_and_a_subtract_on_integers() {
+        let ll = lower("module m\nsub main\n  var n: int = 1\n  var d: double = 1.0\n  call print_int(-n)\n  call print_double(-d)\nend\n").unwrap();
+        assert!(ll.contains("sub i32 0,"));
+        assert!(ll.contains("fneg double"));
+    }
+
+    /// `continue` in a `for` must reach the increment block. Branching back to
+    /// the condition instead would leave the counter unchanged — an infinite
+    /// loop that no test of the IR's shape alone would catch.
+    #[test]
+    fn continue_in_a_for_targets_the_increment_block() {
+        let ll = lower(
+            "module m\nsub main\n  for i = 1 to 3\n    continue\n  end\nend\n",
+        )
+        .unwrap();
+        let next = ll
+            .lines()
+            .map(|l| l.trim())
+            .find(|l| l.starts_with("bb_fornext_"))
+            .expect("an increment block")
+            .trim_end_matches(':')
+            .to_string();
+        // The `continue` is the branch immediately followed by the dead block
+        // the jump opens; that is the one whose target must be the increment.
+        let lines: Vec<&str> = ll.lines().map(|l| l.trim()).collect();
+        let i = lines
+            .iter()
+            .position(|l| l.starts_with("bb_postjump_"))
+            .expect("continue opens a dead block");
+        assert_eq!(lines[i - 1], format!("br label %{next}"), "{ll}");
+    }
+
+    #[test]
+    fn break_leaves_the_innermost_loop_only() {
+        let ll = lower("module m\nsub main\n  for i = 1 to 3\n    for j = 1 to 3\n      break\n    end\n  end\nend\n").unwrap();
+        // Two loops, so two end blocks; the `break` must name the inner one.
+        let ends: Vec<&str> = ll
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| l.starts_with("bb_forend_"))
+            .collect();
+        assert_eq!(ends.len(), 2, "{ll}");
+        let inner = ends[0].trim_end_matches(':');
+        assert!(ll.contains(&format!("br label %{inner}")), "{ll}");
     }
 
     #[test]

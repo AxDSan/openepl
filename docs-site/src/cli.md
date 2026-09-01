@@ -48,7 +48,7 @@ characters that cannot appear in an identifier are replaced.
 
 ```sh
 openepl commands                 # the core runtime
-openepl commands --use ui        # and the visual components
+openepl commands --use file      # and what a library adds
 ```
 
 ## Editor support

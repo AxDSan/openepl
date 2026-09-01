@@ -1,0 +1,94 @@
+# Files, directories and paths — the `file` support library.
+#
+#   openepl run examples/filelib.oir
+#
+# Everything happens under a scratch directory the program creates and then
+# removes, so running it twice leaves nothing behind.
+module filelib
+use file
+
+sub main
+  let dir: text = "filelib-scratch"
+  let note: text = concat(dir, "/note.txt")
+
+  # --- paths are pure text: they answer before anything exists ----------
+  call print_text(path_name(note))
+  call print_text(path_parent(note))
+  call print_text(path_extension(note))
+  call print_text(path_join("a/b/", "c.txt"))
+  call print_text(path_name(path_absolute("x/../y.txt")))
+
+  # --- create, write, read ----------------------------------------------
+  if dir_create(dir)
+    call print_text("made the directory")
+  end
+  if file_write_text(note, "alpha\nbeta\ngamma\n")
+    call print_text("wrote the file")
+  end
+  call print_text(file_read_text(note))
+  call print_int(file_line_count(note))
+  call print_int64(file_size(note))
+
+  if file_exists(note) and not dir_exists(note)
+    call print_text("it is a file, not a directory")
+  end
+
+  # --- append, then read line by line through a handle -------------------
+  if file_append_text(note, "delta\n")
+    call print_text("appended")
+  end
+  var h: int = file_open(note, "read")
+  var n: int = 0
+  while not file_at_end(h)
+    let line: text = file_read_line(h)
+    n = n + 1
+    call print_text(concat(concat(int_to_text(n), ": "), line))
+  end
+  if file_close(h)
+    call print_text("closed")
+  end
+
+  # A stale handle is a failure, not a crash.
+  if not file_close(h)
+    call print_text(concat("second close: ", last_error_text()))
+  end
+
+  # --- copy, list, move, delete ------------------------------------------
+  let copy: text = path_join(dir, "copy.txt")
+  if file_copy(note, copy)
+    call print_text("copied")
+  end
+
+  let count: int = dir_entry_count(dir)
+  call print_int(count)
+  var i: int = 0
+  while i < count
+    call print_text(dir_entry(dir, i))
+    i = i + 1
+  end
+
+  let moved: text = path_join(dir, "moved.txt")
+  if file_move(copy, moved) and not file_exists(copy)
+    call print_text("moved")
+  end
+
+  # --- failure is a sentinel plus the error slot -------------------------
+  let missing: text = file_read_text(path_join(dir, "nope.txt"))
+  call print_text(concat("missing file -> [", concat(missing, "]")))
+  if last_error_code() <> 0
+    call print_text(last_error_text())
+  end
+
+  # false with code 0 is a genuine "no", not a failure.
+  if not file_exists(path_join(dir, "nope.txt")) and last_error_code() = 0
+    call print_text("absent, and that is an answer not an error")
+  end
+
+  # --- tidy up ------------------------------------------------------------
+  if file_delete(moved) and file_delete(note) and dir_delete(dir)
+    call print_text("cleaned up")
+  end
+  if not dir_exists(dir)
+    call print_text("the scratch directory is gone")
+  end
+end

@@ -111,6 +111,30 @@ fn unused_commands_are_dead_stripped() {
     }
 }
 
+/// Subroutines with parameters, return values and recursion, end to end: the
+/// point is that the compiled program produces the answers, not that the IR
+/// looked right.
+#[test]
+fn subs_build_and_run() {
+    let stdout = run(&build_as("subs", "params"));
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "5",          // add(2, 3)
+            "7",          // add(add(1, 2), 4)
+            "720",        // factorial(6)
+            "610",        // fib(15) — recursion
+            "ADA!",       // text in, text out
+            "negative",   // an early bare `return`
+            "4 is even",  // a sub calling another sub
+            "7 is odd",
+            "79", // add(factorial(4), fib(10)) = 24 + 55
+        ],
+        "unexpected subs output:\n{stdout}"
+    );
+}
+
 #[test]
 fn hello_library_via_abi() {
     // `use hello` — a third-party support library loaded through the ABI.
@@ -431,6 +455,104 @@ fn control_flow_runs_correctly() {
     assert_eq!(lines[20], "short-circuit ok");
     // Two separately-built strings with the same characters must compare equal.
     assert_eq!(lines[21], "text equality ok");
+}
+
+/// Loops end to end: counting up and down, `break`, `continue`, and the
+/// nesting rule that `break` leaves only the innermost loop. As with
+/// `control_flow_runs_correctly`, a successful build is itself the proof that
+/// the emitted basic blocks are well formed — clang rejects them otherwise.
+#[test]
+fn loops_build_and_run() {
+    let stdout = run(&build_as("loops", "loops"));
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "-- fizzbuzz, counted --");
+    assert_eq!(&lines[1..6], &["1", "2", "Fizz", "4", "Buzz"]);
+    assert_eq!(lines[15], "FizzBuzz", "15 should be FizzBuzz");
+    // `step -1`
+    assert_eq!(&lines[17..22], &["5", "4", "3", "2", "1"]);
+    // `continue` then `break`: the first multiple of 7 above 100.
+    assert_eq!(lines[23], "105");
+    // `break`/`continue` inside a `while`.
+    assert_eq!(&lines[25..28], &["word-3", "word-6", "word-9"]);
+    // Nested loops: the inner `break` must not leave the outer one.
+    assert_eq!(
+        &lines[29..33],
+        &["1 ", "2 4 ", "3 6 9 ", "4 8 12 16 "],
+        "unexpected output:\n{stdout}"
+    );
+}
+
+/// The expression operators: unary minus, `%`, and `+` on text. The last two
+/// lines of the example build the same sentence with `+` and with nested
+/// `concat` calls, so the test proves they agree.
+#[test]
+fn operators_build_and_run() {
+    let stdout = run(&build_as("operators", "ops"));
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "-40",     // a negative literal
+            "40",      // negating a negative
+            "-250",    // negating a variable
+            "1.5",     // fneg on a double
+            "2",       // 17 % 5
+            "-2",      // -17 % 5 — the sign follows the dividend, as srem does
+            "6 is even",
+            "7 is odd",
+            "Hello, Ada — you are 36 today.",
+            "Hello, Ada — you are 36 today.",
+        ],
+        "unexpected output:\n{stdout}"
+    );
+    assert_eq!(lines[8], lines[9], "`+` and `concat` must agree");
+}
+
+/// Dividing by zero used to kill the process with SIGFPE and no message. It
+/// now goes through the runtime's error channel: a line on stderr, exit 1.
+///
+/// Both faulting inputs are covered — a zero divisor, and the one overflowing
+/// division (the most negative integer by -1), which SIGFPEs just as hard.
+#[test]
+fn dividing_by_zero_reports_instead_of_crashing() {
+    for (src, want) in [
+        (
+            "module dz\nsub main\n  var z: int = 0\n  call print_int(10 / z)\nend\n",
+            "division by zero",
+        ),
+        (
+            "module dz\nsub main\n  var z: int = 0\n  call print_int(10 % z)\nend\n",
+            "remainder by zero",
+        ),
+        (
+            "module dz\nsub main\n  var m: int = -1\n  call print_int(-2147483648 / m)\nend\n",
+            "division overflowed",
+        ),
+    ] {
+        let dir = std::env::temp_dir().join("openepl_divzero_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let src_path = dir.join(format!("dz{}.oir", want.len()));
+        std::fs::write(&src_path, src).unwrap();
+        let bin = dir.join(format!("dz{}", want.len()));
+        let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+            .args([
+                "build",
+                src_path.to_str().unwrap(),
+                "-o",
+                bin.to_str().unwrap(),
+            ])
+            .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+            .status()
+            .expect("run openepl");
+        assert!(status.success(), "build failed for: {want}");
+        let out = Command::new(&bin).output().expect("run built binary");
+        assert!(!out.status.success(), "{want}: expected a non-zero exit");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(want),
+            "expected `{want}` on stderr, got: {stderr}"
+        );
+    }
 }
 
 /// **M0, the RAD metric.** A scripted designer session adds a button,

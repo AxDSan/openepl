@@ -2,19 +2,50 @@
 
 # Commands
 
-Every command the core runtime provides, plus those contributed by the `ui`
-library. Call one as a statement with `call`, or use its result in an
-expression when it returns a value.
+Call one as a statement with `call`, or use its result in an expression when it
+returns a value.
 
 ```
 call print_text("hello")            # as a statement
 let n: int = max_int(3, 9)          # as an expression
 ```
 
+The core commands are always available. The rest come from a support library,
+which a module asks for by name:
+
+```
+module report
+use file
+
+sub main
+  call print_text(file_read_text("notes.txt"))
+end
+```
+
+## Reporting failure
+
+A command that can fail returns a sentinel — `0` for a handle, `-1` for a count
+or size, `""` for text, `false` for a yes/no — and leaves the reason in the
+error slot, which `last_error_code()` and `last_error_text()` read.
+
+```
+let h: int = file_open("notes.txt", "read")
+if h = 0
+  call print_text(last_error_text())
+end
+```
+
+A successful command clears the slot, so a code left over from earlier can
+never be mistaken for a fresh failure. That is also what makes `false` precise:
+false with code `0` is a genuine no, false with a non-zero code is a failure.
+
+## Core
+
 | Command | Parameters | Returns |
 | --- | --- | --- |
 | `abs_double` | double | double |
 | `abs_int` | int | int |
+| `ask` | text | text |
 | `ceil` | double | double |
 | `concat` | text, text | text |
 | `cos` | double | double |
@@ -24,11 +55,14 @@ let n: int = max_int(3, 9)          # as an expression
 | `find` | text, text | int |
 | `floor` | double | double |
 | `format_time` | int64, text | text |
+| `input_ended` | — | bool |
 | `int64_to_int` | int64 | int |
 | `int64_to_text` | int64 | text |
 | `int_to_double` | int | double |
 | `int_to_int64` | int | int64 |
 | `int_to_text` | int | text |
+| `last_error_code` | — | int |
+| `last_error_text` | — | text |
 | `length` | text | int |
 | `ln` | double | double |
 | `log10` | double | double |
@@ -45,6 +79,7 @@ let n: int = max_int(3, 9)          # as an expression
 | `print_int64` | int64 | — |
 | `print_int` | int | — |
 | `print_text` | text | — |
+| `read_line` | — | text |
 | `repeat` | text, int | text |
 | `replace` | text, text, text | text |
 | `reverse` | text | text |
@@ -59,3 +94,257 @@ let n: int = max_int(3, 9)          # as an expression
 | `trim` | text | text |
 | `uppercase` | text | text |
 | `year` | int64 | int |
+
+## config
+
+`use config`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `config_close_all` | — | int |
+| `config_close` | int | bool |
+| `config_create` | text | int |
+| `config_get_bool` | int, text, text, bool | bool |
+| `config_get_double` | int, text, text, double | double |
+| `config_get_int` | int, text, text, int | int |
+| `config_get` | int, text, text | text |
+| `config_has` | int, text, text | bool |
+| `config_has_section` | int, text | bool |
+| `config_key_at` | int, text, int | text |
+| `config_key_count` | int, text | int |
+| `config_open` | text | int |
+| `config_path` | int | text |
+| `config_remove` | int, text, text | bool |
+| `config_remove_section` | int, text | bool |
+| `config_save` | int | bool |
+| `config_section_at` | int, int | text |
+| `config_section_count` | int | int |
+| `config_set_bool` | int, text, text, bool | bool |
+| `config_set_double` | int, text, text, double | bool |
+| `config_set_int` | int, text, text, int | bool |
+| `config_set` | int, text, text, text | bool |
+
+## file
+
+`use file`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `dir_create` | text | bool |
+| `dir_current` | — | text |
+| `dir_delete` | text | bool |
+| `dir_entry_count` | text | int |
+| `dir_entry` | text, int | text |
+| `dir_exists` | text | bool |
+| `dir_set_current` | text | bool |
+| `file_append_text` | text, text | bool |
+| `file_at_end` | int | bool |
+| `file_close_all` | — | int |
+| `file_close` | int | bool |
+| `file_copy` | text, text | bool |
+| `file_delete` | text | bool |
+| `file_exists` | text | bool |
+| `file_line_count` | text | int |
+| `file_modified` | text | int64 |
+| `file_move` | text, text | bool |
+| `file_open` | text, text | int |
+| `file_read_line` | int | text |
+| `file_read_text` | text | text |
+| `file_size` | text | int64 |
+| `file_write_line` | int, text | bool |
+| `file_write_text` | text, text | bool |
+| `path_absolute` | text | text |
+| `path_extension` | text | text |
+| `path_join` | text, text | text |
+| `path_name` | text | text |
+| `path_parent` | text | text |
+
+## hash
+
+`use hash`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `base64_decode` | text | text |
+| `base64_encode` | text | text |
+| `hash_crc32` | text | int64 |
+| `hash_hmac_sha256` | text, text | text |
+| `hash_md5` | text | text |
+| `hash_sha1` | text | text |
+| `hash_sha256` | text | text |
+| `hex_decode` | text | text |
+| `hex_encode` | text | text |
+
+## json
+
+`use json`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `json_close_all` | — | int |
+| `json_close` | int | bool |
+| `json_count` | int, text | int |
+| `json_get_bool` | int, text | bool |
+| `json_get_double` | int, text | double |
+| `json_get_int` | int, text | int |
+| `json_get_text` | int, text | text |
+| `json_has` | int, text | bool |
+| `json_key_at` | int, text, int | text |
+| `json_new_array` | — | int |
+| `json_new_object` | — | int |
+| `json_parse_file` | text | int |
+| `json_parse` | text | int |
+| `json_remove` | int, text | bool |
+| `json_save` | int, text | bool |
+| `json_set_array` | int, text | bool |
+| `json_set_bool` | int, text, bool | bool |
+| `json_set_double` | int, text, double | bool |
+| `json_set_int` | int, text, int | bool |
+| `json_set_null` | int, text | bool |
+| `json_set_object` | int, text | bool |
+| `json_set_text` | int, text, text | bool |
+| `json_stringify` | int | text |
+| `json_stringify_pretty` | int | text |
+| `json_type` | int, text | text |
+
+## net
+
+`use net`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `net_host_ip` | text | text |
+| `net_http_download` | text, text | bool |
+| `net_http_get` | text | text |
+| `net_http_header` | text | text |
+| `net_http_post` | text, text, text | text |
+| `net_http_status` | — | int |
+| `net_tcp_at_end` | int | bool |
+| `net_tcp_close_all` | — | int |
+| `net_tcp_close` | int | bool |
+| `net_tcp_connect` | text, int | int |
+| `net_tcp_receive` | int, int | text |
+| `net_tcp_receive_line` | int | text |
+| `net_tcp_send` | int, text | bool |
+| `net_timeout_get` | — | int |
+| `net_timeout_set` | int | bool |
+| `net_url_decode` | text | text |
+| `net_url_encode` | text | text |
+
+## process
+
+`use process`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `process_at_end` | int | bool |
+| `process_close_all` | — | int |
+| `process_close` | int | bool |
+| `process_is_running` | int | bool |
+| `process_kill` | int | bool |
+| `process_read_line` | int | text |
+| `process_run_capture` | text | text |
+| `process_run` | text | int |
+| `process_start` | text | int |
+| `process_wait` | int | int |
+| `process_write_line` | int, text | bool |
+
+## random
+
+`use random`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `random_between` | int, int | int |
+| `random_bool` | — | bool |
+| `random_chance` | int | bool |
+| `random_double_between` | double, double | double |
+| `random_double` | — | double |
+| `random_hex` | int | text |
+| `random_int` | int | int |
+| `random_seed` | int | — |
+| `random_seed_now` | — | int |
+
+## system
+
+`use system`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `env_count` | — | int |
+| `env_get` | text | text |
+| `env_has` | text | bool |
+| `env_name_at` | int | text |
+| `env_set` | text, text | bool |
+| `env_unset` | text | bool |
+| `os_arch` | — | text |
+| `os_home_dir` | — | text |
+| `os_host_name` | — | text |
+| `os_name` | — | text |
+| `os_temp_dir` | — | text |
+| `os_user_name` | — | text |
+| `sys_arg_count` | — | int |
+| `sys_arg` | int | text |
+| `sys_process_id` | — | int |
+| `sys_program_dir` | — | text |
+| `sys_program_path` | — | text |
+| `sys_quit` | int | — |
+| `sys_sleep_ms` | int | — |
+| `sys_tick_count` | — | int64 |
+
+## text
+
+`use text`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `text_char_at` | text, int | text |
+| `text_char_code` | text, int | int |
+| `text_compare` | text, text | int |
+| `text_contains` | text, text | bool |
+| `text_count` | text, text | int |
+| `text_ends_with` | text, text | bool |
+| `text_equals_ignore_case` | text, text | bool |
+| `text_from_code` | int | text |
+| `text_index_of` | text, text | int |
+| `text_insert` | text, int, text | text |
+| `text_last_index_of` | text, text | int |
+| `text_pad_left` | text, int, text | text |
+| `text_pad_right` | text, int, text | text |
+| `text_remove` | text, int, int | text |
+| `text_split_at` | text, text, int | text |
+| `text_split_count` | text, text | int |
+| `text_starts_with` | text, text | bool |
+| `text_title_case` | text | text |
+| `text_trim_end` | text | text |
+| `text_trim_start` | text | text |
+
+## time
+
+`use time`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `time_add_seconds` | int64, int64 | int64 |
+| `time_day` | int64 | int |
+| `time_day_of_year` | int64 | int |
+| `time_days_in_month` | int, int | int |
+| `time_diff_seconds` | int64, int64 | int64 |
+| `time_format_iso` | int64 | text |
+| `time_from_parts` | int, int, int, int, int, int | int64 |
+| `time_hour` | int64 | int |
+| `time_is_leap_year` | int | bool |
+| `time_minute` | int64 | int |
+| `time_monotonic_ms` | — | int64 |
+| `time_month` | int64 | int |
+| `time_now_ms` | — | int64 |
+| `time_parse_iso` | text | int64 |
+| `time_second` | int64 | int |
+| `time_weekday` | int64 | int |
+
+## ui
+
+`use ui`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |

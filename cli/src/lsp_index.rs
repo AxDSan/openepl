@@ -96,8 +96,40 @@ impl Index {
                 Tok::Sub => {
                     if let Some((name, sp)) = ident_at(&toks, i + 1) {
                         ix.push(name.clone(), sp, true, SymKind::Sub, None);
-                        scope = Some(name);
+                        scope = Some(name.clone());
                         i += 2;
+                        // Parameters are declarations, scoped to this
+                        // subroutine — they shadow module variables exactly the
+                        // way a `let` does, and completion inside the body is
+                        // close to useless without them.
+                        if matches!(toks.get(i).map(|t| &t.tok), Some(Tok::LParen)) {
+                            i += 1;
+                            while let Some((pname, psp)) = ident_at(&toks, i) {
+                                ix.locals_by_sub
+                                    .entry(name.clone())
+                                    .or_default()
+                                    .push(pname.clone());
+                                ix.push(pname, psp, true, SymKind::Local, Some(name.clone()));
+                                // `: type` — the type name is a keyword, not a
+                                // reference to anything, so it is not indexed.
+                                i += 1;
+                                if matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Colon)) {
+                                    i += 2;
+                                }
+                                match toks.get(i).map(|t| &t.tok) {
+                                    Some(Tok::Comma) => i += 1,
+                                    _ => break,
+                                }
+                            }
+                            if matches!(toks.get(i).map(|t| &t.tok), Some(Tok::RParen)) {
+                                i += 1;
+                            }
+                        }
+                        // A return type is `: type` after the parameters; skip
+                        // it for the same reason.
+                        if matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Colon)) {
+                            i += 2;
+                        }
                         continue;
                     }
                 }
@@ -112,6 +144,21 @@ impl Index {
                     form_depth = 1;
                     if let Some((name, sp)) = ident_at(&toks, i + 1) {
                         ix.push(name, sp, true, SymKind::Component, None);
+                        i += 2;
+                        continue;
+                    }
+                }
+                // `for i = ...` declares a local for the rest of the
+                // subroutine, exactly as a `let` would.
+                Tok::For => {
+                    if let Some((name, sp)) = ident_at(&toks, i + 1) {
+                        if let Some(sc) = &scope {
+                            ix.locals_by_sub
+                                .entry(sc.clone())
+                                .or_default()
+                                .push(name.clone());
+                            ix.push(name, sp, true, SymKind::Local, Some(sc.clone()));
+                        }
                         i += 2;
                         continue;
                     }
@@ -338,6 +385,90 @@ mod tests {
         );
         let text = ix.occurrences.iter().find(|o| o.name == "text").unwrap();
         assert_eq!(text.kind, SymKind::Property);
+    }
+
+    /// Without parameters in the index, completion inside a subroutine body
+    /// cannot offer the very names the body is written in terms of, and
+    /// go-to-definition on one has nowhere to go.
+    #[test]
+    fn parameters_are_locals_of_their_subroutine() {
+        let src = "module m\nvar n: int = 1\nsub add(a: int, b: int): int\n  return a + b\nend\n";
+        let ix = Index::build(src);
+
+        let a = ix
+            .occurrences
+            .iter()
+            .find(|o| o.name == "a" && o.is_definition)
+            .unwrap();
+        assert_eq!((a.line, a.kind), (3, SymKind::Local));
+        assert_eq!(a.scope.as_deref(), Some("add"));
+
+        // The use on line 4 resolves back to the parameter.
+        let use_a = ix.at(4, 10).unwrap();
+        assert_eq!(use_a.name, "a");
+        assert_eq!(ix.definition_of(use_a).unwrap().line, 3);
+
+        // Both parameters are offered inside the subroutine and nowhere else.
+        let inside: Vec<&str> = ix
+            .names_in_scope(Some("add"))
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert!(inside.contains(&"a") && inside.contains(&"b"), "{inside:?}");
+        let outside: Vec<&str> = ix
+            .names_in_scope(None)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert!(!outside.contains(&"a"), "{outside:?}");
+        // The subroutine itself stays a module-level name to complete and jump to.
+        assert!(outside.contains(&"add"), "{outside:?}");
+        // The types in the parameter list and the return type are keywords, not
+        // names: indexing them would make go-to-definition on `int` land in a
+        // parameter list.
+        assert!(
+            !ix.occurrences.iter().any(|o| o.name == "int" && o.line == 3),
+            "the `sub` header's types must not be indexed as names"
+        );
+    }
+
+    /// A parameter shadows a module variable of the same name, exactly as a
+    /// `let` does.
+    /// A `for` loop's variable is a local of its subroutine: completion must
+    /// offer it inside, and go-to-definition on a use must land on the header.
+    #[test]
+    fn loop_variables_are_locals_of_their_subroutine() {
+        let src = "module m\nsub main\n  for i = 1 to 3\n    call print_int(i)\n  end\nend\n";
+        let ix = Index::build(src);
+
+        let def = ix
+            .occurrences
+            .iter()
+            .find(|o| o.name == "i" && o.is_definition)
+            .expect("the loop variable is defined");
+        assert_eq!((def.line, def.kind), (3, SymKind::Local));
+        assert_eq!(def.scope.as_deref(), Some("main"));
+
+        let inside: Vec<&str> = ix
+            .names_in_scope(Some("main"))
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert!(inside.contains(&"i"), "{inside:?}");
+        let outside: Vec<&str> = ix.names_in_scope(None).into_iter().map(|(n, _)| n).collect();
+        assert!(!outside.contains(&"i"), "{outside:?}");
+    }
+
+    #[test]
+    fn parameters_shadow_globals() {
+        let ix = Index::build("module m\nvar n: int = 1\nsub f(n: int): int\n  return n\nend\n");
+        let use_n = ix.at(4, 10).unwrap();
+        assert_eq!(use_n.name, "n");
+        assert_eq!(
+            ix.definition_of(use_n).unwrap().line,
+            3,
+            "resolves to the parameter, not the module variable on line 2"
+        );
     }
 
     /// An unparseable file still lexes, and the index must still work — this is

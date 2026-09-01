@@ -19,5 +19,9 @@ void E_Init(void) {
 }
 
 void E_DestroyRes(void) {
+    /* Handles first, then blocks.  A handle's payload may itself be a runtime
+     * allocation, so freeing blocks first would leave a close function reading
+     * memory that is already gone.  Teardown runs in reverse of construction. */
+    oe_handle_close_all();
     oe_free_all();
 }

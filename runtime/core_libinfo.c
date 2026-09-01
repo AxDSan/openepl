@@ -31,6 +31,13 @@ static const OpenEPL_CommandDesc CORE_COMMANDS[] = {
     CMD("print_int64",  oe_print_int64,  OE_SDT_NULL, 1, P_I64),
     CMD("print_double", oe_print_double, OE_SDT_NULL, 1, P_D),
     CMD("print_text",   oe_print_text,   OE_SDT_NULL, 1, P_T),
+    /* input — the other half of the pair */
+    CMD("read_line",    oe_read_line,    OE_SDT_TEXT, 0, NULL),
+    CMD("input_ended",  oe_input_ended,  OE_SDT_BOOL, 0, NULL),
+    CMD("ask",          oe_ask,          OE_SDT_TEXT, 1, P_T),
+    /* errors — zero arity is what makes an out-parameter expressible */
+    CMD("last_error_code", oe_last_error_code, OE_SDT_INT,  0, NULL),
+    CMD("last_error_text", oe_last_error_text, OE_SDT_TEXT, 0, NULL),
     /* integer math */
     CMD("abs_int", oe_abs_int, OE_SDT_INT, 1, P_I),
     CMD("min_int", oe_min_int, OE_SDT_INT, 2, P_II),

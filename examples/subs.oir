@@ -1,0 +1,76 @@
+# Subroutines that take arguments and give something back.
+#
+#   openepl run examples/subs.oir
+#
+# A `sub` used to be only an entry point or an event handler: nothing in,
+# nothing out. Now it takes a parameter list in the same `name: type` shape a
+# `let` uses, and an optional return type after a colon — so a subroutine
+# declaration reads like the declarations already in the language.
+#
+# Calling one is calling anything else: `add(2, 3)` in an expression, or
+# `call greet("Ada")` as a statement. Commands and subroutines share one
+# namespace, so a subroutine may not take a library command's name.
+module subs
+
+# Parameters in, a value out.
+sub add(a: int, b: int): int
+  return a + b
+end
+
+# Parameters are immutable, so working state is an ordinary local.
+sub factorial(n: int): int
+  var result: int = 1
+  var i: int = 2
+  while i <= n
+    result = result * i
+    i = i + 1
+  end
+  return result
+end
+
+# Recursion works: a subroutine can call itself, and the compiler needs no
+# forward declaration to let it.
+sub fib(n: int): int
+  if n < 2
+    return n
+  end
+  return fib(n - 1) + fib(n - 2)
+end
+
+# Text in, text out — the return type is any slot type, not just numbers.
+sub shout(who: text): text
+  return concat(uppercase(who), "!")
+end
+
+sub is_even(n: int): bool
+  return mod_int(n, 2) = 0
+end
+
+# No return type: a subroutine that does something rather than computes
+# something. A bare `return` leaves it early.
+sub describe(n: int)
+  if n < 0
+    call print_text("negative")
+    return
+  end
+  if is_even(n)
+    call print_text(concat(int_to_text(n), " is even"))
+  else
+    call print_text(concat(int_to_text(n), " is odd"))
+  end
+end
+
+sub main
+  call print_int(add(2, 3))
+  call print_int(add(add(1, 2), 4))
+  call print_int(factorial(6))
+  call print_int(fib(15))
+  call print_text(shout("ada"))
+  call describe(-1)
+  call describe(4)
+  call describe(7)
+
+  # A subroutine call is an expression, so it composes like any other.
+  let total: int = add(factorial(4), fib(10))
+  call print_int(total)
+end

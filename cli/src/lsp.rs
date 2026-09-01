@@ -524,8 +524,12 @@ fn find_repo_root_from(start: &Path) -> Option<PathBuf> {
 /// rather than deriving it from the lexer means completion can't accidentally
 /// offer internal tokens like `Eof`.
 const KEYWORDS: &[&str] = &[
-    "module", "sub", "end", "let", "var", "call", "if", "else", "while", "and", "or", "not",
+    "module", "sub", "end", "let", "var", "call", "return", "if", "else", "while", "and", "or",
+    "not",
     "true", "false", "use", "form", "on", "int", "double", "bool", "text",
+    // Loops. `for`, `break` and `continue` are reserved; `to` and `step` are
+    // soft keywords, offered here but usable as names elsewhere.
+    "for", "break", "continue", "to", "step",
     // Build targets. `target` is a soft keyword, so it is offered
     // here but not reserved by the lexer.
     "target", "console", "gui", "sharedlib", "staticlib",
