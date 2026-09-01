@@ -74,6 +74,21 @@ level rather than inside a form.
 
 **Events:** `change`
 
+## combobox
+
+| Property | Type |
+| --- | --- |
+| `items` | text |
+| `selected` | int |
+| `count` | int |
+| `left` | int |
+| `top` | int |
+| `width` | int |
+| `height` | int |
+| `enabled` | bool |
+
+**Events:** `change`
+
 ## editbox
 
 | Property | Type |
@@ -135,6 +150,35 @@ level rather than inside a form.
 
 **Events:** none
 
+## listbox
+
+| Property | Type |
+| --- | --- |
+| `items` | text |
+| `selected` | int |
+| `count` | int |
+| `left` | int |
+| `top` | int |
+| `width` | int |
+| `height` | int |
+| `enabled` | bool |
+
+**Events:** `change`
+
+## memo
+
+| Property | Type |
+| --- | --- |
+| `text` | text |
+| `left` | int |
+| `top` | int |
+| `width` | int |
+| `height` | int |
+| `color` | text |
+| `enabled` | bool |
+
+**Events:** `change`
+
 ## progressbar
 
 | Property | Type |
@@ -146,4 +190,48 @@ level rather than inside a form.
 | `height` | int |
 
 **Events:** none
+
+## radiobutton
+
+| Property | Type |
+| --- | --- |
+| `text` | text |
+| `group` | text |
+| `checked` | bool |
+| `left` | int |
+| `top` | int |
+| `color` | text |
+
+**Events:** `change`
+
+## slider
+
+| Property | Type |
+| --- | --- |
+| `value` | int |
+| `min` | int |
+| `max` | int |
+| `left` | int |
+| `top` | int |
+| `width` | int |
+| `height` | int |
+| `enabled` | bool |
+
+**Events:** `change`
+
+## spinner
+
+| Property | Type |
+| --- | --- |
+| `value` | int |
+| `min` | int |
+| `max` | int |
+| `step` | int |
+| `left` | int |
+| `top` | int |
+| `width` | int |
+| `height` | int |
+| `enabled` | bool |
+
+**Events:** `change`
 

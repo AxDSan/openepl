@@ -19,6 +19,18 @@ struct Component {
     std::vector<std::pair<std::string, std::string>> properties;  // ordered
     std::vector<std::pair<std::string, std::string>> handlers;    // event -> sub
 
+    /// The lines this component occupies in the file, for a module-level one.
+    /// Zero until it has been written: a component the designer has just
+    /// dropped exists only in memory, and the save that first writes it is
+    /// what gives it a span.
+    int first_line = 0;
+    int last_line = 0;
+    /// Deleted in the designer but still present in the file. It cannot simply
+    /// be dropped from the model: the save that removes it has to splice
+    /// nothing over the lines it still occupies, and only its span knows where
+    /// those are.
+    bool removed = false;
+
     const std::string* property(const std::string& name) const {
         for (const auto& p : properties) {
             if (p.first == name) return &p.second;
@@ -55,12 +67,26 @@ struct Model {
     int form_last_line = 0;
     Component form;                   // the form's own properties/handlers
     std::vector<Component> children;
+    /// Components declared at module level: `timer`, `action`, `httpserver` —
+    /// the ones with no rectangle. A form cannot hold them (the validator
+    /// rejects it), so they are a separate list rather than children with a
+    /// flag, and they are spliced into the file at their own line spans.
+    std::vector<Component> module_components;
 
     Component* find(const std::string& id) {
         for (auto& c : children) {
             if (c.id == id) return &c;
         }
+        for (auto& c : module_components) {
+            if (c.id == id) return &c;
+        }
         return nullptr;
+    }
+    bool is_module_level(const std::string& id) const {
+        for (const auto& c : module_components) {
+            if (c.id == id) return true;
+        }
+        return false;
     }
     bool has_sub(const std::string& name) const {
         for (const auto& s : subs) {
@@ -76,7 +102,27 @@ struct Model {
             for (const auto& c : children) {
                 if (c.id == candidate) { taken = true; break; }
             }
+            for (const auto& c : module_components) {
+                if (c.id == candidate) { taken = true; break; }
+            }
             if (!taken) return candidate;
+        }
+    }
+
+    /// Take the on-disk line spans from `live`, discarding this model's own.
+    ///
+    /// A span describes the file, not the edit: an undo snapshot was taken
+    /// before a save that moved every line after the form, so restoring one
+    /// wholesale would point the next save's splice at the wrong lines and
+    /// overwrite whatever now lives there.
+    void adopt_spans(const Model& live) {
+        form_first_line = live.form_first_line;
+        form_last_line = live.form_last_line;
+        for (auto& c : module_components) {
+            c.first_line = c.last_line = 0;
+            for (const auto& l : live.module_components) {
+                if (l.id == c.id) { c.first_line = l.first_line; c.last_line = l.last_line; }
+            }
         }
     }
 };
@@ -95,10 +141,18 @@ using NeedsQuotes =
 /// Render the model's `form … end` block as .oir source.
 std::string emit_form(const Model& m, const NeedsQuotes& needs_quotes);
 
+/// Render one module-level component as a top-level `<type> <id> … end` block.
+std::string emit_module_component(const Component& c, const NeedsQuotes& needs_quotes);
+
 /// Save by SPLICING the emitted form over the original file's form lines,
 /// leaving everything else — every hand-written subroutine body — byte-identical.
 /// Newly wired handlers are appended as stub subroutines.
-bool save_model(const Model& m, const std::vector<std::string>& new_subs,
+///
+/// Takes the model by reference because a save moves lines: the spans it
+/// splices at are recomputed from where each block actually landed, and a
+/// component written for the first time gets its span here. A second save in
+/// the same session splices at stale spans otherwise, which overwrites code.
+bool save_model(Model& m, const std::vector<std::string>& new_subs,
                 const NeedsQuotes& needs_quotes, std::string& error);
 
 } // namespace openepl::designer

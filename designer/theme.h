@@ -59,6 +59,10 @@ constexpr int TOOLBAR_H  = 40;
 constexpr int TABBAR_H   = 32;
 constexpr int STATUS_H   = 24;
 constexpr int BOTTOM_H   = 220;
+/// The non-visual component tray, below the form preview. Delphi put one here
+/// for the same reason: a timer has properties to edit and no rectangle to
+/// click, so it needs somewhere to be.
+constexpr int TRAY_H     = 104;
 
 } // namespace openepl::designer::theme
 #endif

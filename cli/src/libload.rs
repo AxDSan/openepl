@@ -51,6 +51,11 @@ struct PropertyDescC {
 #[repr(C)]
 struct EventDescC {
     name: *const c_char,
+    // Appended in ABI v3, and appended is what makes them safe to read: a
+    // descriptor written as `{ "click" }` zero-fills to a count of 0 and a null
+    // table, which is the same "hands its handler nothing" every v2 event meant.
+    param_count: i32,
+    param_tags: *const i32,
 }
 
 #[repr(C)]
@@ -78,7 +83,7 @@ struct LibInfoC {
     components: *const ComponentDescC,
 }
 
-const OPENEPL_ABI_VERSION: i32 = 2;
+const OPENEPL_ABI_VERSION: i32 = 3;
 
 /// The result of resolving a module's libraries.
 pub struct LibPlan {
@@ -364,9 +369,25 @@ unsafe fn register_commands(
         }
 
         let mut events = Vec::new();
+        // The parameters cannot be recorded yet: they are keyed by component
+        // name, and the component is not in the registry until below.
+        let mut event_params: Vec<(String, Vec<Ty>)> = Vec::new();
         for ei in 0..cd.event_count.max(0) as isize {
             let ed = &*cd.events.offset(ei);
-            events.push(CStr::from_ptr(ed.name).to_string_lossy().into_owned());
+            let ename = CStr::from_ptr(ed.name).to_string_lossy().into_owned();
+            let mut params = Vec::new();
+            for pi in 0..ed.param_count.max(0) as isize {
+                let tag = *ed.param_tags.offset(pi);
+                params.push(Ty::from_sdt_tag(tag).ok_or_else(|| {
+                    format!(
+                        "component `{name}` in `{lib}`: event `{ename}` has unsupported parameter tag {tag}"
+                    )
+                })?);
+            }
+            if !params.is_empty() {
+                event_params.push((ename.clone(), params));
+            }
+            events.push(ename);
         }
 
         if !registry.insert_component(ComponentDesc {
@@ -384,6 +405,9 @@ unsafe fn register_commands(
             return Err(format!(
                 "component `{name}` (from `{lib}`) collides with an already-registered component"
             ));
+        }
+        for (event, params) in event_params {
+            registry.set_event_params(&name, &event, params);
         }
     }
     Ok(())
@@ -449,6 +473,12 @@ pub struct Manifest {
     pub link_args: Vec<String>,
     pub requires: Vec<PathBuf>,
     pub requires_hint: String,
+    /// The paths that decide whether the optional dependency is here.
+    pub optional_requires: Vec<PathBuf>,
+    /// Every `optional_requires` path exists, so the `optional_*` build
+    /// configuration has been folded into the fields above and the feature
+    /// macro is defined.
+    pub optional_enabled: bool,
 }
 
 impl Manifest {
@@ -487,7 +517,65 @@ impl Manifest {
             .iter()
             .map(|a| absolutise(repo_root, a))
             .collect();
+        m.take_optional(&text, repo_root);
         Ok(m)
+    }
+
+    /// Fold in the `optional_*` configuration when the dependency it names is
+    /// actually there.
+    ///
+    /// `requires` is the right shape for a dependency the whole library is: no
+    /// RmlUi means no window means no build, and failing with a hint beats
+    /// failing with a wall of linker errors. It is the wrong shape for a
+    /// dependency that gates ONE capability — declaring mbedTLS in `requires`
+    /// would make every build of a program that merely mentions `net` fail on a
+    /// machine that has never fetched a TLS stack, for a program that may not
+    /// speak https at all.
+    ///
+    /// So: present, and the library compiles with the include dirs, sources,
+    /// defines and link args it needs plus `optional_feature` defined, which is
+    /// what the C tests with `#ifdef`. Absent, and none of it is there and the
+    /// build proceeds — the capability fails at run time, loudly, in the
+    /// library's own words.
+    ///
+    /// The fold happens here rather than at the link so that every consumer of
+    /// a `Manifest` — the introspection `.so`, the program link, an archive —
+    /// sees one library configuration and cannot disagree about it.
+    fn take_optional(&mut self, text: &str, repo_root: &Path) {
+        self.optional_requires = json_array(text, "optional_requires")
+            .iter()
+            .map(|p| repo_root.join(p))
+            .collect();
+        // An empty list is not "nothing is missing, so enable it": a library
+        // with no optional dependency declared has no optional configuration to
+        // fold, and a feature macro defined for a dependency nobody named would
+        // compile code against headers that are not there.
+        self.optional_enabled =
+            !self.optional_requires.is_empty() && self.optional_requires.iter().all(|p| p.exists());
+        if !self.optional_enabled {
+            return;
+        }
+
+        self.include_dirs.extend(
+            json_array(text, "optional_include_dirs")
+                .iter()
+                .map(|p| repo_root.join(p)),
+        );
+        self.extra_sources.extend(
+            json_array(text, "optional_extra_sources")
+                .iter()
+                .map(|p| repo_root.join(p)),
+        );
+        self.defines.extend(json_array(text, "optional_defines"));
+        self.link_args.extend(
+            json_array(text, "optional_link_args")
+                .iter()
+                .map(|a| absolutise(repo_root, a)),
+        );
+        let feature = json_string(text, "optional_feature");
+        if !feature.is_empty() {
+            self.defines.push(feature);
+        }
     }
 
     /// Fail with the library's own hint if a prerequisite (e.g. a vendored

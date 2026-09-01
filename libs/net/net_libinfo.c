@@ -4,8 +4,12 @@
  * Every command is named net_*: one flat command namespace is shared with core
  * and every other library, and this library owns that prefix.
  *
- * There is no https here, and there is no command that could accidentally
- * introduce it — see the header comment in net_cmds.c.
+ * The command list does not move with the build.  https is an optional
+ * capability (mbedTLS, see lib.json), and a capability may not add or remove a
+ * command: a program that compiles here must compile on a machine that vendored
+ * something different.  So net_http_get is one command that speaks both
+ * schemes, and refuses https at run time when this build has no TLS — see the
+ * header comment in net_cmds.c.
  *
  * The server side is one non-visual component plus the commands that read a
  * request and answer it.  They are named net_req_* rather than http_* because
@@ -67,7 +71,7 @@ static const OpenEPL_CommandDesc NET_COMMANDS[] = {
     { "net_url_encode",       "net_url_encode",       OE_SDT_TEXT, 1, P_T   },
     { "net_url_decode",       "net_url_decode",       OE_SDT_TEXT, 1, P_T   },
     { "net_host_ip",          "net_host_ip",          OE_SDT_TEXT, 1, P_T   },
-    /* --- HTTP (plain http only) --------------------------------------- */
+    /* --- HTTP (http, and https when TLS was vendored) ------------------ */
     { "net_http_get",         "net_http_get",         OE_SDT_TEXT, 1, P_T   },
     { "net_http_post",        "net_http_post",        OE_SDT_TEXT, 3, P_TTT },
     { "net_http_status",      "net_http_status",      OE_SDT_INT,  0, 0     },
@@ -93,7 +97,9 @@ static const OpenEPL_PropertyDesc HTTPD_PROPS[] = {
     { "port", OE_SDT_INT,  "8080",      NULL },
     { "bind", OE_SDT_TEXT, "127.0.0.1", NULL },
 };
-static const OpenEPL_EventDesc HTTPD_EVENTS[] = { { "request" } };
+/* Zero-filled explicitly: `request` hands its handler nothing, and saying so
+ * costs a reader less than a -Wextra warning about the v3 fields does. */
+static const OpenEPL_EventDesc HTTPD_EVENTS[] = { { "request", 0, NULL } };
 
 static const OpenEPL_ComponentDesc NET_COMPONENTS[] = {
     { "httpserver", OE_ROLE_UNKNOWN,

@@ -136,7 +136,13 @@ static const OpenEPL_PropertyDesc TIMER_PROPS[] = {
     { "interval", OE_SDT_INT,  "1000", NULL },
     { "enabled",  OE_SDT_BOOL, "true", NULL },
 };
-static const OpenEPL_EventDesc TIMER_EVENTS[] = { { "tick" } };
+/* The tick count, counting from 1 like every other position in the language.
+ * A handler that wants it says so; one that does not is bound unchanged, which
+ * is why adding this breaks nothing that already uses a timer. */
+static const int32_t TIMER_TICK_PARAMS[] = { OE_SDT_INT };
+static const OpenEPL_EventDesc TIMER_EVENTS[] = {
+    { "tick", 1, TIMER_TICK_PARAMS },
+};
 
 static const OpenEPL_ComponentDesc CORE_COMPONENTS[] = {
     { "timer", OE_ROLE_UNKNOWN,

@@ -145,22 +145,51 @@ merely slow. `net_http_download(url, path)` writes bytes to a file, which is
 what binary content needs — text is NUL-terminated and would stop at the first
 zero byte.
 
-## There is no TLS, in either direction
+## https is optional, and never assumed
 
-`net_http_get("https://...")` **fails** with `OE_ERR_UNSUPPORTED` (`10006`) and
-says so. It is never downgraded to `http://`, and a redirect from `http://` to
-`https://` fails the same way — a silent downgrade would put a password on the
-wire in the clear, and the program that "worked" would be the vulnerability.
+TLS is a dependency you opt into. OpenEPL links a program's libraries in, so a
+TLS stack is vendored into every binary that uses one — megabytes of code and a
+security-critical dependency to patch on someone else's schedule. Nobody who
+only speaks `http://` should pay that, and nobody who wants `https://` should
+have to talk the build system into it. So:
 
-The server does not terminate TLS either. Put a reverse proxy in front of it if
-it needs to be reachable over https; when a *client* needs TLS today, shell out
-to `curl` through the `process` library.
+```sh
+tools/fetch-mbedtls.sh     # once; everything else builds without it
+```
 
-This is a decision about static linking, not an oversight. OpenEPL links a
-program's libraries in, so a TLS stack here would be vendored into every binary
-that touches the network — with a certificate store to keep current and a
-security-critical dependency to patch on someone else's schedule. A refusal you
-can read is better than a stack nobody is maintaining.
+With mbedTLS vendored, `net_http_get("https://...")` works and the default port
+becomes 443. Without it, the same call **fails** with `OE_ERR_UNSUPPORTED`
+(`10006`) and a message naming the script. Every other command, and every other
+library, builds and behaves identically either way.
+
+### What never happens
+
+**No downgrade.** An `https://` URL is never rewritten to `http://` — not when
+TLS is missing, and not when a server answers a redirect with an `http://`
+`Location:`. That redirect is refused with `OE_ERR_UNSUPPORTED`. A silent
+downgrade would put a password on the wire in the clear and the program that
+"worked" would be the vulnerability.
+
+**No unverified certificate.** The certificate chain is verified against the
+machine's trust store and the hostname is checked against the certificate, with
+no option to turn either off. An https client that skips verification is
+encrypted to whoever is on the path: it offers the appearance of security and
+none of it, which is worse than the honest refusal it replaced, because the
+refusal is visible and this is not. A certificate that does not verify fails the
+request and says why — expired, wrong name, unknown issuer.
+
+The store is found at one of the usual locations
+(`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`, and
+the rest). `OPENEPL_CA_BUNDLE` overrides it with a file or a directory, which is
+what a container, a corporate proxy or a test with its own certificate needs. If
+no store can be found the request fails with `OE_ERR_UNSUPPORTED` rather than
+falling back to trusting everything — that fallback is the same hole arriving
+through a different door.
+
+### The server side is still plaintext
+
+`httpserver` does not terminate TLS. Put a reverse proxy in front of it if it
+needs to be reachable over https.
 
 ## Memory, over a long run
 

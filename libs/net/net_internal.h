@@ -125,4 +125,24 @@ int net_set_nonblocking(int fd);
  * expire an hour early or never. */
 int64_t net_now_ms(void);
 
+/* --- TLS (net_tls.c) --------------------------------------------------
+ * Declared unconditionally and implemented twice — once on mbedTLS, once as
+ * stubs — so net_cmds.c is the same code whether or not a TLS stack was
+ * vendored.  The one thing a caller must branch on is net_tls_available():
+ * with no TLS an https URL is REFUSED, never rewritten to http, because a
+ * downgrade puts a password on the wire and looks like success. */
+typedef struct NetTls NetTls;
+
+int  net_tls_available(void);
+
+/* Take over a connected socket.  NULL on failure with the error slot set —
+ * including the failure that matters most, a certificate that does not verify.
+ * `host` is the name to check the certificate against, so it must be the name
+ * from the URL and never an address it resolved to. */
+NetTls *net_tls_start(int fd, const char *host);
+
+int  net_tls_send(NetTls *t, const char *p, size_t n);   /* 0 = failure     */
+long net_tls_recv(NetTls *t, char *p, size_t n);         /* 0 = end, -1 err */
+void net_tls_free(NetTls *t);                            /* not the socket  */
+
 #endif /* OPENEPL_NET_INTERNAL_H */

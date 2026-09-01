@@ -18,7 +18,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <fstream>
 #include <fcntl.h>
 #include <time.h>
@@ -35,6 +37,7 @@
 #include "RmlUi_Backend.h"
 #include "RmlUi_Include_GL3.h"
 #include "RmlUi_Renderer_GL3.h"
+#include "catalog.h"
 #include "descriptors.h"
 #include "dotgrid.h"
 #include "highlight.h"
@@ -79,10 +82,8 @@ struct PlannedTool { const char* section; const char* name; };
 const PlannedTool PLANNED[] = {
     // Controls that do not exist yet. Listed greyed rather than omitted, so
     // the toolbox shows the intended shape without pretending they work.
-    // `Timer` is deliberately absent: it exists, but it is declared at module
-    // level rather than dropped into a form, so an entry here would be an
-    // invitation to place something a form cannot hold.
-    {"Common Controls", "ListBox"},  {"Common Controls", "ComboBox"},
+    // Anything that has since been implemented is filtered out below by name,
+    // so a kit shipping one of these does not make it appear twice.
     {"Containers", "TabControl"},    {"Containers", "Splitter"},
     {"System", "FileDialog"},        {"System", "TrayIcon"},
 };
@@ -97,6 +98,12 @@ struct Designer {
     std::string openepl_bin = "./target/debug/openepl";
     std::string selected;
     std::string inspector_tab = "props";
+    /// Every component the toolchain reports, with the section it files under.
+    /// Built once at startup from `openepl kits` and `openepl commands`, so a
+    /// kit installed after Studio was compiled still appears in the toolbox.
+    Catalog catalog;
+    /// The property an open editor popup is editing, and which component's.
+    std::string editing_id, editing_prop;
     std::string search;
     std::vector<std::string> pending_subs;
     std::vector<std::string> log_lines;
@@ -232,8 +239,11 @@ void relayout() {
     place("toolbar", 0, TITLEBAR_H + MENUBAR_H, W, TOOLBAR_H);
     place("status", 0, H - STATUS_H, W, STATUS_H);
     place("toolbox", 0, content_y, g.toolbox_w, content_h);
+    // Below the panel head and the search box; the rest of the dock is list.
+    place("toollist", 0, 0, g.toolbox_w, content_h - 70);
     place("centre", g.toolbox_w, content_y, centre_w, content_h);
     place("canvasarea", 0, TABBAR_H, centre_w, canvas_h);
+    place("tray", 0, canvas_h - TRAY_H, centre_w, TRAY_H);
     // The code view fills the centre column below the tab bar, and the editor
     // fills the view. Both are sized here, inline, on purpose: RmlUi's text
     // widget writes its own layout properties onto the element, and an inline
@@ -354,6 +364,7 @@ void log(const std::string& line, const char* cls = nullptr);
 Rml::ElementFormControl* code_editor();
 bool apply_code();
 void refresh_all();
+void rebuild_tray();
 bool is_selected(const std::string& id);
 
 /// Record the model before a change, so it can be undone. Call BEFORE mutating.
@@ -365,9 +376,14 @@ void push_undo() {
 
 void undo() {
     if (g.undo_stack.empty()) { set_status("nothing to undo"); return; }
+    // A snapshot remembers where the form was BEFORE a save moved it. Splicing
+    // at those lines would overwrite whatever now lives there, so the spans
+    // come from the model being replaced, which describes the file on disk.
+    const Model live = g.model;
     g.redo_stack.push_back(g.model);
     g.model = g.undo_stack.back();
     g.undo_stack.pop_back();
+    g.model.adopt_spans(live);
     if (!g.model.find(g.selected)) g.selected.clear();
     mark_dirty();
     refresh_all();
@@ -376,9 +392,11 @@ void undo() {
 
 void redo() {
     if (g.redo_stack.empty()) { set_status("nothing to redo"); return; }
+    const Model live = g.model;
     g.undo_stack.push_back(g.model);
     g.model = g.redo_stack.back();
     g.redo_stack.pop_back();
+    g.model.adopt_spans(live);
     if (!g.model.find(g.selected)) g.selected.clear();
     mark_dirty();
     refresh_all();
@@ -395,39 +413,56 @@ bool matches_search(const std::string& name) {
     return a.find(b) != std::string::npos;
 }
 
-std::string build_toolbox() {
-    std::string html;
-    const OpenEPL_LibInfo* lib = ui_library();
+std::string lowered(const std::string& v) {
+    std::string out = v;
+    for (auto& c : out) c = (char)tolower((unsigned char)c);
+    return out;
+}
 
-    auto section = [&](const char* title, bool real_first) {
+/// The toolbox, assembled from the catalogue rather than a list in this file.
+///
+/// Sections come from each kit's declared section, in the order `openepl kits`
+/// resolved them. That is what makes a kit dropped into `kits/` show up here
+/// with no change to the IDE — the promise the kit system exists to keep.
+std::string build_toolbox() {
+    std::vector<std::string> sections = g.catalog.sections;
+    auto has_section = [&](const std::string& name) {
+        for (const auto& s2 : sections) {
+            if (s2 == name) return true;
+        }
+        return false;
+    };
+    // Sections that only unimplemented controls would fill still need a
+    // heading, or the toolbox stops reading as the shape it is heading for.
+    for (const auto& p : PLANNED) {
+        if (!has_section(p.section)) {
+            sections.insert(sections.empty() ? sections.end() : sections.end() - 1, p.section);
+        }
+    }
+
+    std::string html;
+    for (const auto& section : sections) {
         std::string body;
-        if (real_first) {
-            for (int i = 0; i < lib->component_count; i++) {
-                const char* n = lib->components[i].name;
-                if (std::strcmp(n, "form") == 0) continue;
-                /* The toolbox places things into a form, and a non-visual
-                 * component has nowhere to be placed: dropping one would
-                 * produce a validator error at build time instead of a
-                 * control. `kind` is the library's own answer to that. */
-                if (lib->components[i].kind != OE_COMPONENT_VISUAL) continue;
-                if (!matches_search(n)) continue;
-                body += "<div class='tool' oe-add='" + std::string(n) + "'>"
-                        "<span class='ico'>■</span> " + n + "</div>";
-            }
+        for (const auto& c : g.catalog.components) {
+            if (c.section != section) continue;
+            // A form is what the canvas IS; offering one to drop into itself
+            // is the one entry a toolbox must not have.
+            if (c.type_name == "form") continue;
+            if (!matches_search(c.type_name)) continue;
+            body += "<div class='tool' oe-add='" + c.type_name + "'><span class='ico'>" +
+                    (c.visual ? "\xe2\x96\xa0" : "\xe2\x97\x87") + "</span> " + c.type_name +
+                    "</div>";
         }
         for (const auto& p : PLANNED) {
-            if (std::strcmp(p.section, title) != 0) continue;
+            if (std::strcmp(p.section, section.c_str()) != 0) continue;
+            if (g.catalog.find(lowered(p.name))) continue;   // it exists now
             if (!matches_search(p.name)) continue;
             body += "<div class='tool soon' oe-soon='" + std::string(p.name) + "'>"
-                    "<span class='ico'>□</span> " + p.name + "</div>";
+                    "<span class='ico'>\xe2\x96\xa1</span> " + p.name + "</div>";
         }
-        if (body.empty()) return;
-        html += "<div class='sect'>" + std::string(title) + "</div>" + body;
-    };
-
-    section("Common Controls", true);
-    section("Containers", false);
-    section("System", false);
+        if (body.empty()) continue;
+        html += "<div class='sect'>" + esc(section) + "</div>" + body;
+    }
     if (html.empty()) html = "<div class='hint'>No matches.</div>";
     return html;
 }
@@ -538,11 +573,15 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".panelhead{height:28px;padding:8px 10px 0 10px;font-size:11px;"
          "font-weight:bold;color:" << TEXT_MUTED << ";background-color:" << CHROME_ALT
       << ";border-bottom:1px " << BORDER_SOFT << "}";
+    // The list scrolls, the header and the search box do not. Driven by
+    // metadata the toolbox is as long as the installed kits make it, and a
+    // panel that simply clips is a component the user cannot reach.
+    s << "#toollist{overflow-y:auto}";
     s << "#search{margin:8px;width:" << (TOOLBOX_W - 16)
       << "px;height:26px;border:1px " << BORDER << ";border-radius:5px;background-color:" << PANEL
       << ";color:" << TEXT << ";padding-left:8px;font-size:12px}";
     s << ".sect{margin:6px 8px 2px 8px;font-size:11px;font-weight:bold;"
-         "color:" << TEXT_MUTED << "}";
+         "text-transform:uppercase;color:" << TEXT_MUTED << "}";
     s << ".tool{display:block;height:28px;margin:0 6px 2px 6px;padding:6px 8px 0 8px;"
          "border-radius:4px;font-size:12px;color:" << TEXT << "}";
     s << ".tool:hover{background-color:#eef2f8}";
@@ -674,6 +713,23 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".badge{background-color:" << ACCENT << ";color:#fff;font-size:11px;padding:3px 7px 3px 7px;"
          "border-radius:4px;white-space:nowrap}";
 
+    // ---- non-visual component tray --------------------------------------
+    s << "#tray{position:absolute;left:0;top:" << (canvas_h - TRAY_H) << "px;width:" << centre_w
+      << "px;height:" << TRAY_H << "px;background-color:" << CHROME_ALT << ";border-top:1px "
+      << BORDER << "}";
+    s << "#tray .trayhead{height:20px;padding:4px 10px 0 10px;font-size:10px;font-weight:bold;"
+         "color:" << TEXT_MUTED << ";text-transform:uppercase}";
+    s << "#traylist{padding:4px 8px 0 8px;white-space:nowrap}";
+    s << ".trayitem{display:inline-block;width:88px;height:62px;margin-right:8px;padding-top:6px;"
+         "text-align:center;border:1px " << BORDER_SOFT << ";border-radius:6px;background-color:"
+      << PANEL << "}";
+    s << ".trayitem:hover{border:1px " << ACCENT << "}";
+    s << ".trayitem.sel{border:2px " << ACCENT << ";background-color:#eef3fd}";
+    s << ".trayico{font-size:20px;color:" << ACCENT << ";height:24px}";
+    s << ".traylabel{font-size:11px;color:" << TEXT << ";white-space:nowrap;overflow:hidden}";
+    s << ".traytype{font-size:10px;color:" << TEXT_MUTED << "}";
+    s << ".trayhint{font-size:11px;color:" << TEXT_MUTED << ";padding:6px 4px 0 4px}";
+
     // ---- inspector ------------------------------------------------------
     s << "#inspectdock{left:" << (TOOLBOX_W + centre_w) << "px;top:" << content_y << "px;width:"
       << INSPECT_W << "px;height:" << content_h << "px;background-color:" << PANEL
@@ -694,6 +750,33 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << ";color:" << TEXT << ";padding-left:6px;font-size:12px}";
     s << ".prow input:focus{border:1px " << ACCENT << "}";
     s << ".note{font-size:11px;font-style:italic;color:" << TEXT_MUTED << ";margin-top:2px}";
+    // Property editors. Which one a property gets is the descriptor's `editor`
+    // hint, not a guess from its name or its value.
+    s << ".swatch{display:inline-block;width:24px;height:24px;border:1px " << BORDER
+      << ";border-radius:4px;vertical-align:top;margin-right:6px}";
+    s << ".swatch:hover{border:1px " << ACCENT << "}";
+    s << ".prow input.withswatch{display:inline-block;width:" << (INSPECT_W - 24 - 40) << "px}";
+    s << ".prow input.withbtn{display:inline-block;width:" << (INSPECT_W - 24 - 84) << "px}";
+    s << ".browse{display:inline-block;width:66px;height:24px;margin-left:6px;padding-top:4px;"
+         "text-align:center;font-size:11px;border:1px " << BORDER << ";border-radius:4px;"
+         "background-color:" << CHROME << ";color:" << TEXT << ";vertical-align:top}";
+    s << ".browse:hover{border:1px " << ACCENT << ";color:" << ACCENT << "}";
+    s << ".prow textarea{display:block;width:" << (INSPECT_W - 24)
+      << "px;height:72px;border:1px " << BORDER << ";border-radius:4px;background-color:" << PANEL
+      << ";color:" << TEXT << ";padding:4px 0 0 6px;font-size:12px}";
+    s << ".prow textarea:focus{border:1px " << ACCENT << "}";
+    // The popups the swatch and the browse button open.
+    s << "#editpop{position:absolute;background-color:" << PANEL << ";border:1px " << BORDER
+      << ";border-radius:6px;padding:8px;z-index:60;width:236px}";
+    s << "#editpop .poptitle{font-size:11px;font-weight:bold;color:" << TEXT_MUTED
+      << ";margin-bottom:6px}";
+    s << ".chip{display:inline-block;width:22px;height:22px;margin:0 3px 3px 0;border:1px "
+      << BORDER_SOFT << ";border-radius:3px}";
+    s << ".chip:hover{border:2px " << ACCENT << "}";
+    s << ".fileitem{display:block;height:22px;padding:3px 6px 0 6px;font-size:11px;color:" << TEXT
+      << ";border-radius:3px;white-space:nowrap;overflow:hidden}";
+    s << ".fileitem:hover{background-color:#eef2f8;color:" << ACCENT << "}";
+    s << "#editpop .hint{padding:4px}";
     s << ".wire{margin:10px;padding:8px;background-color:" << CHROME_ALT
       << ";border:1px " << BORDER_SOFT << ";border-radius:5px}";
     s << ".wire .h{font-size:11px;font-weight:bold;color:" << TEXT_MUTED << ";margin-bottom:4px}";
@@ -753,7 +836,8 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     for (size_t i = 0; i < menus().size(); i++) {
         s << "<div class='m' oe-menu='" << i << "'>" << menus()[i].title << "</div>";
     }
-    s << "</div><div id='menupop' style='display:none'/>";
+    s << "</div><div id='menupop' style='display:none'/>"
+         "<div id='editpop' style='display:none'/>";
 
     s << "<div id='toolbar'>"
          "<div class='tb' oe-action='save'>Save</div>"
@@ -775,7 +859,8 @@ std::string build_chrome(const std::string& family, const std::string& mono,
 
     s << "<div id='toolbox'><div class='panelhead'>TOOLBOX</div>"
          "<input type='text' id='search' placeholder='Search toolbox...'/>"
-      << build_toolbox() << "</div>";
+         "<div id='toollist'>"
+      << build_toolbox() << "</div></div>";
 
     s << "<div id='centre'>"
          "<div id='tabs'>"
@@ -801,6 +886,11 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div class='dot' style='right:26px;background-color:#febc2e'/>"
          "<div class='dot' style='right:40px;background-color:#28c840'/></div>"
          "<div id='canvas'><div id='overlay'/></div></div>"
+         // The tray. A timer, an action or a server has properties to edit and
+         // no rectangle to click, so it needs a place that is not the canvas —
+         // dropping one onto the form would write source the validator refuses.
+         "<div id='tray'><div class='trayhead'>Non-visual components</div>"
+         "<div id='traylist'/></div>"
          "</div></div>";
 
     s << "<div id='inspectdock'><div class='panelhead'>PROPERTIES / EVENTS</div>"
@@ -910,8 +1000,11 @@ void rebuild_canvas() {
         }
         Rml::Element* e = canvas->AppendChild(std::move(child));
         e->SetProperty("position", "absolute");
-        if (comp.type_name == "groupbox") e->SetAttribute("class", Rml::String("oe-groupbox"));
-        if (comp.type_name == "checkbox") e->SetAttribute("class", Rml::String("oe-checkbox"));
+        // The class comes from the shared mapping, not from a list here: a
+        // control styled in the running app and not on the canvas is exactly
+        // the WYSIWYG drift ui_mapping.h exists to prevent.
+        if (const char* cls = openepl::ui::class_for(comp.type_name.c_str()))
+            e->SetAttribute("class", Rml::String(cls));
         if (const char* markup = openepl::ui::inner_markup(comp.type_name.c_str())) {
             e->SetInnerRML(markup);
         }
@@ -944,7 +1037,8 @@ void rebuild_canvas() {
                     }
                 }
                 text_target->SetInnerRML(esc(p.second));
-            } else {
+            } else if (!openepl::ui::is_control_value(comp.type_name.c_str(),
+                                                      p.first.c_str())) {
                 e->SetProperty(openepl::ui::rcss_name(p.first.c_str()),
                                openepl::ui::rcss_value(p.first.c_str(), p.second.c_str()));
             }
@@ -1052,7 +1146,133 @@ void rebuild_canvas() {
     }
 }
 
+/* --- the tray ------------------------------------------------------------- */
+
+/// Draw the module-level components. Selecting one is what puts it in the
+/// inspector, so this is the whole of their user interface.
+void rebuild_tray() {
+    Rml::Element* list = by_id("traylist");
+    if (!list) return;
+    std::string html;
+    for (const auto& c : g.model.module_components) {
+        if (c.removed) continue;
+        html += "<div class='trayitem" + std::string(c.id == g.selected ? " sel" : "") +
+                "' oe-id='" + esc(c.id) + "'>"
+                "<div class='trayico'>\xe2\x97\x87</div>"
+                "<div class='traylabel'>" + esc(c.id) + "</div>"
+                "<div class='traytype'>" + esc(c.type_name) + "</div></div>";
+    }
+    if (html.empty()) {
+        html = "<div class='trayhint'>Empty. A timer, an action or a server has no rectangle, "
+               "so it is declared beside the form rather than inside it — drop one from the "
+               "toolbox's System section.<br/>Components already in the file are not listed "
+               "yet: <em>openepl inspect</em> reports forms only.</div>";
+    }
+    list->SetInnerRML(html);
+}
+
 /* --- inspector ------------------------------------------------------------ */
+
+/// Is this a colour RmlUi will actually paint? Only `#rgb`, `#rrggbb` and
+/// `#rrggbbaa` are: handing it anything else paints nothing, and a swatch that
+/// silently shows the panel behind it reads as "no colour set" when the
+/// property may well hold a typo.
+bool is_hex_colour(const std::string& v) {
+    if (v.empty() || v[0] != '#') return false;
+    if (v.size() != 4 && v.size() != 7 && v.size() != 9) return false;
+    for (size_t i = 1; i < v.size(); i++) {
+        if (!isxdigit((unsigned char)v[i])) return false;
+    }
+    return true;
+}
+
+std::string swatch_style(const std::string& value) {
+    if (is_hex_colour(value)) return "background-color:" + value;
+    return "background-color:#00000000;border:1px dashed " + std::string(theme::BORDER);
+}
+
+/// The colour picker's palette: greys along the top, then a hue ramp in three
+/// tints. Fixed rather than derived — a palette is a design decision, and one
+/// computed from a colour wheel gives forty colours nobody would choose.
+inline const std::vector<const char*>& palette() {
+    static const std::vector<const char*> p = {
+        "#000000", "#1f2328", "#3d444d", "#656d76", "#8c959f", "#b1bac4", "#d0d7de", "#ffffff",
+        "#8b0000", "#cf222e", "#fa4549", "#ff8182", "#7a2e00", "#bc4c00", "#fb8f44", "#ffb77c",
+        "#7a4f01", "#bf8700", "#eac54f", "#f8e3a1", "#0a5a2b", "#1a7f37", "#2da44e", "#6fdd8b",
+        "#023a5c", "#0969da", "#1e60d5", "#54aeff", "#3c1e70", "#6f42c1", "#a475f9", "#c297ff",
+        "#5e103e", "#bf3989", "#ec6cb9", "#ffadda", "#1e2233", "#24292f", "#f6f8fa", "#fafafa",
+    };
+    return p;
+}
+
+/// Files under the project's own directory, one level deep, as relative paths.
+///
+/// Relative because that is what the .oir must contain: an absolute path from
+/// this machine is a project that only builds here.
+std::vector<std::string> project_files() {
+    std::vector<std::string> out;
+    const size_t slash = g.model.path.find_last_of('/');
+    const std::string root = slash == std::string::npos ? "." : g.model.path.substr(0, slash);
+
+    // One level down, not a whole tree walk: assets sit in `assets/` beside the
+    // project, and a recursive scan of somebody's home directory is a hang.
+    std::vector<std::pair<std::string, std::string>> dirs = {{root, ""}};
+    for (size_t d = 0; d < dirs.size(); d++) {
+        const std::string dir = dirs[d].first, prefix = dirs[d].second;
+        DIR* handle = opendir(dir.c_str());
+        if (!handle) continue;
+        while (struct dirent* e = readdir(handle)) {
+            const std::string name = e->d_name;
+            if (name.empty() || name[0] == '.') continue;
+            struct stat st;
+            if (::stat((dir + "/" + name).c_str(), &st) != 0) continue;
+            if (S_ISDIR(st.st_mode)) {
+                if (prefix.empty()) dirs.push_back({dir + "/" + name, name + "/"});
+                continue;
+            }
+            if (name.size() > 4 && name.compare(name.size() - 4, 4, ".oir") == 0) continue;
+            out.push_back(prefix + name);
+        }
+        closedir(handle);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+/// Show an editor popup beside `anchor`, to the LEFT of it: the inspector is
+/// against the right edge of the window, so a popup opened to the right would
+/// hang off the screen.
+void open_editpop(Rml::Element* anchor, const std::string& html) {
+    Rml::Element* pop = by_id("editpop");
+    if (!pop || !anchor) return;
+    pop->SetInnerRML(html);
+    const auto at = anchor->GetAbsoluteOffset(Rml::BoxArea::Border);
+    int x = (int)at.x - 260;
+    if (x < 8) x = 8;
+    int y = (int)at.y;
+    if (y > g.win_h - 240) y = g.win_h - 240;
+    if (y < 8) y = 8;
+    pop->SetProperty("left", Rml::String(std::to_string(x) + "px"));
+    pop->SetProperty("top", Rml::String(std::to_string(y) + "px"));
+    pop->SetProperty("display", "block");
+}
+
+void close_editpop() {
+    if (Rml::Element* pop = by_id("editpop")) pop->SetProperty("display", "none");
+    g.editing_id.clear();
+    g.editing_prop.clear();
+}
+
+/// Apply a value the popup chose, exactly as typing it into the field would.
+void set_edited_property(const std::string& value) {
+    Component* c = g.model.find(g.editing_id);
+    if (!c || g.editing_prop.empty()) { close_editpop(); return; }
+    push_undo();
+    c->set_property(g.editing_prop, value);
+    mark_dirty();
+    close_editpop();
+    refresh_all();
+}
 
 void rebuild_inspector() {
     Rml::Element* ctx = by_id("ctxlabel");
@@ -1070,8 +1290,12 @@ void rebuild_inspector() {
     ctx->SetInnerRML(esc(comp->id) + " <span style='color:#656d76;font-weight:normal'>(" +
                      esc(comp->type_name) + ")</span>");
 
-    const OpenEPL_ComponentDesc* desc = describe(comp->type_name.c_str());
-    if (!desc) { grid->SetInnerRML("<div class='hint'>unknown type</div>"); return; }
+    // The catalogue, so a component from a kit this build never linked still
+    // gets an inspector rather than "unknown type".
+    const CatalogComponent* cc = g.catalog.find(comp->type_name);
+    if (!cc) { grid->SetInnerRML("<div class='hint'>unknown type</div>"); return; }
+    const std::vector<CatalogProp>& props = cc->props;
+    const std::vector<std::string>& events = cc->events;
 
     std::string html;
     if (g.inspector_tab == "props") {
@@ -1079,32 +1303,67 @@ void rebuild_inspector() {
         html += "<div class='prow'><label>Name</label>"
                 "<input type='text' class='cid' value='" + esc(comp->id) + "'/>"
                 "<div class='note'>internal only — does not ship to the binary</div></div>";
-        for (int i = 0; i < desc->property_count; i++) {
-            const char* name = desc->properties[i].name;
-            const std::string* v = comp->property(name);
+        for (const auto& p : props) {
+            const std::string* v = comp->property(p.name);
             // Show what the file actually sets, not the descriptor default:
             // an unset property is not applied at run time, and the canvas
             // renders it unset, so displaying the default here would make the
             // inspector disagree with both.
-            const char* def = desc->properties[i].default_value;
-            html += "<div class='prow'><label>" + std::string(name) +
-                    (v ? "" : std::string(" <span style='color:#9aa3b0'>(unset")
-                                  + (def ? std::string(", default ") + def : "") + ")</span>") +
-                    "</label>"
-                    "<input type='text' class='pv' name='" + std::string(name) + "' value='" +
-                    esc(v ? *v : "") + "'/></div>";
+            const std::string val = v ? *v : std::string();
+            html += "<div class='prow'><label>" + esc(p.name) +
+                    (v ? "" : " <span style='color:#9aa3b0'>(unset" +
+                                  (p.has_default ? ", default " + esc(p.default_value) : "") +
+                                  ")</span>") +
+                    "</label>";
+            if (p.editor == "color") {
+                // A hex field cannot be read at a glance, which is the whole
+                // complaint the `editor` hint answers.
+                html += "<div class='swatch' oe-swatch='" + esc(p.name) + "' style='" +
+                        swatch_style(val) + "'/>"
+                        "<input type='text' class='pv withswatch' name='" + esc(p.name) +
+                        "' value='" + esc(val) + "'/>";
+            } else if (p.editor == "file") {
+                html += "<input type='text' class='pv withbtn' name='" + esc(p.name) +
+                        "' value='" + esc(val) + "'/>"
+                        "<div class='browse' oe-file='" + esc(p.name) + "'>Browse…</div>";
+            } else if (p.editor == "multiline") {
+                // The value is set through the control below, not written into
+                // the markup: a paragraph with a newline in it is not an
+                // attribute value.
+                html += "<textarea class='pvm' name='" + esc(p.name) + "'/>";
+            } else {
+                html += "<input type='text' class='pv' name='" + esc(p.name) + "' value='" +
+                        esc(val) + "'/>";
+            }
+            html += "</div>";
         }
     } else {
-        if (desc->event_count == 0) html += "<div class='hint'>This component has no events.</div>";
-        for (int i = 0; i < desc->event_count; i++) {
-            const char* ev = desc->events[i].name;
+        if (events.empty()) html += "<div class='hint'>This component has no events.</div>";
+        for (const auto& ev : events) {
             const std::string* h = comp->handler(ev);
-            html += "<div class='prow'><label>On" + std::string(ev) + "</label>"
-                    "<input type='text' class='ev' name='" + std::string(ev) + "' value='" +
+            html += "<div class='prow'><label>On" + esc(ev) + "</label>"
+                    "<input type='text' class='ev' name='" + esc(ev) + "' value='" +
                     esc(h ? *h : "") + "'/></div>";
         }
     }
     grid->SetInnerRML(html);
+
+    // A textarea holds its text as a value, not as markup, so it can only be
+    // filled once the control exists.
+    for (int i = 0; i < grid->GetNumChildren(); i++) {
+        Rml::Element* row = grid->GetChild(i);
+        for (int j = 0; j < row->GetNumChildren(); j++) {
+            auto* box = dynamic_cast<Rml::ElementFormControl*>(row->GetChild(j));
+            if (!box) continue;
+            if (row->GetChild(j)->GetAttribute<Rml::String>("class", "").find("pvm") ==
+                Rml::String::npos) {
+                continue;
+            }
+            const std::string* v =
+                comp->property(row->GetChild(j)->GetAttribute<Rml::String>("name", ""));
+            box->SetValue(v ? *v : "");
+        }
+    }
 
     std::string wired;
     for (const auto& h : comp->handlers) {
@@ -1366,6 +1625,13 @@ bool apply_code() {
         g.model_text = text;
         return false;
     }
+    // `openepl inspect` reports forms only, so a module-level component in the
+    // file does not come back in the reload. Saying so beats a tray that
+    // quietly empties itself and reads as though the save deleted something.
+    if (!g.model.module_components.empty() && fresh.module_components.empty()) {
+        log("the tray is not rebuilt on reload — `openepl inspect` does not report "
+            "module-level components yet; they are still in the file.", "muted");
+    }
     fresh.path = g.model.path;
     g.model = fresh;
     g.model_text = text;
@@ -1413,6 +1679,7 @@ void set_view(const std::string& view) {
 
 void refresh_all() {
     rebuild_canvas();
+    rebuild_tray();
     rebuild_inspector();
     rebuild_code();
 }
@@ -1429,28 +1696,51 @@ void select(const std::string& id, bool add = false) {
 /* --- actions -------------------------------------------------------------- */
 
 void add_component(const std::string& type_name) {
-    const OpenEPL_ComponentDesc* desc = describe(type_name.c_str());
+    const CatalogComponent* desc = g.catalog.find(type_name);
     if (!desc) { set_status("unknown component type " + type_name); return; }
     push_undo();
     Component c;
     c.id = g.model.fresh_id(type_name);
     c.type_name = type_name;
-    for (int i = 0; i < desc->property_count; i++) {
-        if (desc->properties[i].default_value) {
-            c.set_property(desc->properties[i].name, desc->properties[i].default_value);
-        }
+    for (const auto& p : desc->props) {
+        if (p.has_default) c.set_property(p.name, p.default_value);
     }
-    c.set_property("left", std::to_string(20 + 12 * (int)g.model.children.size()));
-    c.set_property("top", std::to_string(20 + 34 * (int)g.model.children.size()));
-    g.model.children.push_back(c);
+    if (desc->visual) {
+        c.set_property("left", std::to_string(20 + 12 * (int)g.model.children.size()));
+        c.set_property("top", std::to_string(20 + 34 * (int)g.model.children.size()));
+        g.model.children.push_back(c);
+    } else {
+        // No rectangle, so no place on the canvas: this becomes a declaration
+        // beside the form, and the tray is where it can be selected.
+        g.model.module_components.push_back(c);
+    }
+    // The kit has to be in scope for the declaration to compile, and only the
+    // module's own `use` lines can put it there — which is text, not layout,
+    // so say so rather than writing a line the user did not ask for.
+    if (!desc->kit.empty()) {
+        bool used = false;
+        for (const auto& u : g.model.uses) {
+            if (u == desc->kit) used = true;
+        }
+        if (!used) log(type_name + " needs `use " + desc->kit + "` — add it in the Code view.",
+                       "err");
+    }
     mark_dirty();
-    set_status("added " + c.id);
+    set_status("added " + c.id + (desc->visual ? "" : " (tray)"));
     select(c.id);
 }
 
 /// Only the descriptor's declared type can say whether a value needs quotes:
 /// `text = "true"` and `checked = true` look identical as strings.
 bool property_needs_quotes(const std::string& type_name, const std::string& property) {
+    // The catalogue, not the linked table: a component from a kit the designer
+    // was not compiled against still has declared types, and quoting its
+    // `interval = 500` would write source that does not typecheck.
+    if (const CatalogComponent* c = g.catalog.find(type_name)) {
+        for (const auto& p : c->props) {
+            if (p.name == property) return p.type == "text";
+        }
+    }
     const OpenEPL_ComponentDesc* desc = describe(type_name.c_str());
     if (!desc) return true;
     for (int i = 0; i < desc->property_count; i++) {
@@ -1470,6 +1760,9 @@ void begin_drag(const std::string& id, int mx, int my) {
     Rml::Element* canvas = by_id("canvas");
     const Component* comp = g.model.find(id);
     if (!canvas || !comp) return;
+    // A tray component has no left/top to move, and dragging one would invent
+    // both — which the compiler then rejects.
+    if (g.model.is_module_level(id)) { select(id); return; }
     push_undo();   // one snapshot per drag, not per mouse move
     const auto origin = canvas->GetAbsoluteOffset();
     g.drag_dx = mx - ((int)origin.x + prop_int(*comp, "left", 0));
@@ -1535,17 +1828,28 @@ bool is_selected(const std::string& id) {
 void delete_selection() {
     if (g.selection.empty()) { set_status("nothing selected"); return; }
     push_undo();
-    const size_t before = g.model.children.size();
+    int gone = 0;
     std::vector<Component> kept;
     for (const auto& c : g.model.children) {
-        if (!is_selected(c.id)) kept.push_back(c);
+        if (is_selected(c.id)) gone++;
+        else kept.push_back(c);
     }
     g.model.children = kept;
+    // A tray component already written to the file is FLAGGED rather than
+    // dropped: only its span knows which lines the next save must splice away,
+    // and a component simply removed from the model would stay in the file.
+    std::vector<Component> kept_mod;
+    for (auto& c : g.model.module_components) {
+        if (!is_selected(c.id)) { kept_mod.push_back(c); continue; }
+        gone++;
+        if (c.last_line > 0) { c.removed = true; kept_mod.push_back(c); }
+    }
+    g.model.module_components = kept_mod;
     g.selection.clear();
     g.selected.clear();
     mark_dirty();
     refresh_all();
-    set_status("deleted " + std::to_string(before - g.model.children.size()) + " component(s)");
+    set_status("deleted " + std::to_string(gone) + " component(s)");
 }
 
 void copy_selection() {
@@ -1870,13 +2174,7 @@ struct Listener : Rml::EventListener {
             }
             if (src->GetId() == "search") {
                 g.search = value;
-                if (Rml::Element* tb = by_id("toolbox")) {
-                    // Rebuild only the tool list, leaving header and search box.
-                    while (tb->GetNumChildren() > 2) tb->RemoveChild(tb->GetChild(2));
-                    Rml::Element* holder = tb->AppendChild(g.doc->CreateElement("div"));
-                    holder->SetProperty("position", "relative");
-                    holder->SetInnerRML(build_toolbox());
-                }
+                if (Rml::Element* list = by_id("toollist")) list->SetInnerRML(build_toolbox());
                 return;
             }
             Component* comp = g.model.find(g.selected);
@@ -1896,6 +2194,18 @@ struct Listener : Rml::EventListener {
                     set_status("will create sub " + value);
                 }
                 refresh_all();
+            } else if (cls.find("pvm") != Rml::String::npos) {
+                // A textarea keeps its text as a value, not as an attribute:
+                // read the attribute and every edit after the first is lost.
+                auto* box = dynamic_cast<Rml::ElementFormControl*>(src);
+                if (!box) return;
+                push_undo();
+                comp->set_property(name, box->GetValue());
+                mark_dirty();
+                // Not refresh_all(): rebuilding the inspector under a control
+                // the user is typing in takes the caret with it.
+                rebuild_canvas();
+                rebuild_code();
             } else if (cls.find("pv") != Rml::String::npos) {
                 push_undo();
                 comp->set_property(name, value);
@@ -1971,7 +2281,58 @@ struct Listener : Rml::EventListener {
                 return;
             }
 
+            // A choice made inside an editor popup, before anything dismisses
+            // it — the click that picks a colour is also a click outside every
+            // other popup.
             for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                if (e->HasAttribute("oe-color")) {
+                    set_edited_property(e->GetAttribute<Rml::String>("oe-color", ""));
+                    return;
+                }
+                if (e->HasAttribute("oe-pick")) {
+                    set_edited_property(e->GetAttribute<Rml::String>("oe-pick", ""));
+                    return;
+                }
+            }
+            {
+                bool in_pop = false;
+                for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                    if (e->GetId() == "editpop") in_pop = true;
+                }
+                if (!in_pop && !el->HasAttribute("oe-swatch") && !el->HasAttribute("oe-file")) {
+                    close_editpop();
+                }
+            }
+
+            for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                if (e->HasAttribute("oe-swatch")) {
+                    g.editing_id = g.selected;
+                    g.editing_prop = e->GetAttribute<Rml::String>("oe-swatch", "");
+                    std::string html = "<div class='poptitle'>" + esc(g.editing_prop) + "</div>";
+                    for (const char* c : palette()) {
+                        html += "<div class='chip' oe-color='" + std::string(c) +
+                                "' style='background-color:" + c + "'/>";
+                    }
+                    open_editpop(e, html);
+                    return;
+                }
+                if (e->HasAttribute("oe-file")) {
+                    g.editing_id = g.selected;
+                    g.editing_prop = e->GetAttribute<Rml::String>("oe-file", "");
+                    std::string html = "<div class='poptitle'>" + esc(g.editing_prop) +
+                                       " — files beside the project</div>";
+                    const auto files = project_files();
+                    for (const auto& f : files) {
+                        html += "<div class='fileitem' oe-pick='" + esc(f) + "'>" + esc(f) +
+                                "</div>";
+                    }
+                    if (files.empty()) {
+                        html += "<div class='hint'>Nothing to choose: this project's directory "
+                                "holds no files other than the project itself.</div>";
+                    }
+                    open_editpop(e, html);
+                    return;
+                }
                 if (e->HasAttribute("oe-add")) {
                     add_component(e->GetAttribute<Rml::String>("oe-add", ""));
                     return;
@@ -2077,10 +2438,6 @@ struct Listener : Rml::EventListener {
                 }
                 return;
             }
-            // Composite components (a checkbox is a container holding a box and
-            // a caption) deliver mousedown on the CHILD, which carries no id —
-            // so walk up to the component. Without this, whether a component
-            // could be dragged depended on which part you grabbed.
             // Composite components (a checkbox is a container holding a box and
             // a caption) deliver mousedown on the CHILD, which carries no id —
             // so walk up to the component. Without this, whether a component
@@ -2268,6 +2625,38 @@ void run_script(const char* script) {
                         g.dragging = false;
                     }
                 }
+            } else if (verb == "swatch" || verb == "browse") {
+                // Open a property editor the way clicking its control does, so
+                // a dumped frame can show what the user would see. Studio bugs
+                // pass tests and fail on screen.
+                if (Rml::Element* grid = by_id("grid")) {
+                    const char* want = verb == "swatch" ? "oe-swatch" : "oe-file";
+                    for (int i = 0; i < grid->GetNumChildren(); i++) {
+                        Rml::Element* row = grid->GetChild(i);
+                        for (int j = 0; j < row->GetNumChildren(); j++) {
+                            Rml::Element* e = row->GetChild(j);
+                            if (e->GetAttribute<Rml::String>(want, "") != arg) continue;
+                            g.context->Update();   // offsets are stale until layout runs
+                            g.editing_id = g.selected;
+                            g.editing_prop = arg;
+                            std::string html = "<div class='poptitle'>" + esc(arg) + "</div>";
+                            if (verb == "swatch") {
+                                for (const char* c : palette()) {
+                                    html += "<div class='chip' oe-color='" + std::string(c) +
+                                            "' style='background-color:" + c + "'/>";
+                                }
+                            } else {
+                                for (const auto& f : project_files()) {
+                                    html += "<div class='fileitem' oe-pick='" + esc(f) + "'>" +
+                                            esc(f) + "</div>";
+                                }
+                            }
+                            open_editpop(e, html);
+                        }
+                    }
+                }
+            } else if (verb == "pick") {
+                set_edited_property(arg);
             } else if (verb == "view") {
                 set_view(arg);
             } else if (verb == "winsize") {
@@ -2716,6 +3105,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Ask the toolchain what exists before drawing a toolbox that claims to
+    // know. One subprocess per kit, once — and if the toolchain cannot be run
+    // at all the catalogue comes back empty, which shows an empty toolbox
+    // rather than a wrong one.
+    g.catalog = build_catalog(g.openepl_bin);
+
     if (!Backend::Initialize("OpenEPL Studio", INIT_W, INIT_H, true)) return 1;
 
     // The window icon: what a task switcher and a dock show. SDL owns the
@@ -2846,7 +3241,7 @@ int main(int argc, char** argv) {
                              o.x, o.y);
             }
         }
-        if (Rml::Element* tb = by_id("toolbox")) {
+        if (Rml::Element* tb = by_id("toollist")) {
             std::fprintf(stderr, "designer: toolbox has %d children\n", tb->GetNumChildren());
             for (int i = 0; i < tb->GetNumChildren(); i++) {
                 Rml::Element* c = tb->GetChild(i);

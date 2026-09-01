@@ -26,15 +26,39 @@ inline const char* tag_for(const char* type_name) {
     if (std::strcmp(type_name, "editbox") == 0) return "input";
     // A checkbox is a container holding the box and its caption.
     if (std::strcmp(type_name, "checkbox") == 0) return "div";
+    // Same shape as a checkbox: an <input type='radio'> plus its caption.
+    if (std::strcmp(type_name, "radiobutton") == 0) return "div";
+    if (std::strcmp(type_name, "combobox") == 0) return "select";
+    if (std::strcmp(type_name, "memo") == 0) return "textarea";
+    if (std::strcmp(type_name, "slider") == 0) return "input";
     if (std::strcmp(type_name, "image") == 0) return "img";
     if (std::strcmp(type_name, "progressbar") == 0) return "progress";
-    return "div";   // label, groupbox, form
+    // A listbox and a spinner are assembled from plain elements: RmlUi has no
+    // always-visible list, and no <input> that carries its own step buttons.
+    return "div";   // label, groupbox, form, listbox, spinner
+}
+
+/// The class an OpenEPL component wears, or nullptr when it needs none.
+///
+/// Several components share one substrate tag — a checkbox, a radio button, a
+/// listbox and a spinner are all `div` — so the class is the only thing telling
+/// the stylesheet which is which. It lives here beside the tag rather than in
+/// each consumer, because a control that gets its class in the runtime and not
+/// in the designer is the WYSIWYG drift this header exists to prevent.
+inline const char* class_for(const char* type_name) {
+    if (std::strcmp(type_name, "groupbox") == 0)    return "oe-groupbox";
+    if (std::strcmp(type_name, "checkbox") == 0)    return "oe-checkbox";
+    if (std::strcmp(type_name, "radiobutton") == 0) return "oe-radio";
+    if (std::strcmp(type_name, "listbox") == 0)     return "oe-listbox";
+    if (std::strcmp(type_name, "spinner") == 0)     return "oe-spinner";
+    return nullptr;
 }
 
 /// Some components need an attribute at creation for the substrate element to
 /// behave correctly (an `<input>` needs its type). Returns nullptr when none.
 inline const char* creation_attribute(const char* type_name, const char** value) {
     if (std::strcmp(type_name, "editbox") == 0) { *value = "text"; return "type"; }
+    if (std::strcmp(type_name, "slider") == 0) { *value = "range"; return "type"; }
     return nullptr;
 }
 
@@ -43,12 +67,21 @@ inline const char* creation_attribute(const char* type_name, const char** value)
 inline const char* inner_markup(const char* type_name) {
     if (std::strcmp(type_name, "checkbox") == 0)
         return "<input type='checkbox' class='oe-box'/><span class='oe-caption'></span>";
+    if (std::strcmp(type_name, "radiobutton") == 0)
+        return "<input type='radio' class='oe-box'/><span class='oe-caption'></span>";
+    // The two arrows are ordinary buttons, so they light up on hover and take
+    // a click through the same path every other button does.
+    if (std::strcmp(type_name, "spinner") == 0)
+        return "<input type='text' class='oe-value'/>"
+               "<button class='oe-step oe-up'>+</button>"
+               "<button class='oe-step oe-down'>-</button>";
     return nullptr;
 }
 
 /// Whether `checked` / `text` must be routed to a child element.
 inline bool is_composite(const char* type_name) {
-    return std::strcmp(type_name, "checkbox") == 0;
+    return std::strcmp(type_name, "checkbox") == 0 ||
+           std::strcmp(type_name, "radiobutton") == 0;
 }
 
 /// Properties carried as element ATTRIBUTES rather than RCSS styling.
@@ -57,7 +90,19 @@ inline const char* attribute_for(const char* type_name, const char* property) {
     if (std::strcmp(property, "text") == 0 && std::strcmp(type_name, "editbox") == 0)
         return "value";
     if (std::strcmp(property, "checked") == 0) return "checked";
+    // RmlUi enforces radio exclusion itself, across the whole document, by the
+    // `name` attribute — so the group name IS the mechanism, not a label for
+    // one this library would otherwise have to write.
+    if (std::strcmp(property, "group") == 0 && std::strcmp(type_name, "radiobutton") == 0)
+        return "name";
+    // A slider's bounds and position are attributes for the DESIGNER canvas,
+    // which has no running control to ask. The runtime never reaches here for
+    // them: it goes through the typed element interface first, because an
+    // attribute stops being the answer the moment the user drags the handle.
+    if (std::strcmp(property, "min") == 0) return "min";
     if (std::strcmp(property, "max") == 0) return "max";
+    if (std::strcmp(property, "value") == 0 && std::strcmp(type_name, "slider") == 0)
+        return "value";
     if (std::strcmp(property, "source") == 0) return "src";
     if (std::strcmp(property, "value") == 0 && std::strcmp(type_name, "progressbar") == 0)
         return "value";
@@ -65,9 +110,32 @@ inline const char* attribute_for(const char* type_name, const char* property) {
 }
 
 /// Whether a component renders its `text` property as element content.
+/// Stated as the types that DO, not as the ones that do not: the list of
+/// controls whose `text` is something other than their content — a value, a
+/// caption on a child, a picture — is now the longer of the two and grows with
+/// every control added.
 inline bool text_is_content(const char* type_name) {
-    return std::strcmp(type_name, "editbox") != 0 && std::strcmp(type_name, "image") != 0 &&
-           std::strcmp(type_name, "progressbar") != 0;
+    return std::strcmp(type_name, "form") == 0 || std::strcmp(type_name, "button") == 0 ||
+           std::strcmp(type_name, "label") == 0 || std::strcmp(type_name, "checkbox") == 0 ||
+           std::strcmp(type_name, "radiobutton") == 0 ||
+           std::strcmp(type_name, "groupbox") == 0 || std::strcmp(type_name, "memo") == 0;
+}
+
+/// Whether a property names what a control HOLDS rather than how it looks.
+///
+/// The runtime answers these from the typed element itself (`control_set` in
+/// ui_rmlui.cpp) and never reaches the styling path. A consumer that has no
+/// running control — the designer canvas — must skip them rather than fall
+/// through, because `value: 3` and `step: 1` are not RCSS: handing them to the
+/// stylesheet yields a parse error on stderr and no rendering either way.
+inline bool is_control_value(const char* type_name, const char* property) {
+    // What the control holds is never something a form declares.
+    if (std::strcmp(property, "count") == 0) return true;
+    if (std::strcmp(type_name, "combobox") == 0 || std::strcmp(type_name, "listbox") == 0)
+        return std::strcmp(property, "items") == 0 || std::strcmp(property, "selected") == 0;
+    if (std::strcmp(type_name, "spinner") == 0)
+        return std::strcmp(property, "value") == 0 || std::strcmp(property, "step") == 0;
+    return false;
 }
 
 /// OpenEPL property names use underscores (`background_color`) to match the rest
@@ -134,7 +202,95 @@ inline std::string control_styles(const std::string& scope = "") {
         p + "progress { display: block; position: absolute; background-color: #e1e4e8;"
             " border-radius: 8px; }" +
         p + "progress fill { background-color: #1e60d5; border-radius: 8px; }" +
-        p + "img { display: block; position: absolute; }";
+        p + "img { display: block; position: absolute; }" +
+
+        /* RmlUi builds a <select> out of three named sub-elements and styles
+         * none of them: unstyled, the value is invisible, the arrow has no
+         * size, and the drop-down opens as a zero-height box. */
+        p + "select { display: block; position: absolute; background-color: #ffffff;"
+            " border: 1px #d0d7de; border-radius: 4px; color: #1f2328; }" +
+        p + "select:focus { border: 1px #1e60d5; }" +
+        p + "select selectvalue { width: auto; margin-right: 22px; padding: 4px 8px 0 8px;"
+            " height: 100%; }" +
+        /* RmlUi's arrow element takes no content, so the affordance has to be the
+         * band itself: a shaded, bordered strip reads as a control, an unshaded
+         * one reads as a gap in the border. */
+        p + "select selectarrow { width: 22px; height: 100%; background-color: #dfe4ea;"
+            " border-left: 1px #d0d7de; }" +
+        p + "select selectarrow:hover { background-color: #cdd4dd; }" +
+        /* The drop-down is drawn OUTSIDE the select's own box, so it needs its
+         * own background and border or it renders over whatever is behind it. */
+        p + "select selectbox { background-color: #ffffff; border: 1px #d0d7de;"
+            " border-radius: 4px; margin-top: 2px; padding: 2px; }" +
+        p + "select selectbox option { display: block; padding: 4px 8px 4px 8px;"
+            " color: #1f2328; }" +
+        p + "select selectbox option:hover { background-color: #dbe6f7; }" +
+        p + "select selectbox option:checked { background-color: #1e60d5; color: #ffffff; }" +
+
+        /* A listbox is assembled here rather than by the substrate, so the rows
+         * and the selected row are this stylesheet's job entirely. */
+        /* `overflow: hidden`, never `auto`: giving RmlUi a scrolling container
+         * here leaves the rows inside it with no definite width to resolve
+         * against, and every one of them collapses to its padding. Clipping is
+         * what the box needs anyway — a list longer than its rectangle must not
+         * draw over the rest of the form. */
+        p + "div.oe-listbox { background-color: #ffffff; border: 1px #d0d7de;"
+            " border-radius: 4px; color: #1f2328; overflow: hidden; }" +
+        p + "div.oe-listbox div.oe-item { display: block; position: relative; width: 100%;"
+            " box-sizing: border-box; padding: 4px 8px 4px 8px; }" +
+        p + "div.oe-listbox div.oe-item:hover { background-color: #dbe6f7; }" +
+        p + "div.oe-listbox div.oe-selected { background-color: #1e60d5; color: #ffffff; }" +
+
+        /* Round, so a radio button is distinguishable from a checkbox at a
+         * glance — which is the only thing that tells a reader the choice is
+         * exclusive. */
+        p + "div.oe-radio { background-color: #00000000; }" +
+        p + "div.oe-radio input { display: inline-block; position: relative; width: 16px;"
+            " height: 16px; background-color: #ffffff; border: 1px #8c959f;"
+            " border-radius: 8px; vertical-align: -3px; }" +
+        /* A filled dot rather than a ring: a thick inset border would have to be
+         * drawn inside the box, and the radius is the only thing distinguishing
+         * this from a checkbox — a border wide enough to read as a ring squares
+         * the corners off and takes that away. */
+        p + "div.oe-radio input:checked { background-color: #1e60d5; border: 1px #1e60d5;"
+            " border-radius: 8px; }" +
+        p + "div.oe-radio span.oe-caption { display: inline-block; padding-left: 8px; }" +
+
+        p + "textarea { display: block; position: absolute; background-color: #ffffff;"
+            " border: 1px #d0d7de; border-radius: 4px; padding: 4px 6px 4px 6px;"
+            " color: #1f2328; }" +
+        p + "textarea:focus { border: 1px #1e60d5; }" +
+
+        /* A range input is a track plus a bar and nothing else; with no size on
+         * either, the control lays out as a zero-pixel line. */
+        p + "input.range { display: block; position: absolute; }" +
+        /* The bar is positioned by the widget, and for a horizontal slider its
+         * vertical place is its own TOP MARGIN (WidgetSlider::PositionBar) — not
+         * a flow offset from the track. So the two margins are what line the
+         * handle up with the groove, and a negative one throws it clear of the
+         * control entirely. */
+        p + "input.range slidertrack { width: 100%; height: 6px; margin-top: 7px;"
+            " background-color: #d0d7de; border-radius: 3px; }" +
+        p + "input.range sliderbar { width: 18px; height: 18px; margin-top: 1px;"
+            " background-color: #1e60d5; border-radius: 9px; }" +
+        p + "input.range sliderbar:hover { background-color: #3a7ae8; }" +
+        p + "input.range sliderarrowdec, input.range sliderarrowinc { width: 0; height: 0; }" +
+
+        p + "div.oe-spinner { background-color: #00000000; }" +
+        /* Everything is placed from the LEFT and TOP in percentages: a box
+         * sized by opposing `right`/`bottom` edges lays out at its content
+         * width here, which for a text box is the whole rest of the window. */
+        p + "div.oe-spinner input.oe-value { display: block; position: absolute; left: 0;"
+            " top: 0; width: 78%; height: 100%; box-sizing: border-box;"
+            " background-color: #ffffff; border: 1px #d0d7de; border-radius: 4px 0 0 4px;"
+            " padding: 4px 6px 0 6px; color: #1f2328; }" +
+        p + "div.oe-spinner button.oe-step { display: block; position: absolute; left: 78%;"
+            " width: 22%; height: 50%; box-sizing: border-box; padding: 0;"
+            " background-color: #eaeef2; border: 1px #d0d7de; color: #1f2328;"
+            " text-align: center; font-size: 12px; line-height: 12px; }" +
+        p + "div.oe-spinner button.oe-step:hover { background-color: #dbe1e8; }" +
+        p + "div.oe-spinner button.oe-up { top: 0; border-radius: 0 4px 0 0; }" +
+        p + "div.oe-spinner button.oe-down { top: 50%; border-radius: 0 0 4px 0; }";
 }
 
 /// The seed document every OpenEPL form is built into.

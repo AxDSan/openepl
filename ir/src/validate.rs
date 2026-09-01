@@ -903,6 +903,15 @@ fn check_record_cycles(records: &[&RecordDef], push: &mut impl FnMut(String, usi
     }
 }
 
+/// `int, text` — a parameter list for a diagnostic that shows two of them.
+fn type_list(types: &[Ty]) -> String {
+    types
+        .iter()
+        .map(|t| t.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn check_component(
     reg: &Registry,
     form: &str,
@@ -982,16 +991,29 @@ fn check_component_like(
                 }
             ), 0);
         }
+        let wants = reg.event_params(type_name, event);
         match subs.get(handler.as_str()) {
             None => push(format!(
                 "`{where_}`: event `{event}` is bound to `{handler}`, which is not a subroutine in this module"
             ), 0),
-            // A handler is called by the UI layer, which has no arguments to
-            // supply and discards nothing: it must be a plain sub.
-            Some(sub) if !sub.is_plain() => push(format!(
-                "`{where_}`: event `{event}` is bound to `{handler}`, which takes parameters or returns a value — an event handler takes no parameters and returns nothing"
+            // Nothing calls a handler for its answer, so a return type is
+            // wrong whatever the event hands over.
+            Some(sub) if sub.ret.is_some() => push(format!(
+                "`{where_}`: event `{event}` is bound to `{handler}`, which returns a value — an event handler returns nothing"
             ), sub.line),
-            Some(_) => {}
+            // Either the handler asks for what the event hands it, or it asks
+            // for nothing. Taking nothing is not a concession to old code: an
+            // event that reports something a handler does not need should not
+            // force the handler to name it.
+            Some(sub) if sub.params.is_empty() => {}
+            Some(sub)
+                if sub.params.len() == wants.len()
+                    && sub.params.iter().zip(wants).all(|((_, got), w)| got == w) => {}
+            Some(sub) => push(format!(
+                "`{where_}`: event `{event}` hands a handler ({}), but `{handler}` takes ({}) — take exactly those, or none",
+                type_list(wants),
+                type_list(&sub.params.iter().map(|(_, t)| *t).collect::<Vec<_>>()),
+            ), sub.line),
         }
     }
 }
@@ -1580,5 +1602,86 @@ mod tests {
         let m = parse("module m\nsub main\n  let d: double = 1.5\n  let x: double = d + 1\nend\n")
             .unwrap();
         assert!(validate(&m, &reg()).is_err());
+    }
+
+    /// A registry with one non-visual component whose `beep` event hands over
+    /// an int. Built here rather than taken from `Registry::core()` because the
+    /// hard-coded set is checked against the real `core` metadata, and a
+    /// component invented for a test has no business in that comparison.
+    fn reg_with_event_param() -> Registry {
+        use crate::registry::{ComponentDesc, ComponentKind};
+        let mut r = Registry::core();
+        r.insert_component(ComponentDesc {
+            name: "buzzer".into(),
+            a11y_role: 0,
+            kind: ComponentKind::NonVisual,
+            library: "core".into(),
+            properties: Vec::new(),
+            events: vec!["beep".into()],
+        });
+        r.set_event_params("buzzer", "beep", vec![Ty::Int]);
+        r
+    }
+
+    fn buzzer_module(handler: &str) -> Module {
+        parse(&format!(
+            "module m\n\nbuzzer b\n  on beep: h\nend\n\n             sub main\n  call print_int(1)\nend\n\n{handler}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_handler_may_take_what_the_event_hands_it() {
+        let m = buzzer_module("sub h(n: int)\n  call print_int(n)\nend\n");
+        let r = reg_with_event_param();
+        assert!(validate(&m, &r).is_ok(), "{:?}", validate(&m, &r));
+    }
+
+    /// The compatibility that matters most: every program written before an
+    /// event carried anything binds a parameterless handler, and must go on
+    /// compiling unchanged.
+    #[test]
+    fn a_handler_may_ignore_what_the_event_hands_it() {
+        let m = buzzer_module("sub h\n  call print_int(1)\nend\n");
+        let r = reg_with_event_param();
+        assert!(validate(&m, &r).is_ok(), "{:?}", validate(&m, &r));
+    }
+
+    #[test]
+    fn rejects_a_handler_that_takes_the_wrong_thing() {
+        let m = buzzer_module("sub h(s: text)\n  call print_text(s)\nend\n");
+        let e = validate(&m, &reg_with_event_param()).unwrap_err();
+        assert!(
+            e.iter().any(|e| e.msg.contains("hands a handler (int)")
+                && e.msg.contains("takes (text)")),
+            "{e:?}"
+        );
+        // The line of the offending subroutine, so an editor can point at it.
+        assert!(e.iter().any(|e| e.line > 0), "{e:?}");
+    }
+
+    /// An event that hands nothing over still rejects a handler that asks for
+    /// something: there is no argument to invent.
+    #[test]
+    fn rejects_a_parameter_on_an_event_that_hands_nothing() {
+        use crate::registry::{ComponentDesc, ComponentKind};
+        let mut r = Registry::core();
+        r.insert_component(ComponentDesc {
+            name: "buzzer".into(),
+            a11y_role: 0,
+            kind: ComponentKind::NonVisual,
+            library: "core".into(),
+            properties: Vec::new(),
+            events: vec!["beep".into()],
+        });
+        let m = buzzer_module("sub h(n: int)\n  call print_int(n)\nend\n");
+        assert!(validate(&m, &r).is_err());
+    }
+
+    #[test]
+    fn rejects_a_handler_that_returns_a_value() {
+        let m = buzzer_module("sub h(n: int): int\n  return n\nend\n");
+        let e = validate(&m, &reg_with_event_param()).unwrap_err();
+        assert!(e.iter().any(|e| e.msg.contains("returns nothing")), "{e:?}");
     }
 }

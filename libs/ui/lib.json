@@ -1,5 +1,8 @@
 {
   "name": "ui",
+  "display": "UI",
+  "section": "Common Controls",
+  "order": 10,
   "comment": "Visual component library. Sources are split so the metadata TU never reaches a shipped program, and the UI stack links only into modules that actually declare a form.",
   "libinfo_sources": [
     "ui_libinfo.c"
@@ -42,5 +45,5 @@
     "vendor/RmlUi/build/librmlui.a",
     "vendor/accesskit-c/include/accesskit.h"
   ],
-  "requires_hint": "RmlUi and/or accesskit-c are not vendored yet \u2014 run tools/fetch-rmlui.sh and tools/fetch-accesskit.sh"
+  "requires_hint": "RmlUi and/or accesskit-c are not vendored yet — run tools/fetch-rmlui.sh and tools/fetch-accesskit.sh"
 }

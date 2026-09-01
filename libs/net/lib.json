@@ -1,0 +1,20 @@
+{
+  "name": "net",
+  "comment": "TLS is an OPTIONAL dependency, not a required one: without mbedTLS vendored the library still builds and still speaks http, and https fails loudly at run time rather than failing everyone's build. tools/fetch-mbedtls.sh is what fills these paths in.",
+  "optional_requires": [
+    "vendor/mbedtls/include/mbedtls/ssl.h",
+    "vendor/mbedtls/build/library/libmbedtls.a",
+    "vendor/mbedtls/build/library/libmbedx509.a",
+    "vendor/mbedtls/build/library/libmbedcrypto.a"
+  ],
+  "optional_feature": "OPENEPL_NET_TLS",
+  "optional_include_dirs": [
+    "vendor/mbedtls/include"
+  ],
+  "optional_link_args": [
+    "-Lvendor/mbedtls/build/library",
+    "-lmbedtls",
+    "-lmbedx509",
+    "-lmbedcrypto"
+  ]
+}

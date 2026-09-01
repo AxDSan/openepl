@@ -13,7 +13,7 @@
 //!
 //! Assumes the module passed `openepl_ir::validate`.  Entry is `ECodeStart`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use openepl_ir::sema::resolve_ret;
@@ -106,6 +106,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         ui_used: BTreeSet::new(),
         component_libs: BTreeSet::new(),
         loop_used: false,
+        thunks: BTreeMap::new(),
         aggr_used: BTreeSet::new(),
         globals: HashMap::new(),
         allocas: Vec::new(),
@@ -295,6 +296,9 @@ struct Lowerer<'a> {
     /// Whether the entry point runs the event loop itself (a module with a form
     /// enters it through `oe_ui_run`).
     loop_used: bool,
+    /// Handler thunks, keyed by the symbol they define so two bindings of one
+    /// subroutine emit one function. See `handler_symbol`.
+    thunks: BTreeMap<String, String>,
     /// Array / byte-set helpers referenced.
     ///
     /// These are plain C functions rather than slot-ABI commands: indexing is
@@ -420,7 +424,7 @@ impl Lowerer<'_> {
             let text = self.property_text(value)?;
             self.set_property(Some(&lib), &handle, name, &text);
         }
-        self.bind_handlers_to(Some(&lib), &handle, &c.handlers);
+        self.bind_handlers_to(Some(&lib), &c.type_name, &handle, &c.handlers);
         Ok(())
     }
 
@@ -461,7 +465,7 @@ impl Lowerer<'_> {
         // The accessible name is user-facing TEXT (the title), never the form's
         // identifier — identifiers must not reach the binary (G8).
         self.a11y(&root, form_role(), &title);
-        self.bind_handlers_to(None, &root, &form.handlers);
+        self.bind_handlers_to(None, "form", &root, &form.handlers);
 
         // Children.
         for child in &form.children {
@@ -497,7 +501,7 @@ impl Lowerer<'_> {
                 }
                 None => self.a11y_role_only(&handle, role),
             }
-            self.bind_handlers_to(None, &handle, &child.handlers);
+            self.bind_handlers_to(None, &child.type_name, &handle, &child.handlers);
         }
 
         Ok(())
@@ -567,7 +571,13 @@ impl Lowerer<'_> {
     }
 
     /// Bind events to handler FUNCTION POINTERS (never names — G8).
-    fn bind_handlers_to(&mut self, lib: Option<&str>, handle: &str, handlers: &[(String, String)]) {
+    fn bind_handlers_to(
+        &mut self,
+        lib: Option<&str>,
+        type_name: &str,
+        handle: &str,
+        handlers: &[(String, String)],
+    ) {
         for (event, sub) in handlers {
             let ev = self.cstr(event);
             let f = match lib {
@@ -580,13 +590,59 @@ impl Lowerer<'_> {
                     format!("oe_{lib}_component_on")
                 }
             };
+            let target = self.handler_symbol(type_name, event, sub);
             writeln!(
                 self.body,
-                "  call i32 @{f}(i64 {handle}, ptr {ev}, ptr @{})",
-                user_symbol(sub)
+                "  call i32 @{f}(i64 {handle}, ptr {ev}, ptr @{target})"
             )
             .unwrap();
         }
+    }
+
+    /// The function a component is handed for `event`.
+    ///
+    /// An event that hands nothing over binds the subroutine itself: the two
+    /// signatures already agree, and a program with no parameterised event
+    /// lowers to exactly what it did before events could carry anything.
+    ///
+    /// An event that DOES hand something over binds a thunk written with the
+    /// event's signature, whatever the handler's is. The library then always
+    /// calls through a pointer whose type it declared, so a handler that
+    /// ignores the argument is one forwarding jump rather than a call through
+    /// a mismatched pointer — which happens to work on the machines we build
+    /// for and is undefined everywhere.
+    fn handler_symbol(&mut self, type_name: &str, event: &str, sub: &str) -> String {
+        let reg = self.reg;
+        let params = reg.event_params(type_name, event);
+        if params.is_empty() {
+            return user_symbol(sub);
+        }
+        // The LLVM types alone name the thunk: they ARE its signature, so two
+        // events handing the same shapes to the same subroutine want one.
+        let shape = params
+            .iter()
+            .map(|t| llvm_ty(*t))
+            .collect::<Vec<_>>()
+            .join("_");
+        let name = format!("oe_evt_{sub}_{shape}");
+        if !self.thunks.contains_key(&name) {
+            let decls = params
+                .iter()
+                .enumerate()
+                .map(|(i, t)| format!("{} %a{i}", llvm_ty(*t)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let takes = reg.sub(sub).is_some_and(|s| !s.params.is_empty());
+            let args = if takes { decls.clone() } else { String::new() };
+            self.thunks.insert(
+                name.clone(),
+                format!(
+                    "define internal void @{name}({decls}) {{\nentry:\n  call void @{}({args})\n  ret void\n}}\n\n",
+                    user_symbol(sub)
+                ),
+            );
+        }
+        name
     }
 
     fn fresh_label(&mut self, kind: &str) -> String {
@@ -1685,6 +1741,36 @@ impl Lowerer<'_> {
                             operand: t,
                         })
                     }
+                    // A truth value has no getter of its own: every
+                    // implementation of the property ABI answers a bool as the
+                    // text `true` or `false`, so the read is the text read and
+                    // the comparison is what makes it a bool again. Without
+                    // this arm the value falls through as text and `if
+                    // agree.checked` fails to lower at all.
+                    Ty::Bool => {
+                        let f = match &lib {
+                            None => {
+                                self.ui_used.insert("oe_ui_get");
+                                "oe_ui_get".to_string()
+                            }
+                            Some(lib) => {
+                                self.component_libs.insert(lib.clone());
+                                format!("oe_{lib}_component_get")
+                            }
+                        };
+                        let t = self.fresh();
+                        writeln!(self.body, "  {t} = call ptr @{f}(i64 {handle}, ptr {n})").unwrap();
+                        let read = Val {
+                            ty: Ty::Text,
+                            operand: t,
+                        };
+                        let yes = self.eval(&Expr::TextLit("true".into()))?;
+                        let eq = self.call_text_eq(&read, &yes)?;
+                        Ok(Val {
+                            ty: Ty::Bool,
+                            operand: eq,
+                        })
+                    }
                     _ => {
                         let f = match &lib {
                             None => {
@@ -2100,6 +2186,9 @@ impl Lowerer<'_> {
         }
 
         out.push_str(functions);
+        for thunk in self.thunks.values() {
+            out.push_str(thunk);
+        }
 
         if entry {
             writeln!(out, "define i32 @ECodeStart() {{").unwrap();
@@ -2136,6 +2225,72 @@ mod tests {
     fn lower(src: &str) -> Result<String, LowerError> {
         let m = parse(src).unwrap();
         lower_module(&m, &Registry::core())
+    }
+
+    /// `Registry::core()` plus a non-visual component whose `beep` event hands
+    /// its handler an int — the shape the `timer`'s `tick` has, without putting
+    /// an invented component into the hard-coded core set.
+    fn lower_with_buzzer(src: &str) -> String {
+        use openepl_ir::registry::{ComponentDesc, ComponentKind};
+        let mut reg = Registry::core();
+        reg.insert_component(ComponentDesc {
+            name: "buzzer".into(),
+            a11y_role: 0,
+            kind: ComponentKind::NonVisual,
+            library: "core".into(),
+            properties: Vec::new(),
+            events: vec!["beep".into()],
+        });
+        reg.set_event_params("buzzer", "beep", vec![Ty::Int]);
+        lower_module(&parse(src).unwrap(), &reg).unwrap()
+    }
+
+    const BUZZER: &str = "module m\n\nbuzzer b\n  on beep: h\nend\n\nsub main\n  call print_int(1)\nend\n\n";
+
+    /// The library is handed a pointer with the EVENT's signature, never the
+    /// handler's: that is what makes the cast on the C side type-correct.
+    #[test]
+    fn a_parameterised_event_binds_through_a_thunk() {
+        let ll = lower_with_buzzer(&format!("{BUZZER}sub h(n: int)\n  call print_int(n)\nend\n"));
+        assert!(ll.contains("define internal void @oe_evt_h_i32(i32 %a0)"), "{ll}");
+        assert!(ll.contains("call void @oe_user_h(i32 %a0)"), "{ll}");
+        assert!(
+            ll.contains("@oe_core_component_on(") && ll.contains("ptr @oe_evt_h_i32)"),
+            "{ll}"
+        );
+    }
+
+    /// A handler that ignores the argument is bound through a thunk that drops
+    /// it, rather than through a pointer the library would have to call with
+    /// the wrong type.
+    #[test]
+    fn a_handler_that_ignores_the_argument_still_gets_the_event_signature() {
+        let ll = lower_with_buzzer(&format!("{BUZZER}sub h\n  call print_int(1)\nend\n"));
+        assert!(ll.contains("define internal void @oe_evt_h_i32(i32 %a0)"), "{ll}");
+        assert!(ll.contains("call void @oe_user_h()"), "{ll}");
+    }
+
+    /// Two components binding one subroutine to one event share a thunk. Two
+    /// `define`s of one name is not a diagnostic anywhere in this compiler —
+    /// it is invalid IR that `llc` rejects at the end of the build.
+    #[test]
+    fn two_bindings_of_one_handler_share_a_thunk() {
+        let ll = lower_with_buzzer(
+            "module m\n\nbuzzer b1\n  on beep: h\nend\n\nbuzzer b2\n  on beep: h\nend\n\n             sub main\n  call print_int(1)\nend\n\nsub h(n: int)\n  call print_int(n)\nend\n",
+        );
+        assert_eq!(ll.matches("define internal void @oe_evt_h_i32").count(), 1, "{ll}");
+        assert_eq!(ll.matches("ptr @oe_evt_h_i32)").count(), 2, "{ll}");
+    }
+
+    /// An event that hands nothing over binds the subroutine itself, so every
+    /// program written before events could carry anything lowers to what it
+    /// lowered to before.
+    #[test]
+    fn an_event_with_no_parameters_binds_the_subroutine_directly() {
+        let ll = lower_with_buzzer(&format!(
+            "module m\n\nbuzzer b\nend\n\nsub main\n  call print_int(1)\nend\n"
+        ));
+        assert!(!ll.contains("oe_evt_"), "{ll}");
     }
 
     #[test]

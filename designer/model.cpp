@@ -1,5 +1,7 @@
 #include "model.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -23,10 +25,30 @@ std::vector<std::string> split_words(const std::string& line, int max_parts) {
 std::string quote(const std::string& v) {
     std::string out = "\"";
     for (char c : v) {
-        if (c == '"' || c == '\\') out += '\\';
-        out += c;
+        // A raw newline ends a text literal as far as the lexer is concerned,
+        // so a multi-line value written verbatim is a file that will not parse.
+        // The escapes here are exactly the ones ir/src/lexer.rs accepts.
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\t': out += "\\t";  break;
+            case '\0': out += "\\0";  break;
+            default:   out += c;
+        }
     }
     return out + "\"";
+}
+
+/// Does this line announce a kind of its own — `prop: `, `handler: `, or one
+/// this reader has never heard of?
+bool is_line_kind(const std::string& line) {
+    for (size_t i = 0; i < line.size(); i++) {
+        const char c = line[i];
+        if (c == ':') return i > 0 && i + 1 < line.size() && line[i + 1] == ' ';
+        if (!islower((unsigned char)c) && c != '_') return false;
+    }
+    return false;
 }
 
 /// Write a property value as the declared type requires: quoted for text,
@@ -54,7 +76,23 @@ bool load_model(const std::string& openepl_bin, const std::string& path, Model& 
     std::istringstream lines(text);
     std::string line;
     Component* current = nullptr;   // component most recently declared
+    // The property a `prop:` line last named, so the rest of a multi-line value
+    // can be put back together.
+    Component* prop_target = nullptr;
+    std::string prop_name;
     while (std::getline(lines, line)) {
+        // `inspect` writes a property value raw, so a value with a newline in
+        // it arrives as several lines and only the first is labelled. Anything
+        // that does not announce a line kind of its own belongs to the value
+        // above it — without this, opening a form with a memo in it and saving
+        // truncates that memo to its first line.
+        if (prop_target && !is_line_kind(line)) {
+            if (const std::string* had = prop_target->property(prop_name)) {
+                prop_target->set_property(prop_name, *had + "\n" + line);
+            }
+            continue;
+        }
+        prop_target = nullptr;
         if (line.rfind("module: ", 0) == 0) {
             out.module_name = line.substr(8);
         } else if (line.rfind("use: ", 0) == 0) {
@@ -71,6 +109,19 @@ bool load_model(const std::string& openepl_bin, const std::string& path, Model& 
                             &out.form_last_line);
             }
             current = &out.form;
+        } else if (line.rfind("modcomponent: ", 0) == 0) {
+            // A DISTINCT line kind, not `component:`, because that one is
+            // consumed into form children — a module-level timer written back
+            // inside the form is source the compiler rejects.
+            auto parts = split_words(line.substr(14), 3);
+            Component c;
+            c.id = parts[0];
+            c.type_name = parts.size() > 1 ? parts[1] : "";
+            if (parts.size() > 2) {
+                std::sscanf(parts[2].c_str(), "span=%d..%d", &c.first_line, &c.last_line);
+            }
+            out.module_components.push_back(c);
+            current = &out.module_components.back();
         } else if (line.rfind("component: ", 0) == 0) {
             auto parts = split_words(line.substr(11), 2);
             Component c;
@@ -83,7 +134,11 @@ bool load_model(const std::string& openepl_bin, const std::string& path, Model& 
             if (parts.size() == 3) {
                 Component* target =
                     (parts[0] == out.form_name) ? &out.form : out.find(parts[0]);
-                if (target) target->set_property(parts[1], parts[2]);
+                if (target) {
+                    target->set_property(parts[1], parts[2]);
+                    prop_target = target;
+                    prop_name = parts[1];
+                }
             }
         } else if (line.rfind("handler: ", 0) == 0) {
             auto parts = split_words(line.substr(9), 3);
@@ -132,7 +187,39 @@ std::string emit_form(const Model& m, const NeedsQuotes& needs_quotes) {
     return o.str();
 }
 
-bool save_model(const Model& m, const std::vector<std::string>& new_subs,
+std::string emit_module_component(const Component& c, const NeedsQuotes& needs_quotes) {
+    std::ostringstream o;
+    o << c.type_name << " " << c.id << "\n";
+    for (const auto& p : c.properties) {
+        o << "  " << p.first << " = "
+          << render_value(c.type_name, p.first, p.second, needs_quotes) << "\n";
+    }
+    for (const auto& h : c.handlers) {
+        o << "  on " << h.first << ": " << h.second << "\n";
+    }
+    o << "end\n";
+    return o.str();
+}
+
+namespace {
+
+int count_lines(const std::string& block) {
+    int n = 0;
+    for (char ch : block) {
+        if (ch == '\n') n++;
+    }
+    return n;
+}
+
+/// One stretch of the original file that a regenerated block replaces.
+/// `which` is -1 for the form and otherwise an index into module_components.
+struct Region {
+    int first = 0, last = 0, which = -1;
+};
+
+} // namespace
+
+bool save_model(Model& m, const std::vector<std::string>& new_subs,
                 const NeedsQuotes& needs_quotes, std::string& error) {
     std::ifstream in(m.path);
     if (!in) { error = "cannot read " + m.path; return false; }
@@ -141,36 +228,117 @@ bool save_model(const Model& m, const std::vector<std::string>& new_subs,
     while (std::getline(in, line)) lines.push_back(line);
     in.close();
 
-    // A module with no form has nothing to splice. Console programs and
-    // libraries are edited entirely as text, and their saves go through the
-    // code editor — reporting a form error for them is both wrong and alarming.
-    if (m.form_name.empty()) return true;
+    // Every stretch of the file the designer owns, in file order.
+    std::vector<Region> regions;
+    if (!m.form_name.empty()) {
+        regions.push_back({m.form_first_line, m.form_last_line, -1});
+    }
+    for (size_t i = 0; i < m.module_components.size(); i++) {
+        if (m.module_components[i].last_line > 0) {
+            regions.push_back({m.module_components[i].first_line,
+                               m.module_components[i].last_line, (int)i});
+        }
+    }
+    std::sort(regions.begin(), regions.end(),
+              [](const Region& a, const Region& b) { return a.first < b.first; });
 
-    if (m.form_first_line < 1 || m.form_last_line > (int)lines.size() ||
-        m.form_first_line > m.form_last_line) {
-        error = "form line span is out of range; refusing to save";
-        return false;
+    // Nothing to splice and nothing to add. A module with no form is still a
+    // project: a console program or a library is edited entirely as text, and
+    // reporting a form error for it is both wrong and alarming.
+    bool anything_new = !new_subs.empty();
+    for (const auto& c : m.module_components) {
+        if (c.last_line == 0 && !c.removed) anything_new = true;
+    }
+    if (regions.empty() && !anything_new) return true;
+
+    // A span that does not describe the file cannot be spliced into it safely,
+    // and overlapping spans would write one block over another. Refusing is the
+    // only answer that cannot lose code.
+    int prev_end = 0;
+    for (const auto& r : regions) {
+        if (r.first < 1 || r.last > (int)lines.size() || r.first > r.last || r.first <= prev_end) {
+            error = "component line spans are out of range or overlap; refusing to save";
+            return false;
+        }
+        prev_end = r.last;
     }
 
     std::ostringstream out;
-    // Everything before the form, verbatim.
-    for (int i = 0; i < m.form_first_line - 1; i++) out << lines[i] << "\n";
-    // The regenerated form.
-    out << emit_form(m, needs_quotes);
-    // Everything after the form, verbatim — this is what protects hand-written
-    // subroutine bodies from being clobbered by a designer save.
-    for (size_t i = (size_t)m.form_last_line; i < lines.size(); i++) out << lines[i] << "\n";
+    int out_lines = 0;                   // written so far, so spans can be recomputed
+    int cursor = 0;                      // 0-based index of the next original line to copy
+    auto copy_through = [&](int upto) {  // exclusive, 0-based
+        for (int i = cursor; i < upto; i++) { out << lines[i] << "\n"; out_lines++; }
+        cursor = upto;
+    };
+
+    // Where each block actually lands. Recomputing is not tidiness: a save that
+    // changes the form's line count moves everything below it, and the next
+    // save in the same session would splice over whatever now sits at the old
+    // lines — which is somebody's subroutine.
+    int form_first = m.form_first_line, form_last = m.form_last_line;
+    std::vector<std::pair<int, int>> spans(m.module_components.size(), {0, 0});
+
+    for (const auto& r : regions) {
+        copy_through(r.first - 1);
+        // A component deleted in the tray splices to nothing, which is how its
+        // lines leave the file without disturbing anything around them.
+        const std::string block =
+            r.which < 0 ? emit_form(m, needs_quotes)
+            : m.module_components[(size_t)r.which].removed
+                ? std::string()
+                : emit_module_component(m.module_components[(size_t)r.which], needs_quotes);
+        const int start = out_lines + 1;
+        out << block;
+        out_lines += count_lines(block);
+        if (r.which < 0) { form_first = start; form_last = out_lines; }
+        else spans[(size_t)r.which] = {start, out_lines};
+        cursor = r.last;                 // step over the block being replaced
+    }
+    // Everything after the last region, verbatim — this is what protects
+    // hand-written subroutine bodies from being clobbered by a designer save.
+    copy_through((int)lines.size());
+
+    // Components dropped in this session go at the END of the file, never above
+    // the form. A module-level declaration is legal anywhere at top level, and
+    // appending is the one position that moves no existing line — so nothing
+    // this save has already placed can go stale behind it.
+    for (size_t i = 0; i < m.module_components.size(); i++) {
+        if (m.module_components[i].last_line > 0 || m.module_components[i].removed) continue;
+        out << "\n";
+        out_lines++;
+        const std::string block = emit_module_component(m.module_components[i], needs_quotes);
+        const int start = out_lines + 1;
+        out << block;
+        out_lines += count_lines(block);
+        spans[i] = {start, out_lines};
+    }
     // Stubs for handlers the user just wired up.
     for (const auto& name : new_subs) {
         out << "\nsub " << name << "\n"
             << "  # TODO: written by the designer; add your code here.\n"
             << "  call print_text(\"" << name << "\")\n"
             << "end\n";
+        out_lines += 5;
     }
 
     std::ofstream os(m.path, std::ios::trunc);
     if (!os) { error = "cannot write " + m.path; return false; }
     os << out.str();
+    os.close();
+
+    // Only now, with the bytes on disk, do the spans describe reality.
+    m.form_first_line = form_first;
+    m.form_last_line = form_last;
+    for (size_t i = 0; i < m.module_components.size(); i++) {
+        m.module_components[i].first_line = spans[i].first;
+        m.module_components[i].last_line = spans[i].second;
+    }
+    // A removed component's lines are gone from the file, so it is gone.
+    std::vector<Component> kept;
+    for (const auto& c : m.module_components) {
+        if (!c.removed) kept.push_back(c);
+    }
+    m.module_components = kept;
     return true;
 }
 

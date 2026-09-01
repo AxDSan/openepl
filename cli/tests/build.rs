@@ -1907,7 +1907,7 @@ end
         return;
     }
 
-    let mut child = Command::new(&bin)
+    let child = Command::new(&bin)
         .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("start server");
@@ -2017,7 +2017,7 @@ end
 
     // Frames are uncapped, so the count is a lifetime, not a duration: enough
     // turns of the loop that a request has somewhere to arrive.
-    let mut child = Command::new(&bin)
+    let child = Command::new(&bin)
         .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "30000")
         .env("OPENEPL_UI_DUMP_A11Y", "1")
         .stdout(std::process::Stdio::piped())
@@ -2117,4 +2117,260 @@ end
         String::from_utf8_lossy(&out.stderr)
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Build inline `.oir` source to a temp binary. `tag` must be unique per test —
+/// see `build_as`, which this is the anonymous-source twin of.
+fn build_src(src: &str, tag: &str) -> PathBuf {
+    let repo = repo();
+    let dir = std::env::temp_dir().join(format!("openepl_src_{tag}"));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.oir");
+    std::fs::write(&path, src).expect("write source");
+    let bin = dir.join("prog");
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", path.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+        .status()
+        .expect("run openepl");
+    assert!(status.success(), "openepl build {tag} failed");
+    bin
+}
+
+/// What an event hands its handler, end to end in a built binary.
+///
+/// `examples/eventparams.oir` wires two timers to the same `tick`: one handler
+/// takes the count and one ignores it. Both must be ordinary subroutines, so
+/// the assertion is the whole transcript in order — the counted handler seeing
+/// 1, 2, 3 is the entire point, and a thunk that dropped the argument or handed
+/// over the same number twice would still produce plausible-looking output.
+#[test]
+fn typed_event_parameters_reach_a_handler() {
+    let stdout = run(&build_as("eventparams", "typedevt"));
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "main returned",
+            "counted tick 1",
+            "plain tick",
+            "counted tick 2",
+            "plain tick",
+            "counted tick 3",
+            "plain tick",
+        ]
+    );
+}
+
+/// A truth value read back off a component.
+///
+/// This is a regression test for two faults that only appear together. The
+/// checker types `agree.checked` as bool from the descriptor, but the lowering
+/// special-cased only `Ty::Int` and let everything else fall through as text,
+/// so `if agree.checked` did not compile at all. Underneath that, RmlUi records
+/// a checkbox as the PRESENCE of an attribute and a user click sets it to the
+/// empty string — so reading the attribute's value reported a box the user had
+/// just ticked as clear.
+///
+/// Hence the click: `2.1` hits the checkbox's inner input, which is the path a
+/// real mouse takes. Asserting only the construction-time value would pass
+/// against the broken getter.
+#[test]
+fn a_bool_property_reads_as_a_truth_value() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    const SRC: &str = "\
+module boolprop
+use ui
+
+form win
+  title = \"bool\"
+  width = 200
+  height = 120
+
+  checkbox agree
+    text = \"I agree\"
+    checked = false
+    left = 10
+    top = 10
+    on change: toggled
+  end
+end
+
+sub toggled
+  if agree.checked
+    call print_text(\"now checked\")
+  else
+    call print_text(\"now unchecked\")
+  end
+end
+";
+    let bin = build_src(SRC, "boolprop");
+    let out = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "4")
+        .env("OPENEPL_UI_SYNTH_CLICK", "2.1")
+        .output()
+        .expect("run boolprop");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("now checked"),
+        "a box the user ticked must read as checked, got:\n{stdout}"
+    );
+}
+
+/// The tracks composed: one form holding a combobox, a checkbox and a button,
+/// with a module-level timer whose handler takes the tick count.
+///
+/// Each of those landed separately, and each was verified separately. This is
+/// the case none of them covers — a visual component read through the property
+/// ABI in the same program as a non-visual one delivering a typed argument, so
+/// that a form and the event loop cannot quietly stop composing.
+#[test]
+fn a_form_composes_a_combobox_with_a_typed_timer() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    const SRC: &str = "\
+module composed
+use ui
+
+form win
+  title = \"composed\"
+  width = 320
+  height = 200
+
+  combobox colour
+    items = \"Red\\nGreen\\nBlue\"
+    selected = 3
+    left = 10
+    top = 10
+    width = 200
+    height = 28
+  end
+
+  checkbox agree
+    text = \"Agree\"
+    checked = true
+    left = 10
+    top = 60
+  end
+
+  button go
+    text = \"Report\"
+    left = 10
+    top = 100
+    width = 90
+    height = 30
+    on click: report
+  end
+end
+
+timer ticker
+  interval = 20
+  on tick: counted
+end
+
+sub counted(n: int)
+  call print_text(concat(\"tick \", int_to_text(n)))
+end
+
+sub report
+  call print_text(concat(\"colour = \", int_to_text(colour.selected)))
+  if agree.checked
+    call print_text(\"agreed\")
+  else
+    call print_text(\"not agreed\")
+  end
+end
+";
+    let bin = build_src(SRC, "composed");
+    let out = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "8")
+        .env("OPENEPL_UI_SYNTH_CLICK", "4")
+        .output()
+        .expect("run composed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Interleaving is not asserted: how many times a 20ms timer fires inside
+    // eight frames is a property of the machine, not of the program.
+    assert!(
+        stdout.contains("colour = 3"),
+        "combobox selection did not read back:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("agreed") && !stdout.contains("not agreed"),
+        "checkbox truth value did not read back:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("tick 1"),
+        "the timer's typed argument did not reach its handler:\n{stdout}"
+    );
+}
+
+/// The property inspector edits a real component's colour, and edits only it.
+///
+/// The `color` editor hint puts a swatch and a palette popup in the inspector,
+/// which is UI: it passes its own tests while painting nothing and writing
+/// nothing. So this drives the actual widgets — select the button, open its
+/// swatch, pick a value, save — and then asserts on the FILE, because what the
+/// inspector is for is changing the source.
+///
+/// The whole-file comparison is the point of the test rather than an extra: a
+/// save that rewrites the form's own `background_color`, reflows the file, or
+/// drops the untouched lines would satisfy any assertion that only looked at
+/// the button.
+#[test]
+fn the_inspector_edits_a_colour_on_a_real_component() {
+    let repo = repo();
+    let designer = repo.join("designer/openepl-designer");
+    if !designer.exists() {
+        eprintln!("designer not built; skipping");
+        return;
+    }
+    let original = repo.join("examples/controls.oir");
+    // Never the tracked file: Studio saves on exit, and examples/form.oir has
+    // been committed with a stray designer edit twice.
+    let project = std::env::temp_dir().join("openepl_swatch.oir");
+    std::fs::copy(&original, &project).expect("seed project");
+
+    let out = Command::new(&designer)
+        .arg(&project)
+        .arg(repo.join("target/debug/openepl"))
+        .env(
+            "OPENEPL_DESIGNER_SCRIPT",
+            "select:go;swatch:background_color;pick:#1a7f37;save",
+        )
+        .output()
+        .expect("run designer");
+    assert!(out.status.success(), "designer session failed");
+
+    let before = std::fs::read_to_string(&original).expect("read original");
+    let after = std::fs::read_to_string(&project).expect("read saved");
+    assert!(
+        after.contains("background_color = \"#1a7f37\""),
+        "the picked colour never reached the file:\n{after}"
+    );
+    let changed: Vec<(&str, &str)> = before
+        .lines()
+        .zip(after.lines())
+        .filter(|(a, b)| a != b)
+        .collect();
+    assert_eq!(
+        changed,
+        vec![(
+            "    background_color = \"#1e60d5\"",
+            "    background_color = \"#1a7f37\""
+        )],
+        "the inspector rewrote more than the property it was pointed at"
+    );
+    assert_eq!(
+        before.lines().count(),
+        after.lines().count(),
+        "the save changed the file's length"
+    );
+    let _ = std::fs::remove_file(&project);
 }

@@ -13,11 +13,18 @@
 
 #define OE_TIMERS_MAX 16
 
+/* `tick` hands its handler the tick count, so the pointer is called as this.
+ * The compiler emits the handler side with exactly this signature whatever the
+ * user's subroutine takes (backend/src/lib.rs, `handler_symbol`), so the cast
+ * back is the one the callee was written with. */
+typedef void (*TickFn)(int32_t);
+
 typedef struct {
     int32_t        in_use;
     int32_t        interval_ms;
     int32_t        enabled;
     int32_t        source;      /* loop source id while armed, else 0        */
+    int32_t        ticks;       /* how many have fired; what `tick` hands on */
     OpenEPL_HandlerFn on_tick;
 } Timer;
 
@@ -34,7 +41,11 @@ static Timer *resolve(int64_t h) {
 
 static int32_t tick(void *state) {
     Timer *t = (Timer *)state;
-    if (t->on_tick) t->on_tick();
+    /* Counted whether or not anyone is listening, and never reset by `rearm`:
+     * changing the interval is not a reason for a program to be told it is
+     * back at the first tick. */
+    t->ticks++;
+    if (t->on_tick) ((TickFn)t->on_tick)(t->ticks);
     /* Live until something disables it: a repeating timer is what a program
      * that wants one shot can stop from inside its own handler. */
     return 0;

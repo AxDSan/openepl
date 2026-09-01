@@ -1,4 +1,4 @@
-/* OpenEPL support-library ABI + SDK — v2 (Phase 2).
+/* OpenEPL support-library ABI + SDK — v3 (Phase 2).
  *
  * The single documented contract between the OpenEPL runtime/compiler and a
  * support library, a clean-room descendant of EPL's
@@ -23,7 +23,7 @@
 extern "C" {
 #endif
 
-#define OPENEPL_ABI_VERSION 2
+#define OPENEPL_ABI_VERSION 3
 
 /* --- Data-type tags (SDT_*) — the ABI type system. ---------
  * Numeric values are frozen.  Phase 2 uses INT/INT64/DOUBLE/TEXT; the rest are
@@ -302,7 +302,14 @@ enum {
 
 /* An event handler emitted by the compiler.  Bound by function POINTER, never
  * by name: there is no name-based dispatch at run time, so no user identifier
- * reaches the shipped binary. */
+ * reaches the shipped binary.
+ *
+ * The void signature is the binding currency, not the calling one.  An event
+ * that declares parameters is dispatched by casting this back to a pointer
+ * taking exactly those parameters — safe because the compiler emits the handler
+ * side with that signature and only that one, whatever the user's subroutine
+ * takes.  A component with no parameterised event never casts and nothing about
+ * it changes. */
 typedef void (*OpenEPL_HandlerFn)(void);
 
 /* Accessibility roles (subset of the AccessKit/platform role vocabulary). */
@@ -330,6 +337,17 @@ typedef struct OpenEPL_PropertyDesc {
 
 typedef struct OpenEPL_EventDesc {
     const char *name;          /* surface event name, e.g. "click"          */
+    /* What the event hands its handler.  Most events hand it nothing, which is
+     * why these are APPENDED: a positional `{ "click" }` zero-fills to
+     * param_count 0 and a NULL table, so every descriptor written against v2
+     * still says exactly what it meant.
+     *
+     * A handler may declare these parameters or declare none — the checker
+     * accepts both and the compiler emits a thunk with the event's signature
+     * either way, so the library always calls through a pointer whose type it
+     * knows.  Anything else is a compile error naming both signatures. */
+    int32_t     param_count;
+    const int32_t *param_tags; /* param_count OE_SDT_* tags                 */
 } OpenEPL_EventDesc;
 
 typedef struct OpenEPL_ComponentDesc {

@@ -1,23 +1,25 @@
-/* The "net" support library — TCP and plain HTTP over raw BSD sockets.
+/* The "net" support library — TCP and HTTP over raw BSD sockets.
  *
- * No dependencies: getaddrinfo(3), socket(2), poll(2) and the C library, which
- * is all a program needs to speak TCP and HTTP/1.1.
+ * The plain path has no dependencies: getaddrinfo(3), socket(2), poll(2) and
+ * the C library, which is all a program needs to speak TCP and HTTP/1.1.
  *
- * THERE IS NO TLS, AND THAT IS A DECISION, NOT AN OVERSIGHT.
+ * TLS IS OPTIONAL, AND WHAT THAT MEANS IS EXACT.
  * --------------------------------------------------------------------------
- * OpenEPL links a program statically, so a TLS stack here would be vendored
- * into every shipped binary — megabytes of code, a certificate store to keep
- * current, and a security-critical dependency the project would have to patch
- * on someone else's schedule.  Hand-rolling one is worse still.  So this
- * library speaks http:// only.
+ * OpenEPL links a program statically, so a TLS stack is vendored into every
+ * binary that uses one — megabytes of code and a security-critical dependency
+ * on someone else's patch schedule.  Nobody who only speaks http should pay
+ * that, and nobody who does not want https should have their build fail for
+ * want of it.  So mbedTLS is an OPTIONAL dependency (see lib.json): run
+ * tools/fetch-mbedtls.sh and https works; do not, and everything else builds
+ * and runs exactly as before.
  *
- * The consequence is stated loudly rather than papered over: an https:// URL
- * FAILS with OE_ERR_UNSUPPORTED and a message saying https is not supported
- * yet.  It is never silently downgraded to http — a downgrade would put a
- * user's password or token on the wire in the clear, and a program that
- * "worked" would be the vulnerability.  A redirect to an https:// location
- * fails the same way, for the same reason.  When a program needs TLS today,
- * the honest answer is to shell out to curl through the `process` library.
+ * What never happens, in either state, is a downgrade.  Without TLS an
+ * https:// URL FAILS with OE_ERR_UNSUPPORTED naming the fetch script; it is
+ * never rewritten to http, because that would put a user's password or token
+ * on the wire in the clear and the program would look like it worked.  A
+ * redirect FROM https TO http is refused for the same reason even when TLS is
+ * present, and a certificate that does not verify fails the request — an
+ * unverified https connection is encrypted to whoever is on the path.
  *
  * Timeouts are not optional either.  A program that hangs forever on a dead
  * host is the worst failure mode in a networking library, because it looks
@@ -541,25 +543,64 @@ void net_host_ip(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 
 /* --- HTTP ------------------------------------------------------------- */
 
-/* Split an absolute http:// URL.  Returns 1 on success; on failure the error
- * slot is already set — including the one failure that matters most, an
- * https:// URL, which is refused rather than downgraded. */
+/* A connection the HTTP client reads and writes without caring which it has.
+ * `tls` is NULL for http, and every send and receive below goes through the
+ * three wrappers — which is what keeps the https path from being a second,
+ * subtly different copy of the request loop. */
+typedef struct { int fd; NetTls *tls; } NetConn;
+
+static int net_conn_send_all(NetConn *c, const char *p, size_t n, int *saved) {
+    if (c->tls) return net_tls_send(c->tls, p, n);   /* sets the slot itself */
+    return net_sock_send_all(c->fd, p, n, saved);
+}
+
+/* >0 bytes, 0 = end of response, -1 = failure.  A plain socket reports the
+ * failure through *saved for the caller to turn into an errno message; the TLS
+ * side has already written a more specific one to the slot. */
+static long net_conn_recv(NetConn *c, char *p, size_t n, int *saved) {
+    if (c->tls) return net_tls_recv(c->tls, p, n);
+    for (;;) {
+        ssize_t r = recv(c->fd, p, (int)n, 0);
+        int e = net_errno();
+        if (r >= 0) return (long)r;
+        if (e == NET_EINTR) continue;
+        if (e == EAGAIN || e == NET_EWOULDBLOCK) e = NET_ETIMEDOUT;
+        *saved = e;
+        return -1;
+    }
+}
+
+static void net_conn_close(NetConn *c) {
+    if (c->tls) net_tls_free(c->tls);
+    if (c->fd >= 0) close(c->fd);
+    c->tls = NULL;
+    c->fd = -1;
+}
+
+/* Split an absolute http:// or https:// URL.  Returns 1 on success; on failure
+ * the error slot is already set — including the one failure that matters most,
+ * an https:// URL on a build with no TLS, which is refused rather than
+ * downgraded. */
 static int net_url_split(const char *url, char *host, size_t hostsz,
-                         int *port, char *path, size_t pathsz) {
+                         int *port, char *path, size_t pathsz, int *tls) {
     const char *sep = strstr(url, "://");
     if (!sep) {
-        oe_error_set(OE_ERR_INVALID_ARG, "url must begin with http://");
+        oe_error_set(OE_ERR_INVALID_ARG, "url must begin with http:// or https://");
         return 0;
     }
     size_t schemelen = (size_t)(sep - url);
+    *tls = 0;
     if (schemelen == 5 && strncasecmp(url, "https", 5) == 0) {
-        oe_error_set(OE_ERR_UNSUPPORTED,
-                     "https is not supported yet: this build has no TLS, and an "
-                     "https url is never downgraded to http");
-        return 0;
-    }
-    if (schemelen != 4 || strncasecmp(url, "http", 4) != 0) {
-        oe_error_set(OE_ERR_INVALID_ARG, "only the http scheme is supported");
+        if (!net_tls_available()) {
+            oe_error_set(OE_ERR_UNSUPPORTED,
+                         "https is not available: this build has no TLS. Run "
+                         "tools/fetch-mbedtls.sh and rebuild. An https url is "
+                         "never downgraded to http");
+            return 0;
+        }
+        *tls = 1;
+    } else if (schemelen != 4 || strncasecmp(url, "http", 4) != 0) {
+        oe_error_set(OE_ERR_INVALID_ARG, "only the http and https schemes are supported");
         return 0;
     }
 
@@ -599,7 +640,7 @@ static int net_url_split(const char *url, char *host, size_t hostsz,
         host[hl] = '\0';
     }
 
-    *port = 80;
+    *port = *tls ? 443 : 80;
     if (colon) {
         long v = strtol(colon + 1, NULL, 10);
         if (v <= 0 || v > 65535) {
@@ -703,17 +744,25 @@ static int net_http_do(const char *method, const char *url,
 
     for (int hop = 0; hop < 5; hop++) {
         char host[256], path[1600];
-        int port = 80;
-        if (!net_url_split(cur, host, sizeof host, &port, path, sizeof path))
+        int port = 80, tls = 0;
+        if (!net_url_split(cur, host, sizeof host, &port, path, sizeof path, &tls))
             return 0;                                   /* slot already set */
 
         int fd = net_dial(host, port);
         if (fd < 0) return 0;
 
+        NetConn conn = { fd, NULL };
+        if (tls) {
+            /* The name from the URL, not an address it resolved to: the
+             * certificate is checked against what the user asked for. */
+            conn.tls = net_tls_start(fd, host);
+            if (!conn.tls) { close(fd); return 0; }     /* slot already set */
+        }
+
         NetBuf req = {0};
         char head[2600];
         int hn;
-        if (port == 80)
+        if (port == (tls ? 443 : 80))
             hn = snprintf(head, sizeof head,
                 "%s %s HTTP/1.1\r\nHost: %s\r\n", method, path, host);
         else
@@ -735,11 +784,15 @@ static int net_http_do(const char *method, const char *url,
         if (reqbody) net_buf_add(&req, reqbody, strlen(reqbody));
 
         int saved = 0;
-        if (!req.p || !net_sock_send_all(fd, req.p, req.n, &saved)) {
-            if (!req.p) saved = ENOMEM;
+        if (!req.p || !net_conn_send_all(&conn, req.p, req.n, &saved)) {
+            int oom = !req.p;
             net_buf_free(&req);
-            close(fd);
-            net_fail(saved, "send request");
+            /* A TLS send has already put its own detail in the slot, so only
+             * the plain path reports a platform code here. */
+            int report = oom || !conn.tls;
+            if (oom) saved = ENOMEM;
+            net_conn_close(&conn);
+            if (report) net_fail(saved, "send request");
             return 0;
         }
         net_buf_free(&req);
@@ -748,31 +801,30 @@ static int net_http_do(const char *method, const char *url,
         NetBuf raw = {0};
         char chunk[8192];
         for (;;) {
-            ssize_t r = recv(fd, chunk, (int)sizeof chunk, 0);
-            int e = net_errno();
+            saved = 0;
+            long r = net_conn_recv(&conn, chunk, sizeof chunk, &saved);
             if (r == 0) break;
             if (r < 0) {
-                if (e == NET_EINTR) continue;
-                if (e == EAGAIN || e == NET_EWOULDBLOCK) e = NET_ETIMEDOUT;
                 net_buf_free(&raw);
-                close(fd);
-                net_fail(e, "receive response");
+                int report = !conn.tls;
+                net_conn_close(&conn);
+                if (report) net_fail(saved, "receive response");
                 return 0;
             }
             if (!net_buf_add(&raw, chunk, (size_t)r)) {
                 net_buf_free(&raw);
-                close(fd);
+                net_conn_close(&conn);
                 oe_error_set_errno(ENOMEM, "receive response");
                 return 0;
             }
             if ((long)raw.n > NET_MAX_BODY) {
                 net_buf_free(&raw);
-                close(fd);
+                net_conn_close(&conn);
                 oe_error_set(OE_ERR_UNSUPPORTED, "response larger than 64 MiB");
                 return 0;
             }
         }
-        close(fd);
+        net_conn_close(&conn);
 
         const char *sep = NULL;
         for (size_t i = 0; i + 3 < raw.n; i++)
@@ -805,29 +857,34 @@ static int net_http_do(const char *method, const char *url,
         const char *bstart = sep + 4;
         size_t blen = raw.n - (size_t)(bstart - raw.p);
 
-        /* A redirect to https is the case this library must never paper over:
-         * following it would need TLS, and rewriting it to http would put the
-         * request on the wire in the clear. */
+        /* A redirect that changes the scheme is the case this library must
+         * never paper over.  Downwards — https to http — is refused outright:
+         * a server cannot talk a program into sending the rest of the
+         * conversation in the clear.  Upwards is fine, and on a build with no
+         * TLS net_url_split refuses it on the next hop rather than rewriting
+         * it. */
         char loc[2048];
         if ((g_status == 301 || g_status == 302 || g_status == 303 ||
              g_status == 307 || g_status == 308) &&
             net_header(g_headers, "Location", loc, sizeof loc) && *loc) {
             char next[2048];
-            if (strncasecmp(loc, "https://", 8) == 0) {
+            if (tls && strncasecmp(loc, "http://", 7) == 0) {
                 net_buf_free(&raw);
                 oe_error_set(OE_ERR_UNSUPPORTED,
-                             "the server redirected to https, which is not "
-                             "supported yet: this build has no TLS, and the "
-                             "request is never downgraded to http");
+                             "the server redirected an https request to http, "
+                             "which would put the rest of the exchange on the "
+                             "wire in the clear: the redirect is refused");
                 return 0;
             }
+            const char *scheme = tls ? "https" : "http";
+            int defport = tls ? 443 : 80;
             if (strstr(loc, "://")) snprintf(next, sizeof next, "%s", loc);
             else if (loc[0] == '/') {
-                if (port == 80) snprintf(next, sizeof next, "http://%s%s", host, loc);
-                else snprintf(next, sizeof next, "http://%s:%d%s", host, port, loc);
+                if (port == defport) snprintf(next, sizeof next, "%s://%s%s", scheme, host, loc);
+                else snprintf(next, sizeof next, "%s://%s:%d%s", scheme, host, port, loc);
             } else {
-                if (port == 80) snprintf(next, sizeof next, "http://%s/%s", host, loc);
-                else snprintf(next, sizeof next, "http://%s:%d/%s", host, port, loc);
+                if (port == defport) snprintf(next, sizeof next, "%s://%s/%s", scheme, host, loc);
+                else snprintf(next, sizeof next, "%s://%s:%d/%s", scheme, host, port, loc);
             }
             net_buf_free(&raw);
             snprintf(cur, sizeof cur, "%s", next);

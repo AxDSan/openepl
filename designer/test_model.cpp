@@ -23,6 +23,8 @@ static std::string slurp(const std::string& p) {
 }
 
 static void test_json();
+static void test_module_components(const std::string& openepl, const NeedsQuotes& quoted);
+static void test_multiline(const std::string& openepl);
 
 int main(int argc, char** argv) {
     const std::string openepl = argc > 1 ? argv[1] : "./target/debug/openepl";
@@ -69,7 +71,11 @@ int main(int argc, char** argv) {
 
     // Edit one property, exactly as the designer would.
     m.find("go")->set_property("left", "42");
-    auto quoted = [](const std::string&, const std::string& p) { return p == "text"; };
+    // Stands in for the descriptor table: only the declared type can say which
+    // properties are text, and a form `title` written unquoted does not parse.
+    auto quoted = [](const std::string&, const std::string& p) {
+        return p == "text" || p == "title";
+    };
     check("save", save_model(m, {}, quoted, err));
 
     const std::string saved = slurp(fixture);
@@ -106,11 +112,169 @@ int main(int argc, char** argv) {
     check("original body still intact", saved2.find(body) != std::string::npos);
     check("new component present", saved2.find("label label1") != std::string::npos);
 
+    // Two saves in one session with no reload between them. The first grows
+    // the form, so every line below it moves; a save that did not recompute
+    // the span would splice the second save over somebody's subroutine.
+    Model m3;
+    check("reload before the two-save test", load_model(openepl, fixture, m3, err));
+    Component extra;
+    extra.id = m3.fresh_id("label");
+    extra.type_name = "label";
+    extra.set_property("text", "Second");
+    extra.set_property("left", "10");
+    extra.set_property("top", "90");
+    m3.children.push_back(extra);
+    check("first save of two", save_model(m3, {}, quoted, err));
+    m3.find("go")->set_property("top", "77");
+    check("second save without reloading", save_model(m3, {}, quoted, err));
+    const std::string twice = slurp(fixture);
+    check("two saves left the body intact", twice.find(body) != std::string::npos);
+    check("two saves left one form", twice.find("form win") == twice.rfind("form win"));
+    check("second edit applied", twice.find("top = 77") != std::string::npos);
+    Model m4;
+    check("file after two saves still parses", load_model(openepl, fixture, m4, err));
+
+    // Undo across a save. The snapshot remembers where the form was BEFORE the
+    // save moved it; restoring those line numbers and saving again splices over
+    // whatever now lives there, which is somebody's subroutine.
+    Model m5;
+    check("reload before the undo test", load_model(openepl, fixture, m5, err));
+    const Model snapshot = m5;              // what push_undo() keeps
+    Component third;
+    third.id = m5.fresh_id("label");
+    third.type_name = "label";
+    third.set_property("text", "Third");
+    m5.children.push_back(third);
+    check("save that moves the lines below the form", save_model(m5, {}, quoted, err));
+    Model restored = snapshot;              // what undo() puts back
+    restored.adopt_spans(m5);
+    check("save after undo", save_model(restored, {}, quoted, err));
+    const std::string after_undo = slurp(fixture);
+    check("undo-then-save left the body intact", after_undo.find(body) != std::string::npos);
+    check("undo-then-save left one form",
+          after_undo.find("form win") == after_undo.rfind("form win"));
+    Model m6;
+    check("file after undo-then-save still parses", load_model(openepl, fixture, m6, err));
+
+    test_multiline(openepl);
+    test_module_components(openepl, quoted);
     test_json();
 
 
     std::printf("\n%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
+}
+
+/* --- multi-line property values ----------------------------------------- *
+ *
+ * `inspect` writes a value raw, so a memo's text arrives as several lines.
+ * Read naively, the save that follows truncates it to the first line — which
+ * is a user losing a paragraph without being told.
+ */
+
+static void test_multiline(const std::string& openepl) {
+    const std::string fixture = "/tmp/openepl_designer_mlfixture.oir";
+    const char* source =
+        "module mlfixture\n"
+        "use ui\n"
+        "\n"
+        "form win\n"
+        "  title = \"ML\"\n"
+        "\n"
+        "  memo notes\n"
+        "    text = \"one\\ntwo\\nthree\"\n"
+        "    left = 10\n"
+        "  end\n"
+        "end\n";
+    { std::ofstream f(fixture, std::ios::trunc); f << source; }
+
+    Model m;
+    std::string err;
+    check("multi-line fixture loads", load_model(openepl, fixture, m, err));
+    check("all three lines read back",
+          m.find("notes") && *m.find("notes")->property("text") == "one\ntwo\nthree");
+    check("the property after it still lands",
+          m.find("notes") && m.find("notes")->property("left") &&
+              *m.find("notes")->property("left") == "10");
+
+    auto quoted = [](const std::string&, const std::string& p) {
+        return p == "text" || p == "title";
+    };
+    check("save a multi-line value", save_model(m, {}, quoted, err));
+    const std::string saved = slurp(fixture);
+    check("written as an escape, not a raw newline",
+          saved.find("text = \"one\\ntwo\\nthree\"") != std::string::npos);
+    Model back;
+    check("multi-line file still parses", load_model(openepl, fixture, back, err));
+    check("round-trips unchanged",
+          back.find("notes") && *back.find("notes")->property("text") == "one\ntwo\nthree");
+}
+
+/* --- module-level components -------------------------------------------- *
+ *
+ * A timer has no rectangle, so it is declared beside the form rather than
+ * inside it. Writing one INTO the form is source the compiler rejects, which
+ * makes this the test that stops the tray from corrupting a project.
+ */
+
+static void test_module_components(const std::string& openepl, const NeedsQuotes& quoted) {
+    const std::string fixture = "/tmp/openepl_designer_modfixture.oir";
+    const char* source =
+        "module modfixture\n"
+        "use ui\n"
+        "\n"
+        "form win\n"
+        "  title = \"Mod\"\n"
+        "  width = 300\n"
+        "  height = 200\n"
+        "end\n"
+        "\n"
+        "sub on_tick\n"
+        "  # A comment the designer must not touch.\n"
+        "  call print_text(\"tick\")\n"
+        "end\n";
+    { std::ofstream f(fixture, std::ios::trunc); f << source; }
+
+    Model m;
+    std::string err;
+    check("module fixture loads", load_model(openepl, fixture, m, err));
+
+    Component t;
+    t.id = m.fresh_id("timer");
+    t.type_name = "timer";
+    t.set_property("interval", "500");
+    t.set_handler("tick", "on_tick");
+    m.module_components.push_back(t);
+    check("save with a module-level component", save_model(m, {}, quoted, err));
+
+    const std::string saved = slurp(fixture);
+    check("timer written at module level",
+          saved.find("\ntimer timer1\n") != std::string::npos);
+    // The one that matters: NOT inside the form, where the compiler refuses it.
+    check("timer written after the form's end",
+          saved.find("timer timer1") > saved.find("form win"));
+    check("handler body untouched",
+          saved.find("  # A comment the designer must not touch.") != std::string::npos);
+    check("span recorded by the save",
+          m.module_components[0].first_line > 0 && m.module_components[0].last_line >
+              m.module_components[0].first_line);
+
+    // Editing it and saving again must replace the block, not append a second.
+    m.module_components[0].set_property("interval", "250");
+    check("second save of the module component", save_model(m, {}, quoted, err));
+    const std::string twice = slurp(fixture);
+    check("still exactly one timer", twice.find("timer timer1") == twice.rfind("timer timer1"));
+    check("module component edit applied", twice.find("interval = 250") != std::string::npos);
+
+    Model back;
+    check("file with a module component re-inspects", load_model(openepl, fixture, back, err));
+    check("form still found", back.form_first_line == 4 && back.form_last_line == 8);
+
+    // A stale span must be refused rather than spliced over live code.
+    Model bad = m;
+    bad.module_components[0].first_line = 1;
+    bad.module_components[0].last_line = 9999;
+    check("out-of-range span is refused", !save_model(bad, {}, quoted, err));
 }
 
 /* --- JSON: the LSP wire format ------------------------------------------ */

@@ -7,6 +7,10 @@
  */
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/ElementInstancer.h>
+#include <RmlUi/Core/Elements/ElementFormControl.h>
+#include <RmlUi/Core/Elements/ElementFormControlInput.h>
+#include <RmlUi/Core/Elements/ElementFormControlSelect.h>
+#include <RmlUi/Core/Elements/ElementFormControlTextArea.h>
 #include <RmlUi/Core/FileInterface.h>
 #include <RmlUi/Core/Input.h>
 #include <cstdint>
@@ -102,7 +106,14 @@ bool widget_disabled(OpenEPL_Widget w) { return g_disabled.count(w) > 0; }
 void set_widget_enabled(OpenEPL_Widget w, bool on) {
     if (on) g_disabled.erase(w);
     else    g_disabled.insert(w);
-    if (Rml::Element* e = resolve(w)) e->SetProperty("opacity", on ? "1.0" : "0.4");
+    Rml::Element* e = resolve(w);
+    if (!e) return;
+    e->SetProperty("opacity", on ? "1.0" : "0.4");
+    /* A form control enforces its own disabled state — it stops taking the
+     * keyboard, not just the click — and the listener gate above cannot do
+     * that for it, because typing into a memo never reaches a listener of
+     * ours. */
+    if (auto* fc = rmlui_dynamic_cast<Rml::ElementFormControl*>(e)) fc->SetDisabled(!on);
 }
 
 /* Adapts an OpenEPL function-pointer handler to an RmlUi listener. Handlers are
@@ -401,6 +412,328 @@ public:
 };
 EmbeddedFiles g_files;
 
+
+/* --- the controls that carry a value -----------------------------------
+ *
+ * A combobox's items, a memo's paragraph and a slider's position live behind
+ * RmlUi's typed element interfaces, not on attributes: an attribute written
+ * beside one of them goes stale the moment the user touches the control, so
+ * reading it back reports what the form said rather than what the person did.
+ * This is the one file allowed to know that, which is why the translation is
+ * here instead of being approximated with attributes further up.
+ *
+ * Indices cross here too. RmlUi counts options from 0 and says -1 for none;
+ * OpenEPL counts from 1 and says 0. The conversion happens at this boundary
+ * and nowhere else.
+ */
+
+/* Items arrive as ONE text with a newline between entries — a property value
+ * is a literal at the D10 boundary, so there is no `text[]` to carry and no
+ * component to name in a `combobox_add` call (see ui_libinfo.c). An empty text
+ * is no items; a trailing newline is the separator after the last entry rather
+ * than an empty entry after it. */
+std::vector<std::string> split_items(const char* text) {
+    std::vector<std::string> out;
+    if (!text || !*text) return out;
+    std::string cur;
+    for (const char* c = text; *c; c++) {
+        if (*c == '\n') { out.push_back(cur); cur.clear(); }
+        else             cur += *c;
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+std::string join_items(const std::vector<std::string>& items) {
+    std::string out;
+    for (size_t i = 0; i < items.size(); i++) {
+        if (i) out += '\n';
+        out += items[i];
+    }
+    return out;
+}
+
+/* A form applies properties in the order its lines are written, so
+ * `selected = 2` routinely arrives before the items it counts into. The wish
+ * is remembered and re-applied when items land, so a form does not silently
+ * depend on the order two of its lines happen to be in. */
+std::unordered_map<uint64_t, int> g_wanted_selection;
+
+Rml::Element* child_with_tag(Rml::Element* e, const char* tag) {
+    if (!e) return nullptr;
+    for (int i = 0; i < e->GetNumChildren(); i++) {
+        if (e->GetChild(i)->GetTagName() == tag) return e->GetChild(i);
+    }
+    return nullptr;
+}
+
+/* --- combobox ---------------------------------------------------------- */
+
+Rml::ElementFormControlSelect* as_select(OpenEPL_Widget w) {
+    return rmlui_dynamic_cast<Rml::ElementFormControlSelect*>(resolve(w));
+}
+
+void combo_select(OpenEPL_Widget w, int n) {
+    g_wanted_selection[w] = n;
+    if (auto* sel = as_select(w)) sel->SetSelection(n >= 1 ? n - 1 : -1);
+}
+
+void combo_set_items(OpenEPL_Widget w, const char* text) {
+    auto* sel = as_select(w);
+    if (!sel) return;
+    sel->RemoveAll();
+    for (const std::string& item : split_items(text)) sel->Add(item, item);
+    const auto it = g_wanted_selection.find(w);
+    combo_select(w, it == g_wanted_selection.end() ? 0 : it->second);
+}
+
+std::string combo_items(OpenEPL_Widget w) {
+    auto* sel = as_select(w);
+    if (!sel) return std::string();
+    std::vector<std::string> items;
+    for (int i = 0; i < sel->GetNumOptions(); i++) {
+        if (Rml::Element* o = sel->GetOption(i)) items.push_back(o->GetInnerRML());
+    }
+    return join_items(items);
+}
+
+/* --- listbox ----------------------------------------------------------- *
+ *
+ * RmlUi has no always-visible list, so this one is assembled from a row per
+ * item. Selection is carried by a class on the chosen row rather than in a
+ * table beside the widget: the element already has to say which row is
+ * highlighted, and a second copy of that answer is a second copy to keep true.
+ */
+int list_selected(OpenEPL_Widget w) {
+    Rml::Element* e = resolve(w);
+    if (!e) return 0;
+    for (int i = 0; i < e->GetNumChildren(); i++) {
+        if (e->GetChild(i)->IsClassSet("oe-selected")) return i + 1;
+    }
+    return 0;
+}
+
+void list_select(OpenEPL_Widget w, int n) {
+    g_wanted_selection[w] = n;
+    Rml::Element* e = resolve(w);
+    if (!e) return;
+    for (int i = 0; i < e->GetNumChildren(); i++) e->GetChild(i)->SetClass("oe-selected", i + 1 == n);
+}
+
+struct ListItemClick : Rml::EventListener {
+    OpenEPL_Widget list;
+    int            index;   /* counts from 1, like every position */
+    ListItemClick(OpenEPL_Widget l, int i) : list(l), index(i) {}
+    void ProcessEvent(Rml::Event&) override {
+        if (widget_disabled(list)) return;
+        list_select(list, index);
+        /* Raised on the LISTBOX, not on the row: the row is an implementation
+         * detail and the handler was bound to the control the form declared. */
+        if (Rml::Element* e = resolve(list)) e->DispatchEvent("change", Rml::Dictionary());
+    }
+};
+std::vector<ListItemClick*> g_item_clicks;   /* owned; freed at shutdown */
+
+void list_set_items(OpenEPL_Widget w, const char* text) {
+    Rml::Element* e = resolve(w);
+    if (!e || !g.document) return;
+    while (e->GetNumChildren() > 0) e->RemoveChild(e->GetChild(0));
+    const auto items = split_items(text);
+    for (size_t i = 0; i < items.size(); i++) {
+        Rml::ElementPtr row = g.document->CreateElement("div");
+        if (!row) continue;
+        row->SetClass("oe-item", true);
+        row->SetInnerRML(items[i]);
+        Rml::Element* raw = e->AppendChild(std::move(row));
+        auto* click = new ListItemClick(w, (int)i + 1);
+        g_item_clicks.push_back(click);
+        raw->AddEventListener("click", click);
+    }
+    const auto it = g_wanted_selection.find(w);
+    list_select(w, it == g_wanted_selection.end() ? 0 : it->second);
+}
+
+std::string list_items(OpenEPL_Widget w) {
+    Rml::Element* e = resolve(w);
+    if (!e) return std::string();
+    std::vector<std::string> items;
+    for (int i = 0; i < e->GetNumChildren(); i++) items.push_back(e->GetChild(i)->GetInnerRML());
+    return join_items(items);
+}
+
+/* --- slider ------------------------------------------------------------ *
+ *
+ * The bounds are attributes and the position is a value, and RmlUi clamps the
+ * position against whichever bounds it holds AT THE MOMENT the value is set —
+ * so `value = 200` written above `max = 500` would stick at 100. The wanted
+ * position is kept here and re-applied after every bound change, which is what
+ * makes the three lines of a form order-independent.
+ */
+struct Range { int value = 50; };
+std::unordered_map<uint64_t, Range> g_ranges;
+
+void slider_apply(OpenEPL_Widget w) {
+    auto* in = rmlui_dynamic_cast<Rml::ElementFormControlInput*>(resolve(w));
+    if (!in) return;
+    in->SetValue(std::to_string(g_ranges[w].value));
+}
+
+int slider_value(OpenEPL_Widget w) {
+    auto* in = rmlui_dynamic_cast<Rml::ElementFormControlInput*>(resolve(w));
+    if (!in) return g_ranges[w].value;
+    return (int)std::strtol(in->GetValue().c_str(), nullptr, 10);
+}
+
+/* --- spinner ----------------------------------------------------------- *
+ *
+ * A number and the two buttons that step it. The bounds hold however the value
+ * was reached — stepped, typed, or assigned from a subroutine — because a
+ * spinner whose range only applies to its arrows is not a bounded number, it
+ * is a text box with decoration.
+ */
+struct Spin {
+    int value = 0, min = 0, max = 100, step = 1;
+};
+std::unordered_map<uint64_t, Spin> g_spins;
+
+int clamp_int(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+void spin_apply(OpenEPL_Widget w) {
+    Spin& s = g_spins[w];
+    s.value = clamp_int(s.value, s.min, s.max);
+    if (auto* in = rmlui_dynamic_cast<Rml::ElementFormControlInput*>(
+            child_with_tag(resolve(w), "input")))
+        in->SetValue(std::to_string(s.value));
+}
+
+/* Reads what the box actually holds, so a typed number is the answer rather
+ * than the last one this library wrote. */
+int spin_value(OpenEPL_Widget w) {
+    Spin& s = g_spins[w];
+    if (auto* in = rmlui_dynamic_cast<Rml::ElementFormControlInput*>(
+            child_with_tag(resolve(w), "input"))) {
+        const Rml::String text = in->GetValue();
+        if (!text.empty()) s.value = clamp_int((int)std::strtol(text.c_str(), nullptr, 10), s.min, s.max);
+    }
+    return s.value;
+}
+
+struct SpinStep : Rml::EventListener {
+    OpenEPL_Widget widget;
+    int            direction;
+    SpinStep(OpenEPL_Widget w, int d) : widget(w), direction(d) {}
+    void ProcessEvent(Rml::Event&) override {
+        if (widget_disabled(widget)) return;
+        Spin& s = g_spins[widget];
+        s.value = spin_value(widget) + direction * s.step;
+        spin_apply(widget);
+        if (Rml::Element* e = resolve(widget)) e->DispatchEvent("change", Rml::Dictionary());
+    }
+};
+std::vector<SpinStep*> g_spin_steps;   /* owned; freed at shutdown */
+
+/* Handle a property that belongs to one of the controls above. Returns false
+ * when the property is nobody's special case and the generic attribute/RCSS
+ * path below should have it. */
+bool control_set(const std::string& type, OpenEPL_Widget w, const char* prop, const char* value) {
+    const int n = (int)std::strtol(value, nullptr, 10);
+    /* `count` is what the control holds, not something a form gets to declare.
+     * Swallowed rather than refused: it is a readable property, and an error
+     * here would make a designer that writes every property back fail. */
+    if (std::strcmp(prop, "count") == 0) return true;
+
+    if (type == "combobox") {
+        if (std::strcmp(prop, "items") == 0)    { combo_set_items(w, value); return true; }
+        if (std::strcmp(prop, "selected") == 0) { combo_select(w, n); return true; }
+        return false;
+    }
+    if (type == "listbox") {
+        if (std::strcmp(prop, "items") == 0)    { list_set_items(w, value); return true; }
+        if (std::strcmp(prop, "selected") == 0) { list_select(w, n); return true; }
+        return false;
+    }
+    if (type == "memo" && std::strcmp(prop, "text") == 0) {
+        if (auto* ta = rmlui_dynamic_cast<Rml::ElementFormControlTextArea*>(resolve(w))) {
+            ta->SetValue(value);
+            openepl::a11y::set_label(w, value);
+            return true;
+        }
+        return false;
+    }
+    if (type == "slider") {
+        if (std::strcmp(prop, "value") == 0) {
+            g_ranges[w].value = n;
+            slider_apply(w);
+            return true;
+        }
+        if (std::strcmp(prop, "min") == 0 || std::strcmp(prop, "max") == 0) {
+            if (Rml::Element* e = resolve(w)) e->SetAttribute(prop, Rml::String(value));
+            slider_apply(w);   /* the bound just moved; re-assert the position */
+            return true;
+        }
+        return false;
+    }
+    if (type == "spinner") {
+        Spin& s = g_spins[w];
+        if (std::strcmp(prop, "value") == 0)      s.value = n;
+        else if (std::strcmp(prop, "min") == 0)   s.min = n;
+        else if (std::strcmp(prop, "max") == 0)   s.max = n;
+        else if (std::strcmp(prop, "step") == 0)  { s.step = n > 0 ? n : 1; return true; }
+        else return false;
+        spin_apply(w);
+        return true;
+    }
+    return false;
+}
+
+/* The read side of `control_set`. Returns false when the generic path should
+ * answer instead. */
+bool control_get(const std::string& type, OpenEPL_Widget w, const char* prop, std::string* out) {
+    if (type == "combobox") {
+        if (std::strcmp(prop, "items") == 0)    { *out = combo_items(w); return true; }
+        if (std::strcmp(prop, "selected") == 0) {
+            auto* sel = as_select(w);
+            *out = std::to_string(sel ? sel->GetSelection() + 1 : 0);
+            return true;
+        }
+        if (std::strcmp(prop, "count") == 0) {
+            auto* sel = as_select(w);
+            *out = std::to_string(sel ? sel->GetNumOptions() : 0);
+            return true;
+        }
+        return false;
+    }
+    if (type == "listbox") {
+        if (std::strcmp(prop, "items") == 0)    { *out = list_items(w); return true; }
+        if (std::strcmp(prop, "selected") == 0) { *out = std::to_string(list_selected(w)); return true; }
+        if (std::strcmp(prop, "count") == 0) {
+            Rml::Element* e = resolve(w);
+            *out = std::to_string(e ? e->GetNumChildren() : 0);
+            return true;
+        }
+        return false;
+    }
+    if (type == "memo" && std::strcmp(prop, "text") == 0) {
+        auto* ta = rmlui_dynamic_cast<Rml::ElementFormControlTextArea*>(resolve(w));
+        if (!ta) return false;
+        *out = ta->GetValue();
+        return true;
+    }
+    if (type == "slider" && std::strcmp(prop, "value") == 0) {
+        *out = std::to_string(slider_value(w));
+        return true;
+    }
+    if (type == "spinner") {
+        const Spin& s = g_spins[w];
+        if (std::strcmp(prop, "value") == 0)     { *out = std::to_string(spin_value(w)); return true; }
+        if (std::strcmp(prop, "min") == 0)       { *out = std::to_string(s.min); return true; }
+        if (std::strcmp(prop, "max") == 0)       { *out = std::to_string(s.max); return true; }
+        if (std::strcmp(prop, "step") == 0)      { *out = std::to_string(s.step); return true; }
+        return false;
+    }
+    return false;
+}
+
 /* Properties that are OpenEPL concepts rather than RCSS properties. */
 
 int env_int(const char* name, int fallback) {
@@ -482,9 +815,28 @@ OpenEPL_Widget oe_ui_create(OpenEPL_Widget parent, const char* type_name) {
     if (std::strcmp(type_name, "button") == 0) g.interactive[h] = true;
     g.parent_of[h] = parent ? parent : 1;
     g.type_of[h] = type_name;
-    if (std::strcmp(type_name, "groupbox") == 0) raw->SetAttribute("class", Rml::String("oe-groupbox"));
-    if (std::strcmp(type_name, "checkbox") == 0) raw->SetAttribute("class", Rml::String("oe-checkbox"));
+    if (const char* cls = openepl::ui::class_for(type_name))
+        raw->SetAttribute("class", Rml::String(cls));
     if (const char* markup = openepl::ui::inner_markup(type_name)) raw->SetInnerRML(markup);
+    /* The arrows have to be wired at creation: a form that never assigns a
+     * spinner property would otherwise get two buttons that do nothing. */
+    if (std::strcmp(type_name, "spinner") == 0) {
+        g_spins[h] = Spin{};
+        for (int i = 0; i < raw->GetNumChildren(); i++) {
+            Rml::Element* c = raw->GetChild(i);
+            if (c->GetTagName() != "button") continue;
+            auto* step = new SpinStep(h, c->IsClassSet("oe-up") ? +1 : -1);
+            g_spin_steps.push_back(step);
+            c->AddEventListener("click", step);
+        }
+        spin_apply(h);
+    }
+    /* Same reason: a radio button with no `group` written must still be
+     * exclusive against the other radio buttons that wrote none. */
+    if (std::strcmp(type_name, "radiobutton") == 0) {
+        if (Rml::Element* box = child_with_tag(raw, "input"))
+            box->SetAttribute("name", Rml::String("default"));
+    }
     // RmlUi's <progress> defaults to max=1, which makes any percentage look
     // full; OpenEPL's `value` is a percentage.
     if (std::strcmp(type_name, "progressbar") == 0) raw->SetAttribute("max", Rml::String("100"));
@@ -510,16 +862,20 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
 
     const std::string type = g.type_of.count(w) ? g.type_of[w] : std::string("form");
 
+    // Values that live behind a typed element interface rather than on an
+    // attribute or in the stylesheet.
+    if (control_set(type, w, property, value)) return 0;
+
     // Attribute-backed properties (an editbox's value, a checkbox's checked
     // state, an image's source) are not RCSS styling.
     if (const char* attr = openepl::ui::attribute_for(type.c_str(), property)) {
         // Composite components route to the child that actually carries it.
+        // `checked` and the radio group both belong to the inner <input>: set
+        // on the wrapper they would be inert, and exclusion would not work.
         Rml::Element* target = e;
-        if (openepl::ui::is_composite(type.c_str()) && std::strcmp(property, "checked") == 0) {
-            if (Rml::Element* box = e->GetElementById("")) target = box;
-            for (int i = 0; i < e->GetNumChildren(); i++) {
-                if (e->GetChild(i)->GetTagName() == "input") { target = e->GetChild(i); break; }
-            }
+        if (openepl::ui::is_composite(type.c_str()) &&
+            (std::strcmp(property, "checked") == 0 || std::strcmp(property, "group") == 0)) {
+            if (Rml::Element* box = child_with_tag(e, "input")) target = box;
         }
         e = target;
         if (std::strcmp(property, "checked") == 0) {
@@ -577,10 +933,27 @@ const char* oe_ui_get(OpenEPL_Widget w, const char* property) {
     const std::string type = g.type_of.count(w) ? g.type_of[w] : std::string("form");
 
     Rml::String value;
-    if (const char* attr = openepl::ui::attribute_for(type.c_str(), property)) {
+    std::string special;
+    if (control_get(type, w, property, &special)) {
+        value = special;
+    } else if (const char* attr = openepl::ui::attribute_for(type.c_str(), property)) {
         // Attribute-backed properties must be READ from the attribute too, or
         // an editbox reports its markup instead of what the user typed.
-        value = e->GetAttribute<Rml::String>(attr, "");
+        Rml::Element* from = e;
+        if (openepl::ui::is_composite(type.c_str()) &&
+            (std::strcmp(property, "checked") == 0 || std::strcmp(property, "group") == 0)) {
+            if (Rml::Element* box = child_with_tag(e, "input")) from = box;
+        }
+        if (std::strcmp(property, "checked") == 0) {
+            /* RmlUi records a checkbox as the attribute's PRESENCE, and a user
+             * click sets it to the empty string — so reading the value cannot
+             * tell a box the user ticked from one that is clear. Presence can,
+             * and a truth value must read back as the "true"/"false" the core
+             * implementation of this ABI already answers. */
+            value = from->HasAttribute(attr) ? "true" : "false";
+        } else {
+            value = from->GetAttribute<Rml::String>(attr, "");
+        }
     } else if (openepl::ui::is_text_property(property) &&
                openepl::ui::text_is_content(type.c_str())) {
         value = e->GetInnerRML();
@@ -793,8 +1166,19 @@ int oe_ui_run(void) {
          * compile-time only and never reach the binary (G8), so the test hook
          * must not depend on them. */
         g.context->Update();
-        OpenEPL_Widget target = (OpenEPL_Widget)std::strtoull(synth_click, nullptr, 10);
-        if (Rml::Element* e = resolve(target))
+        char* after = nullptr;
+        OpenEPL_Widget target = (OpenEPL_Widget)std::strtoull(synth_click, &after, 10);
+        Rml::Element* e = resolve(target);
+        /* `5.3` clicks the third part of widget 5 — a listbox row, a spinner
+         * arrow. A control assembled from several elements is only exercised by
+         * hitting one of them, and its parts have no handles of their own: a
+         * part is not a component, so it must not become addressable from a
+         * program just to be testable from a test. */
+        if (e && after && *after == '.') {
+            const int nth = std::atoi(after + 1);
+            e = (nth >= 1 && nth <= e->GetNumChildren()) ? e->GetChild(nth - 1) : nullptr;
+        }
+        if (e)
             e->DispatchEvent("click", Rml::Dictionary());
         else
             std::fprintf(stderr, "openepl-ui: no widget handle %s to click\n", synth_click);
@@ -857,6 +1241,13 @@ void oe_ui_shutdown(void) {
     g_stylers.clear();
     for (auto* a : g_action_bridges) delete a;
     g_action_bridges.clear();
+    for (auto* c : g_item_clicks) delete c;
+    g_item_clicks.clear();
+    for (auto* st : g_spin_steps) delete st;
+    g_spin_steps.clear();
+    g_wanted_selection.clear();
+    g_ranges.clear();
+    g_spins.clear();
     g_actions.clear();
     g_action_of.clear();
     g_pending_bindings.clear();

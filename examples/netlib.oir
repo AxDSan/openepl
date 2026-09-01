@@ -1,10 +1,10 @@
-# Networking: TCP and plain HTTP, with no TLS anywhere.
+# Networking: TCP, HTTP, and what a program sees when a url needs TLS.
 #
 #   openepl run examples/netlib.oir
 #
-# Nothing here needs the network to be up: the URL commands are pure, and the
-# two failures it demonstrates — an https url and a dead host — are exactly the
-# ones a program must be able to detect.
+# Only the https line needs the network, and only on a toolchain that vendored
+# mbedTLS; everything else is pure or dials a closed port on purpose, because
+# the failures a program must be able to detect are the point of the file.
 module netlib
 use net
 
@@ -18,13 +18,16 @@ sub main
     call print_text("round-trip ok")
   end
 
-  # --- https fails loudly; it is never downgraded to http ---
+  # --- https either dials or refuses, and is never downgraded to http ---
+  # Which branch runs is a fact about the build, not about this program: TLS is
+  # an optional dependency, so a toolchain without mbedTLS vendored answers
+  # 10006 here and one with it makes the connection for real.
   let body: text = net_http_get("https://example.com/")
   if last_error_code() = 10006
-    call print_text("https refused: unsupported")
+    call print_text("https refused: this build has no TLS")
     call print_text(last_error_text())
   else
-    call print_text("BUG: https should not have been accepted")
+    call print_text("https dialled over TLS")
   end
 
   # --- a scheme that is not http at all ---

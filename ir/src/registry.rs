@@ -85,6 +85,16 @@ pub struct Registry {
     /// for all of them is what keeps the validator and the backend agreeing
     /// about what `point` means.
     records: HashMap<String, RecordDef>,
+    /// What each component event hands its handler, keyed by
+    /// `(component type, event)`.
+    ///
+    /// Beside `components` rather than inside `ComponentDesc` because an event
+    /// with parameters is the exception: every descriptor written so far
+    /// declares none, and a `Vec<Ty>` on each of them would be a field that is
+    /// empty everywhere and read almost nowhere. An absent entry means "hands
+    /// nothing", which is what makes a library that never mentions parameters
+    /// behave exactly as it did.
+    event_params: HashMap<String, HashMap<String, Vec<Ty>>>,
 }
 
 impl Registry {
@@ -94,6 +104,7 @@ impl Registry {
             components: HashMap::new(),
             subs: HashMap::new(),
             records: HashMap::new(),
+            event_params: HashMap::new(),
         }
     }
 
@@ -170,6 +181,24 @@ impl Registry {
         }
         self.components.insert(desc.name.clone(), desc);
         true
+    }
+
+    /// Declare what an event hands its handler. Called once per event that has
+    /// parameters, after the component itself is registered.
+    pub fn set_event_params(&mut self, component: &str, event: &str, params: Vec<Ty>) {
+        self.event_params
+            .entry(component.to_string())
+            .or_default()
+            .insert(event.to_string(), params);
+    }
+
+    /// What `component`'s `event` hands a handler; empty when it hands nothing.
+    pub fn event_params(&self, component: &str, event: &str) -> &[Ty] {
+        self.event_params
+            .get(component)
+            .and_then(|evs| evs.get(event))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Known component type names, for diagnostics.
