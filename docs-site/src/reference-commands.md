@@ -86,8 +86,8 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `pow` | double, double | double |
 | `pow_int` | int, int | int |
 | `print_double` | double | — |
-| `print_int64` | int64 | — |
 | `print_int` | int | — |
+| `print_int64` | int64 | — |
 | `print_text` | text | — |
 | `ptr_from_int` | int64 | ptr |
 | `ptr_is_null` | ptr | bool |
@@ -135,13 +135,13 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 
 | Command | Parameters | Returns |
 | --- | --- | --- |
-| `config_close_all` | — | int |
 | `config_close` | int | bool |
+| `config_close_all` | — | int |
 | `config_create` | text | int |
+| `config_get` | int, text, text | text |
 | `config_get_bool` | int, text, text, bool | bool |
 | `config_get_double` | int, text, text, double | double |
 | `config_get_int` | int, text, text, int | int |
-| `config_get` | int, text, text | text |
 | `config_has` | int, text, text | bool |
 | `config_has_section` | int, text | bool |
 | `config_key_at` | int, text, int | text |
@@ -153,10 +153,10 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `config_save` | int | bool |
 | `config_section_at` | int, int | text |
 | `config_section_count` | int | int |
+| `config_set` | int, text, text, text | bool |
 | `config_set_bool` | int, text, text, bool | bool |
 | `config_set_double` | int, text, text, double | bool |
 | `config_set_int` | int, text, text, int | bool |
-| `config_set` | int, text, text, text | bool |
 
 ## demoffi
 
@@ -174,15 +174,15 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `dir_create` | text | bool |
 | `dir_current` | — | text |
 | `dir_delete` | text | bool |
-| `dir_entry_count` | text | int |
 | `dir_entry` | text, int | text |
+| `dir_entry_count` | text | int |
 | `dir_exists` | text | bool |
 | `dir_set_current` | text | bool |
 | `file_append_bytes` | text, bytes | bool |
 | `file_append_text` | text, text | bool |
 | `file_at_end` | int | bool |
-| `file_close_all` | — | int |
 | `file_close` | int | bool |
+| `file_close_all` | — | int |
 | `file_copy` | text, text | bool |
 | `file_delete` | text | bool |
 | `file_exists` | text | bool |
@@ -225,8 +225,8 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 
 | Command | Parameters | Returns |
 | --- | --- | --- |
-| `json_close_all` | — | int |
 | `json_close` | int | bool |
+| `json_close_all` | — | int |
 | `json_count` | int, text | int |
 | `json_get_bool` | int, text | bool |
 | `json_get_double` | int, text | double |
@@ -236,8 +236,8 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `json_key_at` | int, text, int | text |
 | `json_new_array` | — | int |
 | `json_new_object` | — | int |
-| `json_parse_file` | text | int |
 | `json_parse` | text | int |
+| `json_parse_file` | text | int |
 | `json_remove` | int, text | bool |
 | `json_save` | int, text | bool |
 | `json_set_array` | int, text | bool |
@@ -259,8 +259,8 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | --- | --- | --- |
 | `math_acos` | double | double |
 | `math_asin` | double | double |
-| `math_atan2` | double, double | double |
 | `math_atan` | double | double |
+| `math_atan2` | double, double | double |
 | `math_cbrt` | double | double |
 | `math_clamp` | double, double, double | double |
 | `math_clamp_int` | int, int, int | int |
@@ -306,12 +306,12 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `net_req_method` | int | text |
 | `net_req_path` | int | text |
 | `net_req_query` | int, text | text |
-| `net_req_reply_as` | int, int, text, text | bool |
 | `net_req_reply` | int, int, text | bool |
+| `net_req_reply_as` | int, int, text, text | bool |
 | `net_request` | — | int |
 | `net_tcp_at_end` | int | bool |
-| `net_tcp_close_all` | — | int |
 | `net_tcp_close` | int | bool |
+| `net_tcp_close_all` | — | int |
 | `net_tcp_connect` | text, int | int |
 | `net_tcp_receive` | int, int | text |
 | `net_tcp_receive_line` | int | text |
@@ -338,13 +338,13 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | Command | Parameters | Returns |
 | --- | --- | --- |
 | `process_at_end` | int | bool |
-| `process_close_all` | — | int |
 | `process_close` | int | bool |
+| `process_close_all` | — | int |
 | `process_is_running` | int | bool |
 | `process_kill` | int | bool |
 | `process_read_line` | int | text |
-| `process_run_capture` | text | text |
 | `process_run` | text | int |
+| `process_run_capture` | text | text |
 | `process_start` | text | int |
 | `process_wait` | int | int |
 | `process_write_line` | int, text | bool |
@@ -358,8 +358,8 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `random_between` | int, int | int |
 | `random_bool` | — | bool |
 | `random_chance` | int | bool |
-| `random_double_between` | double, double | double |
 | `random_double` | — | double |
+| `random_double_between` | double, double | double |
 | `random_hex` | int | text |
 | `random_int` | int | int |
 | `random_seed` | int | — |
@@ -390,8 +390,8 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `os_name` | — | text |
 | `os_temp_dir` | — | text |
 | `os_user_name` | — | text |
-| `sys_arg_count` | — | int |
 | `sys_arg` | int | text |
+| `sys_arg_count` | — | int |
 | `sys_process_id` | — | int |
 | `sys_program_dir` | — | text |
 | `sys_program_path` | — | text |

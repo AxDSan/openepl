@@ -6,6 +6,12 @@
 # compiler what it supports is the only version that stays true.
 set -euo pipefail
 
+# Every table here is sorted, and `sort` answers to the locale: under en_US
+# `print_int64` lands before `print_int`, under C it lands after. Whoever ran
+# the script last would otherwise decide the order, and the diff would move
+# rows around for no reason. Pin it so the output depends only on the compiler.
+export LC_ALL=C
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 OUT="$ROOT/docs-site/src"
@@ -179,6 +185,10 @@ openepl build app.oir -o build/app         # somewhere else
 openepl build lib.oir --target sharedlib   # a different artifact
 openepl run app.oir
 ```
+
+A build also leaves the LLVM IR it went through next to the artifact, as
+`app.ll`. It is there to be read when you want to see what your program
+lowered to; nothing links against it, and deleting it is safe.
 
 `--target` overrides whatever the module declares, so one source can be built
 as a program or as a library without editing it. See

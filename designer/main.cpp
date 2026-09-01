@@ -2972,7 +2972,10 @@ void poll_build() {
     std::snprintf(line, sizeof line, "OK  %s — %ld KB in %.2fs (clean native, no runtime unpack)",
                   g.build_target.c_str(), bytes / 1024, secs);
     log(line, "ok");
-    log("  IR stripped — no decompilation possible", "muted");
+    // Says where the IR went, rather than claiming it was stripped: `openepl
+    // build` writes the .ll beside the artifact and leaves it there, and the
+    // hardened release profile that would strip a binary does not exist yet.
+    log("  LLVM IR kept beside it: " + g.build_target + ".ll", "muted");
     set_status("build succeeded");
 
     if (g.build_then_run) {

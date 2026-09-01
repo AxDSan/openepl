@@ -139,8 +139,9 @@ program's own output, and its exit code.
   stage 1/4  parse + validate .oir
   stage 2/4  lower to LLVM IR
   stage 3/4  clang: assemble + link the runtime
-  stage 4/4  dead-strip unused commands
-OK  /tmp/openepl_studio_app — 24101 KB in 5.16s
+  stage 4/4  dead-strip unused commands (--gc-sections)
+OK  /tmp/openepl_studio_app — 17 KB in 1.42s (clean native, no runtime unpack)
+  LLVM IR kept beside it: /tmp/openepl_studio_app.ll
 > running: /tmp/openepl_studio_app  (pid 12345)
   output below is the program's own stdout/stderr
 Hello from OpenEPL.

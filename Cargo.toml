@@ -9,4 +9,4 @@ members = ["ir", "backend", "cli"]
 version = "0.9.1"
 edition = "2021"
 license = "MIT OR BSD-3-Clause"
-repository = "https://github.com/openepl/openepl"
+repository = "https://github.com/AxDSan/openepl"
