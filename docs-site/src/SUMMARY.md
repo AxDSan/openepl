@@ -13,6 +13,7 @@
 - [Language guide](./language.md)
 - [Forms and events](./forms-and-events.md)
 - [Build targets](./build-targets.md)
+- [Kits](./kits.md)
 
 # Studio
 

@@ -30,12 +30,57 @@
  * to a file and never through a text slot.
  */
 #include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Winsock is the same BSD socket API with three differences that matter here:
+ * it must be started before use, its errors live in WSAGetLastError() rather
+ * than errno and are NOT errno values, and a socket is closed by closesocket
+ * rather than close.  Everything below is written once and reads the same on
+ * both platforms through the shims in this block. */
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <stdint.h>
+
+#define net_errno()      WSAGetLastError()
+#define NET_EWOULDBLOCK  WSAEWOULDBLOCK
+/* Winsock reports a connect that has not finished as WOULDBLOCK, where POSIX
+ * says EINPROGRESS; the two spell the same state. */
+#define NET_EINPROGRESS  WSAEWOULDBLOCK
+#define NET_EINTR        WSAEINTR
+#define NET_ETIMEDOUT    WSAETIMEDOUT
+#define NET_ECONNREFUSED WSAECONNREFUSED
+#define NET_EPIPE        WSAECONNRESET
+#define close            closesocket
+#define poll             WSAPoll
+#define strcasecmp       _stricmp
+#define MSG_NOSIGNAL     0
+#ifdef _MSC_VER
+typedef SSIZE_T ssize_t;
+#endif
+/* MSVC and clang-cl honour this; a mingw link needs -lws2_32 on the command
+ * line, which no lib.json key can express today. */
+#if defined(_MSC_VER)
+#pragma comment(lib, "ws2_32.lib")
+#endif
+
+/* Winsock refuses every call until WSAStartup has run.  The runtime is
+ * single-threaded — see the sort-tag comment in runtime/oe_array.c — so a
+ * plain flag is enough, and a library has no initialiser hook to do it in. */
+static int g_wsa_ready = 0;
+static int net_start(void) {
+    if (g_wsa_ready) return 1;
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
+    g_wsa_ready = 1;
+    return 1;
+}
+#else
+#include <fcntl.h>
+#include <netdb.h>
+#include <poll.h>
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -43,11 +88,35 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
-#include "openepl_abi.h"
+#define net_errno()      errno
+#define NET_EWOULDBLOCK  EWOULDBLOCK
+#define NET_EINPROGRESS  EINPROGRESS
+#define NET_EINTR        EINTR
+#define NET_ETIMEDOUT    ETIMEDOUT
+#define NET_ECONNREFUSED ECONNREFUSED
+#define NET_EPIPE        EPIPE
+static int net_start(void) { return 1; }
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
+#endif
+
+#include "openepl_abi.h"
+
+/* A socket failure carries a platform code, and a Winsock code is not an errno
+ * value — comparing one against ECONNREFUSED would be meaningless — so it
+ * reaches the error slot as itself, with the number spelled out in the
+ * message rather than run through strerror. */
+static void net_fail(int code, const char *what) {
+#ifdef _WIN32
+    char msg[128];
+    snprintf(msg, sizeof msg, "%s: Winsock error %d", what, code);
+    oe_error_set((int32_t)code, msg);
+#else
+    oe_error_set_errno(code, what);
+#endif
+}
 
 /* --- small helpers ---------------------------------------------------- */
 
@@ -101,6 +170,10 @@ static char *g_headers = NULL;    /* its header block, for net_http_header   */
  * so the socket goes non-blocking for the connect and back to blocking (with
  * receive/send timeouts) afterwards. */
 static int net_dial(const char *host, int port) {
+    if (!net_start()) {
+        oe_error_set(OE_ERR_UNSUPPORTED, "Winsock could not be started");
+        return -1;
+    }
     if (!host || !*host) {
         oe_error_set(OE_ERR_INVALID_ARG, "host is empty");
         return -1;
@@ -134,27 +207,36 @@ static int net_dial(const char *host, int port) {
 
     for (struct addrinfo *ai = list; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) { saved = errno; what = "socket"; continue; }
+        if (fd < 0) { saved = net_errno(); what = "socket"; continue; }
 
+#ifdef _WIN32
+        u_long nonblocking = 1;
+        int flags = ioctlsocket(fd, FIONBIO, &nonblocking) == 0 ? 0 : -1;
+#else
         int flags = fcntl(fd, F_GETFL, 0);
         if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
 
-        int r = connect(fd, ai->ai_addr, ai->ai_addrlen);
-        int e = errno;
-        if (r < 0 && e == EINPROGRESS) {
+        int r = connect(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen);
+        int e = net_errno();
+        if (r < 0 && e == NET_EINPROGRESS) {
             struct pollfd pfd;
             pfd.fd = fd;
             pfd.events = POLLOUT;
             pfd.revents = 0;
+            /* On Windows this is WSAPoll, which before Windows 10 2004 did not
+             * report a REFUSED connect through POLLOUT or POLLERR.  There the
+             * refusal surfaces as this call's timeout rather than as
+             * WSAECONNREFUSED — a slower answer, never a wrong one. */
             int pr = poll(&pfd, 1, g_timeout_ms);
-            int pe = errno;
-            if (pr == 0) { saved = ETIMEDOUT; r = -1; }
+            int pe = net_errno();
+            if (pr == 0) { saved = NET_ETIMEDOUT; r = -1; }
             else if (pr < 0) { saved = pe; r = -1; }
             else {
                 int so_err = 0;
                 socklen_t len = sizeof so_err;
-                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &len) < 0) {
-                    saved = errno;
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&so_err, &len) < 0) {
+                    saved = net_errno();
                     r = -1;
                 } else if (so_err != 0) {
                     saved = so_err;
@@ -168,12 +250,20 @@ static int net_dial(const char *host, int port) {
         }
 
         if (r == 0) {
+#ifdef _WIN32
+            u_long blocking = 0;
+            if (flags >= 0) ioctlsocket(fd, FIONBIO, &blocking);
+            /* Windows wants the timeout as milliseconds in a DWORD, not as a
+             * struct timeval — passing the struct sets a nonsense timeout. */
+            DWORD tv = (DWORD)g_timeout_ms;
+#else
             if (flags >= 0) fcntl(fd, F_SETFL, flags);   /* blocking again */
             struct timeval tv;
             tv.tv_sec = g_timeout_ms / 1000;
             tv.tv_usec = (g_timeout_ms % 1000) * 1000;
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#endif
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
             freeaddrinfo(list);
             return fd;
         }
@@ -184,8 +274,8 @@ static int net_dial(const char *host, int port) {
     }
 
     freeaddrinfo(list);
-    if (saved == 0) saved = ECONNREFUSED;
-    oe_error_set_errno(saved, what);
+    if (saved == 0) saved = NET_ECONNREFUSED;
+    net_fail(saved, what);
     return -1;
 }
 
@@ -210,11 +300,11 @@ static void net_sock_close(void *payload) {
 static int net_sock_fill(NetSock *s, int *saved) {
     if (s->bpos < s->blen) return 1;
     s->bpos = s->blen = 0;
-    ssize_t r = recv(s->fd, s->buf, sizeof s->buf, 0);
-    int e = errno;
+    ssize_t r = recv(s->fd, s->buf, (int)sizeof s->buf, 0);
+    int e = net_errno();
     if (r > 0) { s->blen = (int)r; return 1; }
     if (r == 0) { s->eof = 1; return 0; }
-    if (e == EAGAIN || e == EWOULDBLOCK) e = ETIMEDOUT;
+    if (e == EAGAIN || e == NET_EWOULDBLOCK) e = NET_ETIMEDOUT;
     *saved = e;
     return -1;
 }
@@ -223,12 +313,12 @@ static int net_sock_fill(NetSock *s, int *saved) {
  * write silently accepted would be. */
 static int net_sock_send_all(int fd, const char *p, size_t n, int *saved) {
     while (n > 0) {
-        ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
-        int e = errno;
+        ssize_t w = send(fd, p, (int)n, MSG_NOSIGNAL);
+        int e = net_errno();
         if (w > 0) { p += w; n -= (size_t)w; continue; }
-        if (w < 0 && (e == EAGAIN || e == EWOULDBLOCK)) e = ETIMEDOUT;
-        if (w < 0 && e == EINTR) continue;
-        *saved = (w == 0) ? EPIPE : e;
+        if (w < 0 && (e == EAGAIN || e == NET_EWOULDBLOCK)) e = NET_ETIMEDOUT;
+        if (w < 0 && e == NET_EINTR) continue;
+        *saved = (w == 0) ? NET_EPIPE : e;
         return 0;
     }
     return 1;
@@ -273,7 +363,7 @@ void net_tcp_send(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     const char *data = net_nz(oe_arg_text(argv, 1));
     int saved = 0;
     if (!net_sock_send_all(s->fd, data, strlen(data), &saved)) {
-        oe_error_set_errno(saved, "send");
+        net_fail(saved, "send");
         oe_ret_bool(ret, 0);
         return;
     }
@@ -298,7 +388,7 @@ void net_tcp_receive(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     int saved = 0;
     int r = net_sock_fill(s, &saved);
     if (r < 0) {
-        oe_error_set_errno(saved, "receive");
+        net_fail(saved, "receive");
         oe_ret_text(ret, net_empty());
         return;
     }
@@ -324,7 +414,7 @@ void net_tcp_receive_line(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
         int r = net_sock_fill(s, &saved);
         if (r < 0) {
             net_buf_free(&line);
-            oe_error_set_errno(saved, "receive");
+            net_fail(saved, "receive");
             oe_ret_text(ret, net_empty());
             return;
         }
@@ -473,6 +563,11 @@ void net_host_ip(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
+    if (!net_start()) {
+        oe_error_set(OE_ERR_UNSUPPORTED, "Winsock could not be started");
+        oe_ret_text(ret, net_empty());
+        return;
+    }
     int rc = getaddrinfo(host, NULL, &hints, &list);
     if (rc != 0 || !list) {
         char msg[256];
@@ -492,11 +587,11 @@ void net_host_ip(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
         struct sockaddr_in6 *a = (struct sockaddr_in6 *)list->ai_addr;
         p = inet_ntop(AF_INET6, &a->sin6_addr, text, sizeof text);
     }
-    int e = errno;
+    int e = net_errno();
     freeaddrinfo(list);
 
     if (!p) {
-        oe_error_set_errno(e, "format address");
+        net_fail(e, "format address");
         oe_ret_text(ret, net_empty());
         return;
     }
@@ -704,7 +799,7 @@ static int net_http_do(const char *method, const char *url,
             if (!req.p) saved = ENOMEM;
             net_buf_free(&req);
             close(fd);
-            oe_error_set_errno(saved, "send request");
+            net_fail(saved, "send request");
             return 0;
         }
         net_buf_free(&req);
@@ -713,15 +808,15 @@ static int net_http_do(const char *method, const char *url,
         NetBuf raw = {0};
         char chunk[8192];
         for (;;) {
-            ssize_t r = recv(fd, chunk, sizeof chunk, 0);
-            int e = errno;
+            ssize_t r = recv(fd, chunk, (int)sizeof chunk, 0);
+            int e = net_errno();
             if (r == 0) break;
             if (r < 0) {
-                if (e == EINTR) continue;
-                if (e == EAGAIN || e == EWOULDBLOCK) e = ETIMEDOUT;
+                if (e == NET_EINTR) continue;
+                if (e == EAGAIN || e == NET_EWOULDBLOCK) e = NET_ETIMEDOUT;
                 net_buf_free(&raw);
                 close(fd);
-                oe_error_set_errno(e, "receive response");
+                net_fail(e, "receive response");
                 return 0;
             }
             if (!net_buf_add(&raw, chunk, (size_t)r)) {

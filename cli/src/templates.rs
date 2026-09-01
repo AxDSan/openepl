@@ -25,32 +25,61 @@ pub struct Template {
     pub dir: PathBuf,
 }
 
-/// Read every template under `<repo_root>/templates`, sorted by id so the
-/// listing (and therefore the New Project dialog) is stable.
+/// Read every template under `<repo_root>/templates` plus every template
+/// shipped by a resolved kit, sorted by id so the listing (and therefore the
+/// New Project dialog) is stable.
+///
+/// The bundled directory is read first, so a kit cannot quietly replace a
+/// built-in template with something else under the same name. Among kits the
+/// winner is the one resolution already chose, since a shadowed kit is never
+/// resolved at all.
 pub fn load_all(repo_root: &Path) -> Result<Vec<Template>, String> {
     let root = repo_root.join("templates");
     let entries = std::fs::read_dir(&root)
         .map_err(|e| format!("cannot read {}: {e}", root.display()))?;
 
-    let mut out = Vec::new();
+    let mut out: Vec<Template> = Vec::new();
     for entry in entries.flatten() {
         let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
+        if let Some(t) = read_template(&dir)? {
+            out.push(t);
         }
-        let meta = dir.join("template.meta");
-        if !meta.is_file() {
-            continue;
+    }
+    for k in crate::kit::resolve_all(repo_root) {
+        for name in &k.templates {
+            let dir = k.dir.join(name);
+            let Some(t) = read_template(&dir)? else {
+                return Err(format!(
+                    "kit `{}` names a template `{name}` with no template.meta in {}",
+                    k.name,
+                    dir.display()
+                ));
+            };
+            if !out.iter().any(|e| e.id == t.id) {
+                out.push(t);
+            }
         }
-        let id = dir
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or_default()
-            .to_string();
-        out.push(parse_meta(&id, &dir, &meta)?);
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
+}
+
+/// A directory is a template when it has a `template.meta`; anything else in
+/// `templates/` is not one, and is skipped rather than reported.
+fn read_template(dir: &Path) -> Result<Option<Template>, String> {
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let meta = dir.join("template.meta");
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    let id = dir
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or_default()
+        .to_string();
+    parse_meta(&id, dir, &meta).map(Some)
 }
 
 fn parse_meta(id: &str, dir: &Path, meta: &Path) -> Result<Template, String> {

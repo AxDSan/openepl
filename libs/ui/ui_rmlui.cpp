@@ -39,6 +39,9 @@ struct UiState {
 };
 UiState g;
 
+/* Frames drawn since oe_ui_run, for OPENEPL_UI_EXIT_AFTER_FRAMES. */
+int g_frames = 0;
+
 Rml::Element* resolve(OpenEPL_Widget w) {
     if (w == 0 || w > g.widgets.size()) return nullptr;
     return g.widgets[(size_t)w - 1];
@@ -304,12 +307,92 @@ int oe_ui_set_a11y(OpenEPL_Widget w, int32_t role, const char* name) {
     return 0;
 }
 
+/* One turn of the window: pump input, lay out, publish accessibility, draw.
+ *
+ * This is a runtime event SOURCE, not a loop of its own. The loop belongs to
+ * the runtime (abi/openepl_abi.h), so a window and a timer can be alive in the
+ * same program — which they cannot be when whichever library is linked owns the
+ * only loop there is. Registered with a period of 0: a window wants every turn
+ * it can get, and deliberately does not power-save, or an app whose window is
+ * not focused stops updating and its timers and animation stop with it.
+ */
+static int32_t ui_pump(void *) {
+    const int max_frames = env_int("OPENEPL_UI_EXIT_AFTER_FRAMES", 0);
+    const char* dump_path = std::getenv("OPENEPL_UI_DUMP");
+
+    if (max_frames == 0 && !Backend::ProcessEvents(g.context, nullptr, false)) {
+        /* The window closed. That ends the PROGRAM, not just this source: a
+         * windowless process still running its timers is not what closing a
+         * window has ever meant. */
+        oe_loop_quit(0);
+        return 1;
+    }
+    g.context->Update();
+
+    /* Refresh accessible bounds from the laid-out widgets, then publish.
+     * Cheap: update_if_active does nothing until an AT connects. */
+    for (size_t i = 0; i < g.widgets.size(); i++) {
+        if (Rml::Element* e = g.widgets[i]) {
+            auto off = e->GetAbsoluteOffset();
+            auto size = e->GetBox().GetSize();
+            openepl::a11y::set_bounds((uint64_t)i + 1, off.x, off.y, size.x, size.y);
+        }
+    }
+    openepl::a11y::bridge_publish();
+
+    /* An assistive technology may have asked to activate a control. The
+     * request arrived on the adapter thread and was queued; dispatch it
+     * here, on the main thread, where touching widgets is safe. */
+    for (uint64_t id : openepl::a11y::take_actions()) {
+        if (Rml::Element* target = resolve(id)) {
+            if (std::getenv("OPENEPL_A11Y_TRACE"))
+                std::fprintf(stderr, "openepl-a11y: dispatching click to widget %llu\n",
+                             (unsigned long long)id);
+            openepl::a11y::set_focus(id);
+            target->DispatchEvent("click", Rml::Dictionary());
+        }
+    }
+
+    Backend::BeginFrame();
+    g.context->Render();
+
+    if (max_frames > 0 && ++g_frames >= max_frames) {
+        /* Test hook: print the accessibility tree. Substrate-independent
+         * and needs no accessibility bus, so it works in CI. */
+        if (const char* d = std::getenv("OPENEPL_UI_DUMP_A11Y")) {
+            if (*d && d[0] != '0') {
+                for (const auto& n : openepl::a11y::snapshot()) {
+                    std::printf("a11y: id=%llu parent=%llu role=%d bounds=%.0f,%.0f,%.0fx%.0f name=\"%s\"%s\n",
+                                (unsigned long long)n.id, (unsigned long long)n.parent,
+                                n.role, n.x, n.y, n.w, n.h, n.label.c_str(),
+                                n.clickable ? " clickable" : "");
+                }
+                std::printf("a11y: adapter_active=%d\n", (int)openepl::a11y::bridge_active());
+            }
+        }
+        auto* gl3 = static_cast<RenderInterface_GL3*>(Backend::GetRenderInterface());
+        gl3->EndFrame();
+        if (dump_path) {
+            int W = g.context->GetDimensions().x, H = g.context->GetDimensions().y;
+            std::vector<unsigned char> px((size_t)W * H * 3);
+            glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+            if (FILE* f = std::fopen(dump_path, "wb")) {
+                std::fprintf(f, "P6\n%d %d\n255\n", W, H);
+                for (int y = H - 1; y >= 0; y--) std::fwrite(&px[(size_t)y * W * 3], 1, (size_t)W * 3, f);
+                std::fclose(f);
+            }
+        }
+        oe_loop_quit(0);
+        return 1;
+    }
+    Backend::PresentFrame();
+    return 0;
+}
+
 int oe_ui_run(void) {
     if (!g.initialised) return 1;
 
-    const int max_frames = env_int("OPENEPL_UI_EXIT_AFTER_FRAMES", 0);
     const char* synth_click = std::getenv("OPENEPL_UI_SYNTH_CLICK");
-    const char* dump_path = std::getenv("OPENEPL_UI_DUMP");
     const char* mouse_at = std::getenv("OPENEPL_UI_MOUSE");   /* "x,y" — drives hover */
 
     if (synth_click) {
@@ -345,73 +428,9 @@ int oe_ui_run(void) {
         openepl::a11y::bridge_set_window_bounds((float)wx, (float)wy, (float)ww, (float)wh);
     }
 
-    int frames = 0;
-    bool running = true;
-    while (running) {
-        // Not power-save: with it the loop blocks until this window gets an
-        // input event, so an app whose window is not focused stops updating —
-        // timers, animation and anything driven by the frame loop simply stop.
-        if (max_frames == 0) running = Backend::ProcessEvents(g.context, nullptr, false);
-        g.context->Update();
-
-        /* Refresh accessible bounds from the laid-out widgets, then publish.
-         * Cheap: update_if_active does nothing until an AT connects. */
-        for (size_t i = 0; i < g.widgets.size(); i++) {
-            if (Rml::Element* e = g.widgets[i]) {
-                auto off = e->GetAbsoluteOffset();
-                auto size = e->GetBox().GetSize();
-                openepl::a11y::set_bounds((uint64_t)i + 1, off.x, off.y, size.x, size.y);
-            }
-        }
-        openepl::a11y::bridge_publish();
-
-        /* An assistive technology may have asked to activate a control. The
-         * request arrived on the adapter thread and was queued; dispatch it
-         * here, on the main thread, where touching widgets is safe. */
-        for (uint64_t id : openepl::a11y::take_actions()) {
-            if (Rml::Element* target = resolve(id)) {
-                if (std::getenv("OPENEPL_A11Y_TRACE"))
-                    std::fprintf(stderr, "openepl-a11y: dispatching click to widget %llu\n",
-                                 (unsigned long long)id);
-                openepl::a11y::set_focus(id);
-                target->DispatchEvent("click", Rml::Dictionary());
-            }
-        }
-
-        Backend::BeginFrame();
-        g.context->Render();
-
-        if (max_frames > 0 && ++frames >= max_frames) {
-            /* Test hook: print the accessibility tree. Substrate-independent
-             * and needs no accessibility bus, so it works in CI. */
-            if (const char* d = std::getenv("OPENEPL_UI_DUMP_A11Y")) {
-                if (*d && d[0] != '0') {
-                    for (const auto& n : openepl::a11y::snapshot()) {
-                        std::printf("a11y: id=%llu parent=%llu role=%d bounds=%.0f,%.0f,%.0fx%.0f name=\"%s\"%s\n",
-                                    (unsigned long long)n.id, (unsigned long long)n.parent,
-                                    n.role, n.x, n.y, n.w, n.h, n.label.c_str(),
-                                    n.clickable ? " clickable" : "");
-                    }
-                    std::printf("a11y: adapter_active=%d\n", (int)openepl::a11y::bridge_active());
-                }
-            }
-            auto* gl3 = static_cast<RenderInterface_GL3*>(Backend::GetRenderInterface());
-            gl3->EndFrame();
-            if (dump_path) {
-                int W = g.context->GetDimensions().x, H = g.context->GetDimensions().y;
-                std::vector<unsigned char> px((size_t)W * H * 3);
-                glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                if (FILE* f = std::fopen(dump_path, "wb")) {
-                    std::fprintf(f, "P6\n%d %d\n255\n", W, H);
-                    for (int y = H - 1; y >= 0; y--) std::fwrite(&px[(size_t)y * W * 3], 1, (size_t)W * 3, f);
-                    std::fclose(f);
-                }
-            }
-            break;
-        }
-        Backend::PresentFrame();
-    }
-    return 0;
+    g_frames = 0;
+    if (!oe_loop_add(ui_pump, nullptr, 0)) return 1;
+    return oe_loop_run();
 }
 
 void oe_ui_shutdown(void) {

@@ -57,7 +57,11 @@ strip "$OUT/bin/openepl" "$OUT/bin/openepl-studio" 2>/dev/null || true
 # The runtime, ABI and support libraries ship as SOURCE: `openepl build`
 # compiles and links them into each program, which is what makes dead-stripping
 # per-command possible.
-for d in runtime abi libs templates examples editors assets; do
+# `kits/` travels too, so the kits this repository ships are present in an
+# install. They are not on the bundled search path — that is `libs/` — so a
+# user adopts one with `openepl kit add <install>/kits/<name>`, the same way
+# they would adopt anyone else's.
+for d in runtime abi libs kits templates examples editors assets; do
     cp -r "$d" "$OUT/$d"
 done
 
@@ -91,7 +95,7 @@ for f in vendor/accesskit-c/LICENSE-MIT vendor/accesskit-c/LICENSE-APACHE; do
 done
 
 # Drop build artefacts that must not ship.
-find "$OUT/examples" "$OUT/libs" -name '*.o' -o -name '*.so' -o -name '*.ll' 2>/dev/null \
+find "$OUT/examples" "$OUT/libs" "$OUT/kits" -name '*.o' -o -name '*.so' -o -name '*.ll' 2>/dev/null \
     | xargs -r rm -f
 
 sed -e "s/__VERSION__/$VERSION/g" tools/bundle-README.md > "$OUT/README.md"

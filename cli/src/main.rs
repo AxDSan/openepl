@@ -9,6 +9,8 @@
 //!   openepl commands                    list available commands and components
 //!   openepl templates                   list project templates
 //!   openepl new <tmpl> <dir>            create a project from a template
+//!   openepl kits                        list resolved kits and where they came from
+//!   openepl kit add <path>              install a kit into ~/.openepl/kits
 //!
 //! The pipeline lowers a module to LLVM IR, then has `clang` assemble it and
 //! link the runtime sources, producing an ordinary native executable.
@@ -16,6 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
+mod kit;
 mod libload;
 mod lsp;
 mod lsp_index;
@@ -68,6 +71,24 @@ fn run(args: &[String]) -> i32 {
                 1
             }
         },
+        "kits" => match find_repo_root() {
+            Some(root) => kit::cmd_list(&root),
+            None => {
+                eprintln!("openepl: could not locate the OpenEPL libraries");
+                1
+            }
+        },
+        "kit" => match rest.split_first() {
+            Some((verb, kit_args)) if verb == "add" => kit::cmd_add(kit_args),
+            Some((verb, _)) => {
+                eprintln!("openepl: unknown `kit` verb `{verb}` — expected `add`");
+                2
+            }
+            None => {
+                eprintln!("openepl: usage: openepl kit add <path-or-tarball>");
+                2
+            }
+        },
         "templates" => match find_repo_root() {
             Some(root) => templates::cmd_list(&root),
             None => {
@@ -106,7 +127,9 @@ fn usage() {
          openepl lsp                         language server over stdio (see docs/editors.md)\n  \
          openepl commands [--use <lib>]      list the commands and components available\n  \
          openepl templates                   list the available project templates\n  \
-         openepl new <template> <dir>        create a project from a template\n"
+         openepl new <template> <dir>        create a project from a template\n  \
+         openepl kits                        list the kits found, and from where\n  \
+         openepl kit add <path>              install a kit into ~/.openepl/kits\n"
     );
 }
 
@@ -213,7 +236,14 @@ fn cmd_commands(repo_root: &Path, args: &[String]) -> i32 {
     // Metadata only: listing what exists must not require the ability to link
     // it, or `openepl commands --use ui` would fail on any machine that has not
     // vendored the UI stack.
-    let plan = match libload::load_metadata(repo_root, &uses) {
+    let root = match kit::overlay_root(repo_root, &uses) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("openepl: {e}");
+            return 1;
+        }
+    };
+    let plan = match libload::load_metadata(&root, &uses) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("openepl: {e}");
@@ -422,10 +452,13 @@ fn compile_with(
 
     // Introspect `core` + each `use`d library for command signatures (the
     // authoritative source — no hard-coded table).
+    // A kit resolved outside `libs/` is presented to the loader through a
+    // staged root, so listing a command and calling it agree by construction.
+    let lib_root = kit::overlay_root(&repo_root, &module.uses)?;
     let plan = if require_impl {
-        libload::load(&repo_root, &module.uses)?
+        libload::load(&lib_root, &module.uses)?
     } else {
-        libload::load_metadata(&repo_root, &module.uses)?
+        libload::load_metadata(&lib_root, &module.uses)?
     };
 
     if let Err(errs) = validate(&module, &plan.registry) {

@@ -13,26 +13,184 @@
  *           they never touch the error slot either.
  *
  * TEXT IS A C STRING.  file_read_text stops at an embedded NUL, so a file with
- * one in it reads short.  That is honest for text and wrong for binary; binary
- * I/O waits for a bytes type, which the ABI does not yet have.
+ * one in it reads short.  That is honest for text and wrong for a PNG, which
+ * is why file_read_bytes / file_write_bytes / file_append_bytes exist beside
+ * them: the byte-set carries its own length and so survives a NUL.
  *
  * Every fallible command below takes exactly one of oe_error_clear() or
  * oe_error_set*() on every exit path, and copies errno to a local on the line
  * immediately after the call that failed — fclose() and free() clobber it.
  */
-#include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
-#include "openepl_abi.h"
+/* Windows has no dirent and no unistd, and its separator is the backslash.
+ * Directory listing goes through FindFirstFileW; everything else has a narrow
+ * C-library spelling with a leading underscore.
+ *
+ * PATHS CROSS THE BOUNDARY AS UTF-8.  The wide entry points are used and the
+ * results converted, because the ANSI ones go through the machine's codepage
+ * and would mangle any name outside it — a path is exactly the kind of text
+ * that has an accent in it. */
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#include <io.h>
+#else
+#include <dirent.h>
+#include <unistd.h>
+#endif
+
+/* openepl_core.h rather than the ABI header alone, for oe_bin_new: a byte-set
+ * is allocated by the runtime, and its constructor is a runtime internal the
+ * same way oe_empty_text is. */
+#include "openepl_core.h"
 
 /* --- small helpers ---------------------------------------------------- */
 
 static const char *file_nz(const char *s) { return s ? s : ""; }
+
+/* Windows accepts both separators and programs mix them freely, so every path
+ * command asks this rather than comparing against '/' — one place decides what
+ * a separator is, and the path family agrees with itself. */
+static int file_is_sep(char c) {
+#ifdef _WIN32
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
+/* How much of a path is its root and can never be walked off the front of:
+ * "/" on POSIX, and "C:\\" or "\\\\server\\share\\" on Windows.  0 for a relative
+ * path.  path_parent and path_absolute both need it, and getting it wrong is
+ * how ".." escapes a drive. */
+static size_t file_root_len(const char *p) {
+#ifdef _WIN32
+    if (file_is_sep(p[0]) && file_is_sep(p[1])) {
+        /* \\server\share — the share is part of the root, not a component. */
+        size_t i = 2;
+        for (int part = 0; part < 2 && p[i]; part++) {
+            while (p[i] && !file_is_sep(p[i])) i++;
+            while (file_is_sep(p[i])) i++;
+        }
+        return i;
+    }
+    if (p[0] && p[1] == ':') return file_is_sep(p[2]) ? 3 : 2;
+    return file_is_sep(p[0]) ? 1 : 0;
+#else
+    return file_is_sep(p[0]) ? 1 : 0;
+#endif
+}
+
+/* --- the platform shim ------------------------------------------------
+ * Every filesystem call in this file goes through one of these, so the rest of
+ * the library reads the same on both platforms and there is exactly one place
+ * that knows a Windows path is UTF-16.  Each wide wrapper leaves errno set the
+ * way its POSIX twin does, so the error handling above them needs no branch. */
+#ifdef _WIN32
+#define FILE_SEP '\\'
+
+/* UTF-8 in, a wide path out in a caller-owned buffer.  Plain malloc: this is
+ * bookkeeping for one call, not program data the runtime must free at exit. */
+static wchar_t *file_to_wide(const char *s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
+    if (!w) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n) <= 0) { free(w); return NULL; }
+    return w;
+}
+
+/* The other direction, into runtime-owned text — a path handed back to the
+ * program is program data. */
+static char *file_from_wide(const wchar_t *w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    if (n <= 0) return NULL;
+    char *o = (char *)oe_malloc(n);
+    if (!o) return NULL;
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, o, n, NULL, NULL) <= 0) return NULL;
+    return o;
+}
+
+typedef struct _stat64 file_stat_t;
+#define FILE_ISDIR(st) (((st).st_mode & _S_IFMT) == _S_IFDIR)
+#define FILE_ISREG(st) (((st).st_mode & _S_IFMT) == _S_IFREG)
+
+/* One shape for all of them: widen, call, restore errno across free(). */
+#define FILE_WIDE_1(name, call, fail)                                          \
+    static int name(const char *p) {                                           \
+        wchar_t *w = file_to_wide(p);                                          \
+        if (!w) { errno = EINVAL; return (fail); }                             \
+        int rc = (call);                                                       \
+        int e = errno;                                                         \
+        free(w);                                                               \
+        errno = e;                                                             \
+        return rc;                                                             \
+    }
+FILE_WIDE_1(file_unlink, _wunlink(w), -1)
+FILE_WIDE_1(file_rmdir,  _wrmdir(w),  -1)
+FILE_WIDE_1(file_chdir,  _wchdir(w),  -1)
+FILE_WIDE_1(file_mkdir,  _wmkdir(w),  -1)
+#undef FILE_WIDE_1
+
+static int file_stat(const char *p, file_stat_t *st) {
+    wchar_t *w = file_to_wide(p);
+    if (!w) { errno = EINVAL; return -1; }
+    int rc = _wstat64(w, st);
+    int e = errno;
+    free(w);
+    errno = e;
+    return rc;
+}
+
+static FILE *file_fopen(const char *p, const char *mode) {
+    wchar_t *w = file_to_wide(p);
+    if (!w) { errno = EINVAL; return NULL; }
+    wchar_t wm[8];
+    size_t i = 0;
+    for (; mode[i] && i < 7; i++) wm[i] = (wchar_t)mode[i];
+    wm[i] = L'\0';
+    FILE *f = _wfopen(w, wm);
+    int e = errno;
+    free(w);
+    errno = e;
+    return f;
+}
+
+static int file_getcwd_buf(char *buf, size_t cap) {
+    wchar_t w[4096];
+    if (!_wgetcwd(w, (int)(sizeof w / sizeof w[0]))) return 0;
+    return WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, (int)cap, NULL, NULL) > 0;
+}
+#else
+#define FILE_SEP '/'
+typedef struct stat file_stat_t;
+#define FILE_ISDIR(st) (S_ISDIR((st).st_mode))
+#define FILE_ISREG(st) (S_ISREG((st).st_mode))
+static int file_unlink(const char *p) { return unlink(p); }
+static int file_rmdir(const char *p)  { return rmdir(p); }
+static int file_chdir(const char *p)  { return chdir(p); }
+static int file_mkdir(const char *p)  { return mkdir(p, 0777); }
+static int file_stat(const char *p, file_stat_t *st) { return stat(p, st); }
+static FILE *file_fopen(const char *p, const char *mode) { return fopen(p, mode); }
+static int file_getcwd_buf(char *buf, size_t cap) {
+    return getcwd(buf, cap) != NULL;
+}
+#endif
+
+static char *file_getcwd_text(void) {
+    char buf[4096];
+    if (!file_getcwd_buf(buf, sizeof buf)) return NULL;
+    size_t n = strlen(buf);
+    char *o = (char *)oe_malloc((long)n + 1);
+    if (o) memcpy(o, buf, n + 1);
+    return o;
+}
 
 /* A result string, runtime-owned like every other text result. */
 static char *file_text_n(const char *s, size_t n) {
@@ -46,6 +204,21 @@ static char *file_text(const char *s) { return file_text_n(s, strlen(file_nz(s))
 /* The "" failure sentinel: a fresh empty string, so ownership is uniform. */
 static char *file_empty(void) { return file_text_n("", 0); }
 
+/* --- byte-sets --------------------------------------------------------
+ * The layout is stated in abi/openepl_abi.h: a header, then the bytes, all one
+ * runtime-owned allocation.  A bytes result that failed is an EMPTY byte-set
+ * rather than NULL, the exact analog of the "" a failed text result returns —
+ * a caller that ignores the error slot still holds something it can measure. */
+
+static unsigned char *file_bin_at(OpenEPL_Bin *b) { return (unsigned char *)(b + 1); }
+static int32_t file_bin_len(const OpenEPL_Bin *b) { return b ? b->len : 0; }
+
+static void file_ret_bin(OpenEPL_Slot *ret, void *b) {
+    ret->tag = OE_SDT_BIN;
+    ret->v.ptr = b;
+}
+static void file_ret_bin_empty(OpenEPL_Slot *ret) { file_ret_bin(ret, oe_bin_new(0)); }
+
 /* --- one-shot file commands ------------------------------------------- */
 
 /* file_read_text(path) -> text : the whole file, "" on failure.  Read in
@@ -54,7 +227,7 @@ static char *file_empty(void) { return file_text_n("", 0); }
 void file_read_text(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *path = file_nz(oe_arg_text(argv, 0));
-    FILE *f = fopen(path, "rb");
+    FILE *f = file_fopen(path, "rb");
     int e = errno;
     if (!f) { oe_error_set_errno(e, "open"); oe_ret_text(ret, file_empty()); return; }
 
@@ -85,7 +258,7 @@ void file_read_text(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 static void file_put(OpenEPL_Slot *ret, OpenEPL_Slot *argv, const char *mode, const char *what) {
     const char *path = file_nz(oe_arg_text(argv, 0));
     const char *body = file_nz(oe_arg_text(argv, 1));
-    FILE *f = fopen(path, mode);
+    FILE *f = file_fopen(path, mode);
     int e = errno;
     if (!f) { oe_error_set_errno(e, what); oe_ret_bool(ret, 0); return; }
     size_t n = strlen(body);
@@ -107,14 +280,84 @@ void file_append_text(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; file_put(ret, argv, "ab", "open for append");
 }
 
+/* file_read_bytes(path) -> bytes : the whole file, empty on failure.  This is
+ * what file_read_text cannot be: a PNG is full of NULs and a C string ends at
+ * the first one.
+ *
+ * The byte-set itself is what grows, with its header reserved at the front, so
+ * the file is never held twice — a 200MB image read into a buffer and then
+ * copied into a byte-set would peak at 400MB for no reason.  Read in chunks
+ * rather than seeking to the end, so a pipe or a /proc file reads correctly. */
+void file_read_bytes(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
+    (void)argc;
+    const char *path = file_nz(oe_arg_text(argv, 0));
+    FILE *f = file_fopen(path, "rb");
+    int e = errno;
+    if (!f) { oe_error_set_errno(e, "open"); file_ret_bin_empty(ret); return; }
+
+    long cap = 8192, len = 0;
+    OpenEPL_Bin *b = (OpenEPL_Bin *)oe_bin_new((int32_t)cap);
+    if (!b) { fclose(f); oe_error_set(OE_ERR_UNSUPPORTED, "out of memory"); file_ret_bin_empty(ret); return; }
+    for (;;) {
+        size_t got = fread(file_bin_at(b) + len, 1, (size_t)(cap - len), f);
+        len += (long)got;
+        if (len < cap) break;                      /* short read: end, or error */
+        /* A byte-set counts its length in an int32, so a file at or past 2GB
+         * has no honest answer here — refuse it rather than wrap the header. */
+        if (cap > (long)INT32_MAX / 2) {
+            fclose(f);
+            oe_error_set(OE_ERR_OUT_OF_RANGE, "file is too large to hold in one byte-set");
+            file_ret_bin_empty(ret);
+            return;
+        }
+        OpenEPL_Bin *nb = (OpenEPL_Bin *)oe_mrealloc(b, (long)sizeof(OpenEPL_Bin) + cap * 2);
+        if (!nb) { fclose(f); oe_error_set(OE_ERR_UNSUPPORTED, "out of memory"); file_ret_bin_empty(ret); return; }
+        b = nb;
+        cap *= 2;
+    }
+    int bad = ferror(f);
+    e = errno;
+    fclose(f);
+    if (bad) { oe_error_set_errno(e, "read"); file_ret_bin_empty(ret); return; }
+    b->dims = 1;
+    b->len = (int32_t)len;                 /* the tail of the allocation is slack */
+    oe_error_clear();
+    file_ret_bin(ret, b);
+}
+
+/* Shared by file_write_bytes and file_append_bytes. */
+static void file_put_bytes(OpenEPL_Slot *ret, OpenEPL_Slot *argv, const char *mode, const char *what) {
+    const char *path = file_nz(oe_arg_text(argv, 0));
+    OpenEPL_Bin *b = (OpenEPL_Bin *)argv[1].v.ptr;
+    int32_t n = file_bin_len(b);
+    FILE *f = file_fopen(path, mode);
+    int e = errno;
+    if (!f) { oe_error_set_errno(e, what); oe_ret_bool(ret, 0); return; }
+    int err = 0;
+    if (n && fwrite(file_bin_at(b), 1, (size_t)n, f) != (size_t)n) { err = errno ? errno : EIO; }
+    if (fclose(f) != 0 && !err) { err = errno ? errno : EIO; }
+    if (err) { oe_error_set_errno(err, "write"); oe_ret_bool(ret, 0); return; }
+    oe_error_clear();
+    oe_ret_bool(ret, 1);
+}
+
+/* file_write_bytes(path, content) -> bool : replaces the file. */
+void file_write_bytes(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
+    (void)argc; file_put_bytes(ret, argv, "wb", "create");
+}
+/* file_append_bytes(path, content) -> bool : adds to the end, creating it. */
+void file_append_bytes(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
+    (void)argc; file_put_bytes(ret, argv, "ab", "open for append");
+}
+
 /* "the path is not there" is an answer, not a failure: those errno values
  * clear the slot and return false, so `false, code 0` means a genuine no. */
 static int file_absent(int e) { return e == ENOENT || e == ENOTDIR; }
 
 static void file_stat_is(OpenEPL_Slot *ret, OpenEPL_Slot *argv, int want_dir) {
     const char *path = file_nz(oe_arg_text(argv, 0));
-    struct stat st;
-    int rc = stat(path, &st);
+    file_stat_t st;
+    int rc = file_stat(path, &st);
     int e = errno;
     if (rc != 0) {
         if (file_absent(e)) { oe_error_clear(); oe_ret_bool(ret, 0); return; }
@@ -123,7 +366,7 @@ static void file_stat_is(OpenEPL_Slot *ret, OpenEPL_Slot *argv, int want_dir) {
         return;
     }
     oe_error_clear();
-    oe_ret_bool(ret, want_dir ? S_ISDIR(st.st_mode) != 0 : S_ISREG(st.st_mode) != 0);
+    oe_ret_bool(ret, want_dir ? FILE_ISDIR(st) != 0 : FILE_ISREG(st) != 0);
 }
 
 /* file_exists(path) -> bool : true for a regular file.  A directory is not a
@@ -136,8 +379,8 @@ void file_exists(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 void file_size(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *path = file_nz(oe_arg_text(argv, 0));
-    struct stat st;
-    int rc = stat(path, &st);
+    file_stat_t st;
+    int rc = file_stat(path, &st);
     int e = errno;
     if (rc != 0) { oe_error_set_errno(e, "stat"); oe_ret_int64(ret, -1); return; }
     oe_error_clear();
@@ -149,8 +392,8 @@ void file_size(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 void file_modified(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *path = file_nz(oe_arg_text(argv, 0));
-    struct stat st;
-    int rc = stat(path, &st);
+    file_stat_t st;
+    int rc = file_stat(path, &st);
     int e = errno;
     if (rc != 0) { oe_error_set_errno(e, "stat"); oe_ret_int64(ret, -1); return; }
     oe_error_clear();
@@ -162,7 +405,7 @@ void file_modified(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 void file_delete(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *path = file_nz(oe_arg_text(argv, 0));
-    int rc = unlink(path);
+    int rc = file_unlink(path);
     int e = errno;
     if (rc != 0) { oe_error_set_errno(e, "delete"); oe_ret_bool(ret, 0); return; }
     oe_error_clear();
@@ -172,10 +415,10 @@ void file_delete(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 /* Byte-for-byte copy.  Returns 0 on success, otherwise an errno value, and
  * writes the stage that failed to *what. */
 static int file_copy_bytes(const char *from, const char *to, const char **what) {
-    FILE *in = fopen(from, "rb");
+    FILE *in = file_fopen(from, "rb");
     int e = errno;
     if (!in) { *what = "open source"; return e ? e : EIO; }
-    FILE *out = fopen(to, "wb");
+    FILE *out = file_fopen(to, "wb");
     e = errno;
     if (!out) { fclose(in); *what = "create destination"; return e ? e : EIO; }
 
@@ -214,6 +457,30 @@ void file_move(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *from = file_nz(oe_arg_text(argv, 0));
     const char *to   = file_nz(oe_arg_text(argv, 1));
+#ifdef _WIN32
+    /* MoveFileExW does the cross-volume copy itself, so the fallback below is
+     * POSIX-only: Windows never reports EXDEV to fall back on.  REPLACE_EXISTING
+     * matches what rename() does, which is what this command already promised. */
+    wchar_t *wf = file_to_wide(from), *wt = file_to_wide(to);
+    if (!wf || !wt) {
+        free(wf); free(wt);
+        oe_error_set(OE_ERR_INVALID_ARG, "move: path is not valid UTF-8");
+        oe_ret_bool(ret, 0);
+        return;
+    }
+    BOOL ok = MoveFileExW(wf, wt, MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING);
+    DWORD code = GetLastError();
+    free(wf); free(wt);
+    if (!ok) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "move: Windows error %lu", (unsigned long)code);
+        oe_error_set((int32_t)code, msg);
+        oe_ret_bool(ret, 0);
+        return;
+    }
+    oe_error_clear();
+    oe_ret_bool(ret, 1);
+#else
     int rc = rename(from, to);
     int e = errno;
     if (rc == 0) { oe_error_clear(); oe_ret_bool(ret, 1); return; }
@@ -222,11 +489,12 @@ void file_move(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     const char *what = "move";
     int err = file_copy_bytes(from, to, &what);
     if (err) { oe_error_set_errno(err, what); oe_ret_bool(ret, 0); return; }
-    rc = unlink(from);
+    rc = file_unlink(from);
     e = errno;
     if (rc != 0) { oe_error_set_errno(e, "delete source"); oe_ret_bool(ret, 0); return; }
     oe_error_clear();
     oe_ret_bool(ret, 1);
+#endif
 }
 
 /* file_line_count(path) -> int : -1 on failure.  A last line without a
@@ -234,7 +502,7 @@ void file_move(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 void file_line_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *path = file_nz(oe_arg_text(argv, 0));
-    FILE *f = fopen(path, "rb");
+    FILE *f = file_fopen(path, "rb");
     int e = errno;
     if (!f) { oe_error_set_errno(e, "open"); oe_ret_int(ret, -1); return; }
 
@@ -277,7 +545,7 @@ void file_open(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
         oe_ret_int(ret, 0);
         return;
     }
-    FILE *f = fopen(path, cmode);
+    FILE *f = file_fopen(path, cmode);
     int e = errno;
     if (!f) { oe_error_set_errno(e, "open"); oe_ret_int(ret, 0); return; }
 
@@ -391,11 +659,14 @@ void dir_create(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     if (!work) { oe_error_set(OE_ERR_UNSUPPORTED, "out of memory"); oe_ret_bool(ret, 0); return; }
     memcpy(work, path, n + 1);
 
-    for (size_t i = 1; i <= n; i++) {
-        if (work[i] != '/' && work[i] != '\0') continue;
+    /* Start past the root: "C:" and "\\\\server\\share" are not directories that
+     * can be created, and asking to create them fails where the whole call
+     * should have succeeded. */
+    for (size_t i = file_root_len(work) + 1; i <= n; i++) {
+        if (!file_is_sep(work[i]) && work[i] != '\0') continue;
         char saved = work[i];
         work[i] = '\0';
-        int rc = mkdir(work, 0777);
+        int rc = file_mkdir(work);
         int e = errno;
         if (rc != 0 && e != EEXIST) {
             free(work);
@@ -407,11 +678,11 @@ void dir_create(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     }
     free(work);
     /* EEXIST above may have been a *file* in the way; confirm what is there. */
-    struct stat st;
-    int rc = stat(path, &st);
+    file_stat_t st;
+    int rc = file_stat(path, &st);
     int e = errno;
     if (rc != 0) { oe_error_set_errno(e, "create directory"); oe_ret_bool(ret, 0); return; }
-    if (!S_ISDIR(st.st_mode)) {
+    if (!FILE_ISDIR(st)) {
         oe_error_set_errno(ENOTDIR, "create directory");
         oe_ret_bool(ret, 0);
         return;
@@ -426,7 +697,7 @@ void dir_create(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 void dir_delete(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *path = file_nz(oe_arg_text(argv, 0));
-    int rc = rmdir(path);
+    int rc = file_rmdir(path);
     int e = errno;
     if (rc != 0) { oe_error_set_errno(e, "delete directory"); oe_ret_bool(ret, 0); return; }
     oe_error_clear();
@@ -436,19 +707,18 @@ void dir_delete(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 /* dir_current() -> text : the working directory, "" on failure. */
 void dir_current(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)argv;
-    char buf[4096];
-    char *p = getcwd(buf, sizeof buf);
+    char *p = file_getcwd_text();
     int e = errno;
     if (!p) { oe_error_set_errno(e, "current directory"); oe_ret_text(ret, file_empty()); return; }
     oe_error_clear();
-    oe_ret_text(ret, file_text(buf));
+    oe_ret_text(ret, p);
 }
 
 /* dir_set_current(path) -> bool. */
 void dir_set_current(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *path = file_nz(oe_arg_text(argv, 0));
-    int rc = chdir(path);
+    int rc = file_chdir(path);
     int e = errno;
     if (rc != 0) { oe_error_set_errno(e, "change directory"); oe_ret_bool(ret, 0); return; }
     oe_error_clear();
@@ -477,11 +747,82 @@ static int file_name_cmp(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+/* One name into the snapshot.  Shared by the two collection loops below, which
+ * differ only in how the platform hands names over. */
+static int file_snap_push(const char *name, long *cap) {
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 1;
+    if (g_snap_n == *cap) {
+        long want = *cap ? *cap * 2 : 32;
+        char **nb = (char **)realloc(g_snap, (size_t)want * sizeof(char *));
+        if (!nb) return 0;
+        g_snap = nb;
+        *cap = want;
+    }
+    size_t n = strlen(name);
+    char *copy = (char *)malloc(n + 1);
+    if (!copy) return 0;
+    memcpy(copy, name, n + 1);
+    g_snap[g_snap_n++] = copy;
+    return 1;
+}
+
 /* dir_entry_count(path) -> int : -1 on failure.  Re-reads the directory and
  * re-takes the snapshot that dir_entry reads. */
 void dir_entry_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *path = file_nz(oe_arg_text(argv, 0));
+    long cap = 0;
+
+#ifdef _WIN32
+    /* FindFirstFileW wants a pattern, not a directory, so the wildcard is
+     * appended here — the one place a Windows listing differs in shape from a
+     * POSIX one. */
+    size_t pn = strlen(path);
+    char *pattern = (char *)malloc(pn + 3);
+    if (!pattern) { file_snap_free(); oe_error_set(OE_ERR_UNSUPPORTED, "out of memory"); oe_ret_int(ret, -1); return; }
+    memcpy(pattern, path, pn);
+    size_t w = pn;
+    if (w == 0 || !file_is_sep(pattern[w - 1])) pattern[w++] = FILE_SEP;
+    pattern[w++] = '*';
+    pattern[w] = '\0';
+    wchar_t *wide = file_to_wide(pattern);
+    free(pattern);
+    if (!wide) { file_snap_free(); oe_error_set(OE_ERR_INVALID_ARG, "open directory: path is not valid UTF-8"); oe_ret_int(ret, -1); return; }
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wide, &fd);
+    free(wide);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD code = GetLastError();
+        file_snap_free();                    /* a failed listing leaves none */
+        char msg[96];
+        snprintf(msg, sizeof msg, "open directory: Windows error %lu", (unsigned long)code);
+        oe_error_set((int32_t)code, msg);
+        oe_ret_int(ret, -1);
+        return;
+    }
+    file_snap_free();
+    do {
+        char *name = file_from_wide(fd.cFileName);
+        if (!name || !file_snap_push(name, &cap)) {
+            FindClose(h);
+            file_snap_free();
+            oe_error_set(OE_ERR_UNSUPPORTED, "out of memory");
+            oe_ret_int(ret, -1);
+            return;
+        }
+    } while (FindNextFileW(h, &fd));
+    DWORD end = GetLastError();
+    FindClose(h);
+    if (end != ERROR_NO_MORE_FILES) {
+        file_snap_free();
+        char msg[96];
+        snprintf(msg, sizeof msg, "read directory: Windows error %lu", (unsigned long)end);
+        oe_error_set((int32_t)end, msg);
+        oe_ret_int(ret, -1);
+        return;
+    }
+#else
     DIR *d = opendir(path);
     int e = errno;
     if (!d) {
@@ -492,23 +833,16 @@ void dir_entry_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     }
     file_snap_free();
 
-    long cap = 0;
     struct dirent *de;
     errno = 0;
     while ((de = readdir(d)) != NULL) {
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-        if (g_snap_n == cap) {
-            long want = cap ? cap * 2 : 32;
-            char **nb = (char **)realloc(g_snap, (size_t)want * sizeof(char *));
-            if (!nb) { closedir(d); file_snap_free(); oe_error_set(OE_ERR_UNSUPPORTED, "out of memory"); oe_ret_int(ret, -1); return; }
-            g_snap = nb;
-            cap = want;
+        if (!file_snap_push(de->d_name, &cap)) {
+            closedir(d);
+            file_snap_free();
+            oe_error_set(OE_ERR_UNSUPPORTED, "out of memory");
+            oe_ret_int(ret, -1);
+            return;
         }
-        size_t n = strlen(de->d_name);
-        char *copy = (char *)malloc(n + 1);
-        if (!copy) { closedir(d); file_snap_free(); oe_error_set(OE_ERR_UNSUPPORTED, "out of memory"); oe_ret_int(ret, -1); return; }
-        memcpy(copy, de->d_name, n + 1);
-        g_snap[g_snap_n++] = copy;
         errno = 0;
     }
     int read_err = errno;
@@ -519,14 +853,16 @@ void dir_entry_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
         oe_ret_int(ret, -1);
         return;
     }
-    /* Sorted, so two runs of the same program list the same order — readdir's
-     * own order is whatever the filesystem happens to hand back. */
+#endif
+
+    /* Sorted, so two runs of the same program list the same order — the
+     * platform's own order is whatever the filesystem happens to hand back. */
     if (g_snap_n > 1) qsort(g_snap, (size_t)g_snap_n, sizeof(char *), file_name_cmp);
 
-    size_t pn = strlen(path);
-    g_snap_path = (char *)malloc(pn + 1);
+    size_t keep = strlen(path);
+    g_snap_path = (char *)malloc(keep + 1);
     if (!g_snap_path) { file_snap_free(); oe_error_set(OE_ERR_UNSUPPORTED, "out of memory"); oe_ret_int(ret, -1); return; }
-    memcpy(g_snap_path, path, pn + 1);
+    memcpy(g_snap_path, path, keep + 1);
 
     oe_error_clear();
     oe_ret_int(ret, (int32_t)g_snap_n);
@@ -562,24 +898,29 @@ void path_join(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *a = file_nz(oe_arg_text(argv, 0));
     const char *b = file_nz(oe_arg_text(argv, 1));
-    if (*b == '/' || *a == '\0') { oe_ret_text(ret, file_text(b)); return; }
+    /* "rooted" rather than "starts with a separator": on Windows "C:\\x" is
+     * absolute and has no leading separator at all. */
+    if (file_root_len(b) > 0 || *a == '\0') { oe_ret_text(ret, file_text(b)); return; }
     if (*b == '\0') { oe_ret_text(ret, file_text(a)); return; }
     size_t la = strlen(a), lb = strlen(b);
-    int sep = a[la - 1] != '/';
+    int sep = !file_is_sep(a[la - 1]);
     char *o = (char *)oe_malloc((long)(la + (size_t)sep + lb + 1));
     if (!o) { oe_ret_text(ret, NULL); return; }
     memcpy(o, a, la);
-    if (sep) o[la] = '/';
+    if (sep) o[la] = FILE_SEP;
     memcpy(o + la + sep, b, lb + 1);
     oe_ret_text(ret, o);
 }
 
 /* Where the last component starts, ignoring trailing slashes. */
 static void file_split(const char *p, size_t *base, size_t *end) {
+    size_t root = file_root_len(p);
     size_t n = strlen(p);
-    while (n > 1 && p[n - 1] == '/') n--;
+    /* Never trim into the root: the trailing separator of "C:\\" and of "/" is
+     * the root itself, not decoration on a component. */
+    while (n > root && n > 1 && file_is_sep(p[n - 1])) n--;
     size_t b = n;
-    while (b > 0 && p[b - 1] != '/') b--;
+    while (b > root && !file_is_sep(p[b - 1])) b--;
     *base = b;
     *end = n;
 }
@@ -602,8 +943,11 @@ void path_parent(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     size_t b, e;
     file_split(p, &b, &e);
     (void)e;
+    size_t root = file_root_len(p);
     if (b == 0) { oe_ret_text(ret, file_text_n("", 0)); return; }
-    if (b == 1) { oe_ret_text(ret, file_text_n("/", 1)); return; }
+    /* At the root the parent IS the root, separator included — dropping it
+     * would turn "C:\\x" into a path relative to the drive's own directory. */
+    if (b <= root) { oe_ret_text(ret, file_text_n(p, root)); return; }
     oe_ret_text(ret, file_text_n(p, b - 1));            /* drop the separator */
 }
 
@@ -630,47 +974,51 @@ void path_absolute(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *p = file_nz(oe_arg_text(argv, 0));
     char cwd[4096];
+    const char *parts[2];
+    int np = 0;
     size_t need = strlen(p) + 2;
-    if (*p != '/') {
-        if (!getcwd(cwd, sizeof cwd)) {
+    if (file_root_len(p) == 0) {
+        if (!file_getcwd_buf(cwd, sizeof cwd)) {
             /* Infallible by contract: hand back what we were given rather than
              * set an error slot a path command is not allowed to touch. */
             oe_ret_text(ret, file_text(p));
             return;
         }
         need += strlen(cwd) + 1;
+        parts[np++] = cwd;
     }
+    parts[np++] = p;
     char *o = (char *)oe_malloc((long)need);
     if (!o) { oe_ret_text(ret, NULL); return; }
 
-    /* Build, then walk component by component, writing each one after the last
-     * '/' already emitted.  ".." rewinds that write position. */
-    size_t w = 0;
-    const char *parts[2];
-    int np = 0;
-    if (*p != '/') parts[np++] = cwd;
-    parts[np++] = p;
-    o[w++] = '/';
+    /* The root is copied verbatim from whichever part supplies it, so a drive
+     * letter or a UNC share survives intact and ".." can never rewind past it.
+     * Then walk component by component, writing each after the last separator
+     * already emitted; ".." rewinds that write position. */
+    size_t root = file_root_len(parts[0]);
+    if (root == 0) { o[0] = FILE_SEP; root = 1; }
+    else memcpy(o, parts[0], root);
+    size_t w = root;
     for (int k = 0; k < np; k++) {
         const char *s = parts[k];
-        size_t i = 0, n = strlen(s);
+        size_t i = file_root_len(s), n = strlen(s);
         while (i < n) {
-            while (i < n && s[i] == '/') i++;
+            while (i < n && file_is_sep(s[i])) i++;
             size_t start = i;
-            while (i < n && s[i] != '/') i++;
+            while (i < n && !file_is_sep(s[i])) i++;
             size_t len = i - start;
             if (len == 0) continue;
             if (len == 1 && s[start] == '.') continue;
             if (len == 2 && s[start] == '.' && s[start + 1] == '.') {
-                while (w > 1 && o[w - 1] != '/') w--;
-                if (w > 1) w--;                     /* drop the separator too */
+                while (w > root && !file_is_sep(o[w - 1])) w--;
+                if (w > root) w--;                      /* drop the separator */
                 continue;
             }
-            if (w > 1) o[w++] = '/';
+            if (w > root) o[w++] = FILE_SEP;
             memcpy(o + w, s + start, len);
             w += len;
         }
     }
-    o[w] = '\0';                    /* w >= 1: the leading '/' is always there */
+    o[w] = '\0';                        /* w >= root: the root is always there */
     oe_ret_text(ret, o);
 }

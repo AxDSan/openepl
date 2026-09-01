@@ -1470,3 +1470,235 @@ fn a_zero_index_is_a_compile_error() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A CONSOLE program with no form outlives `main` and exits on `quit`.
+///
+/// This is the property the whole event loop exists for: `main` prints one line
+/// and returns, and the program keeps running because a timer is a live event
+/// source. Before the loop moved into the runtime, only a module with a form
+/// had one at all, so a console program's timer would have fired never — the
+/// binary would have exited the instant `main` returned, with the first line
+/// printed and nothing after it. The ORDER below is the proof: every `tick`
+/// line is output produced after `main` had already returned.
+///
+/// Run with a deadline rather than `run()`: if the loop ever regresses into
+/// never returning, a test that waits forever hangs CI instead of failing it.
+#[test]
+fn a_console_program_stays_alive_for_its_timer() {
+    let bin = build_as("loopdemo", "loop");
+    let mut child = Command::new(&bin)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("run loopdemo");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait().expect("poll loopdemo") {
+            Some(status) => {
+                assert!(status.success(), "loopdemo exited {status}");
+                break;
+            }
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                panic!("loopdemo never exited — `quit` did not end the event loop");
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+
+    let out = child.wait_with_output().expect("collect loopdemo output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "main returned; the timer keeps the program alive",
+            "tick 1",
+            "tick 2",
+            "tick 3",
+        ],
+        "unexpected loopdemo output:\n{stdout}"
+    );
+}
+
+/// The two halves of `kind` are checked, not merely recorded: a component with
+/// a rectangle needs a form to be drawn in, and one without cannot be placed in
+/// a form the designer will rewrite as a rectangle among rectangles.
+#[test]
+fn a_component_must_be_declared_where_its_kind_belongs() {
+    // Both cases name a `ui` type, and a build checks a library's prerequisites
+    // before it validates anything — so without the vendored stack the failure
+    // is the missing dependency, not the diagnostic under test.
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join("openepl_kind");
+    let _ = std::fs::create_dir_all(&dir);
+    let cases = [
+        (
+            "visual.oir",
+            "module visual\nuse ui\n\nbutton stray\n  text = \"no form\"\nend\n\nsub main\n  \
+             call print_int(1)\nend\n",
+            "has to live inside a form",
+        ),
+        (
+            "nonvisual.oir",
+            "module nonvisual\nuse ui\n\nform win\n  title = \"t\"\n  timer inner\n    \
+             interval = 10\n  end\nend\n",
+            "declare it at module level",
+        ),
+    ];
+    for (file, src, want) in cases {
+        let path = dir.join(file);
+        std::fs::write(&path, src).expect("write");
+        let out = Command::new(env!("CARGO_BIN_EXE_openepl"))
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "-o",
+                dir.join("k").to_str().unwrap(),
+            ])
+            .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+            .output()
+            .expect("run openepl");
+        assert!(!out.status.success(), "{file} must not compile");
+        let msg = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            msg.contains(want),
+            "{file}: the message must say where it belongs, got: {msg}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Build an inline module and run it against a deadline.
+///
+/// The deadline is the point: every defect these tests hunt shows up as a
+/// program that never ends, and a test that waits forever tells CI nothing.
+fn run_module_within(name: &str, src: &str, envs: &[(&str, &str)], secs: u64) -> String {
+    let repo = repo();
+    let dir = std::env::temp_dir().join(format!("openepl_mod_{name}"));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("{name}.oir"));
+    std::fs::write(&path, src).expect("write module");
+    let bin = dir.join(name);
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", path.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+        .status()
+        .expect("run openepl");
+    assert!(status.success(), "openepl build {name} failed");
+
+    let mut cmd = Command::new(&bin);
+    cmd.stdout(std::process::Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("run built binary");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        match child.try_wait().expect("poll child") {
+            Some(status) => {
+                assert!(status.success(), "{name} exited {status}");
+                break;
+            }
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                panic!("{name} never exited — the event loop did not end");
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    let out = child.wait_with_output().expect("collect output");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A source that is switched off keeps nothing alive. Without this the loop
+/// could stay in itself for a registered-but-dead timer, and a program that
+/// declared one it never enabled would hang after `main` instead of ending.
+#[test]
+fn a_disabled_timer_does_not_hold_the_program_open() {
+    let stdout = run_module_within(
+        "offtimer",
+        "module offtimer\n\ntimer idle\n  interval = 20\n  enabled = false\n  \
+         on tick: on_tick\nend\n\nsub main\n  call print_text(\"main returned\")\nend\n\n\
+         sub on_tick\n  call print_text(\"tick\")\nend\n",
+        &[],
+        10,
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<&str>>(),
+        vec!["main returned"],
+        "a disabled timer must neither fire nor keep the program running:\n{stdout}"
+    );
+}
+
+/// Liveness is re-read as the program runs, not decided once at startup: a
+/// handler that switches its own timer off is the only way a program with no
+/// window ends without calling `quit`. Reading `interval` back in the same
+/// handler proves a non-visual component's properties are ordinary properties.
+#[test]
+fn a_handler_can_switch_off_the_timer_that_called_it() {
+    let stdout = run_module_within(
+        "selfstop",
+        "module selfstop\n\ntimer t\n  interval = 20\n  on tick: on_tick\nend\n\n\
+         sub main\n  call print_text(\"main returned\")\nend\n\n\
+         sub on_tick\n  call print_text(concat(\"interval \", int_to_text(t.interval)))\n  \
+         t.enabled = false\nend\n",
+        &[],
+        10,
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<&str>>(),
+        vec!["main returned", "interval 20"],
+        "the timer must fire once, report its interval, and then stop:\n{stdout}"
+    );
+}
+
+/// The two kinds of event source share one loop. A window and a timer in the
+/// same program is the composition that would break first if either had kept a
+/// loop of its own, and neither track's own tests can catch it.
+#[test]
+fn a_window_and_a_timer_run_in_the_same_program() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let stdout = run_module_within(
+        "windowtimer",
+        "module windowtimer\nuse ui\n\ntimer t\n  interval = 20\n  on tick: on_tick\nend\n\n\
+         form win\n  title = \"both\"\n  width = 240\n  height = 160\nend\n\n\
+         sub main\n  call print_text(\"main returned\")\nend\n\n\
+         sub on_tick\n  call print_text(\"tick\")\nend\n",
+        &[("OPENEPL_UI_EXIT_AFTER_FRAMES", "60")],
+        30,
+    );
+    assert!(
+        stdout.contains("main returned") && stdout.contains("tick"),
+        "the timer must fire while the window renders:\n{stdout}"
+    );
+}
+
+/// `quit` before the loop is ever entered must still end the program. The
+/// request has to latch: a program whose `main` decides there is nothing to do
+/// would otherwise register its sources, enter the loop, and wait forever for a
+/// quit that had already happened.
+#[test]
+fn quit_from_main_ends_a_program_that_never_enters_the_loop() {
+    let stdout = run_module_within(
+        "earlyquit",
+        "module earlyquit\n\ntimer t\n  interval = 20\n  on tick: on_tick\nend\n\n\
+         sub main\n  call print_text(\"nothing to do\")\n  call quit()\nend\n\n\
+         sub on_tick\n  call print_text(\"tick\")\nend\n",
+        &[],
+        10,
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<&str>>(),
+        vec!["nothing to do"],
+        "quit from main must latch — the loop may not run a single tick:\n{stdout}"
+    );
+}

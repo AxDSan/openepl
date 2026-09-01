@@ -1,0 +1,10 @@
+module __MODULE__
+use units
+
+sub main
+  let c: double = 21.5
+  call print_text("Celsius:")
+  call print_double(c)
+  call print_text("Fahrenheit:")
+  call print_double(units_c_to_f(c))
+end

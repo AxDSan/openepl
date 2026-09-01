@@ -1,0 +1,4 @@
+name: Temperature Converter
+desc: A terminal program that uses the `units` kit to convert Celsius to Fahrenheit.
+target: console
+entry: main.oir

@@ -146,9 +146,21 @@ impl Parser {
                 Tok::Sub => items.push(Item::Sub(self.sub()?)),
                 Tok::Form => items.push(Item::Form(self.form()?)),
                 Tok::Var => items.push(Item::Var(self.global_var()?)),
+                // `type id` at module level is a NON-VISUAL component — a timer,
+                // a server. It reads exactly as it does inside a form, because
+                // the only thing it lacks is a rectangle to be drawn in; the
+                // validator is what rejects a button out here.
+                Tok::Ident(type_name) => {
+                    let type_name = type_name.clone();
+                    self.bump();
+                    items.push(Item::Component(self.component(type_name)?));
+                }
                 Tok::Eof => break,
                 other => {
-                    return self.err(format!("expected `sub` or end of file, found {other:?}"))
+                    return self.err(format!(
+                        "expected `sub`, `form`, `var`, a component, or end of file, \
+                         found {other:?}"
+                    ))
                 }
             }
         }

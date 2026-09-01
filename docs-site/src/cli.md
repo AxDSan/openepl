@@ -15,6 +15,8 @@ USAGE:
   openepl commands [--use <lib>]      list the commands and components available
   openepl templates                   list the available project templates
   openepl new <template> <dir>        create a project from a template
+  openepl kits                        list the kits found, and from where
+  openepl kit add <path>              install a kit into ~/.openepl/kits
 
 ```
 
@@ -51,6 +53,22 @@ characters that cannot appear in an identifier are replaced.
 openepl commands                 # the core runtime
 openepl commands --use file      # and what a library adds
 ```
+
+## Kits
+
+A kit is a support library plus what an IDE needs to present it. `openepl kits`
+lists the ones resolution found, each with its version and where it came from —
+`project` for a `kits/` directory beside your source, `user` for
+`~/.openepl/kits/`, `bundled` for the ones shipped with the toolchain. The
+first match of a name wins, in that order.
+
+```sh
+openepl kits                     # what is installed, and from where
+openepl kit add ./mykit          # install a directory
+openepl kit add mykit.tar.gz     # or a tarball
+```
+
+See [Kits](./kits.md).
 
 ## Editor support
 

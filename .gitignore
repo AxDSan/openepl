@@ -47,3 +47,24 @@ openepl_dotgrid.tga
 # Documentation site build output
 /docs-site/book/
 /_site/
+
+# `openepl build x.oir` with no -o writes the module name into the current
+# directory, which is how three ELF binaries came to be committed. Ignore
+# extension-less files at the root — every real one has a suffix or lives in a
+# subdirectory. The re-includes must come before the directory rules below, or
+# `!/*/` un-ignores /vendor/ and sweeps 1900 vendored files into a commit.
+/*
+!/*.*
+!/*/
+
+# Directory ignores, restated AFTER the root rule above so it cannot override
+# them. Git applies the last matching pattern, so order is load-bearing here.
+/build/
+/dist/
+/target/
+/scratch/
+/tmp/
+/vendor/
+/docs-site/book/
+/_site/
+/designer/openepl-designer

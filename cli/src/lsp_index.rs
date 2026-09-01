@@ -85,9 +85,11 @@ impl Index {
         };
         let mut ix = Index::default();
         let mut scope: Option<String> = None;
-        // Depth inside a `form`. A component declaration opens its own block,
-        // so a single boolean would let the component's `end` close the form
-        // and every component after the first would go unindexed.
+        // Depth inside a `form` or a component. A component declaration opens
+        // its own block, so a single boolean would let the component's `end`
+        // close the form and every component after the first would go
+        // unindexed. A module-level component opens a block here too, and its
+        // `end` must not be read as the end of a subroutine.
         let mut form_depth = 0usize;
 
         let mut i = 0;
@@ -185,9 +187,14 @@ impl Index {
                 }
                 Tok::Ident(name) => {
                     let sp = &toks[i];
-                    // `type id` directly inside a form declares a component,
-                    // and opens a block of its own.
-                    if form_depth == 1 && scope.is_none() {
+                    // `type id` declares a component and opens a block of its
+                    // own: directly inside a form for a visual one, at module
+                    // level for a non-visual one. `target console` is the one
+                    // other place two identifiers meet out here, and it names
+                    // nothing an editor can jump to.
+                    let declares_component = scope.is_none()
+                        && (form_depth == 1 || (form_depth == 0 && name != "target"));
+                    if declares_component {
                         if let Some((id, id_sp)) = ident_at(&toks, i + 1) {
                             ix.push(name.clone(), sp, false, SymKind::ComponentType, None);
                             ix.component_types.insert(id.clone(), name.clone());
@@ -374,6 +381,30 @@ mod tests {
             Some("label"),
             "a component after the first must not be swallowed by the previous `end`"
         );
+    }
+
+    /// A non-visual component is declared at module level, and an editor has
+    /// to find it there: rename and go-to-definition are the whole reason the
+    /// index exists, and a timer's id is addressed from handlers exactly as a
+    /// button's is.
+    #[test]
+    fn module_level_components_are_indexed_with_their_types() {
+        let src = "module m\ntarget console\n\ntimer ticker\n  interval = 10\nend\n\n\
+                   sub main\n  ticker.interval = 20\nend\n";
+        let ix = Index::build(src);
+        assert_eq!(
+            ix.component_types.get("ticker").map(String::as_str),
+            Some("timer")
+        );
+        // `target console` is two identifiers in the one other place they meet
+        // at module level, and names nothing to jump to.
+        assert!(
+            !ix.component_types.contains_key("console"),
+            "`target console` was read as a component declaration"
+        );
+        // The component's `end` closed its own block, not `main`.
+        let assign = ix.occurrences.iter().find(|o| o.line == 9).unwrap();
+        assert_eq!(assign.name, "ticker");
     }
 
     /// A name after `.` is a property. Treating it as a variable would send

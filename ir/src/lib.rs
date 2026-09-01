@@ -472,6 +472,12 @@ pub struct Form {
 pub enum Item {
     Sub(Sub),
     Form(Form),
+    /// A non-visual component declared at module level: `timer ticker`.
+    ///
+    /// It is the same `Component` a form holds, because it is the same thing —
+    /// properties, events and an inspector row — minus a rectangle. A console
+    /// program that waits for something is the reason this exists at all.
+    Component(Component),
     /// A module-level mutable variable: `var count: int = 0`.
     ///
     /// This is where state that must outlive a single event handler lives —
@@ -592,6 +598,14 @@ impl Module {
     pub fn forms(&self) -> impl Iterator<Item = &Form> {
         self.items.iter().filter_map(|i| match i {
             Item::Form(f) => Some(f),
+            _ => None,
+        })
+    }
+
+    /// Iterate the module-level (non-visual) components, in declaration order.
+    pub fn components(&self) -> impl Iterator<Item = &Component> {
+        self.items.iter().filter_map(|i| match i {
+            Item::Component(c) => Some(c),
             _ => None,
         })
     }

@@ -15,7 +15,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+/* getpid lives in <process.h> on Windows and is spelled _getpid; MSVC has no
+ * <unistd.h> at all. */
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
 #include <unistd.h>
+#endif
 #include "openepl_abi.h"
 
 /* --- the generator ---------------------------------------------------- */

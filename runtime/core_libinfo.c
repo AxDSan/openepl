@@ -110,6 +110,24 @@ static const OpenEPL_CommandDesc CORE_COMMANDS[] = {
     CMD("bytes_set",       oe_bin_put,       OE_SDT_NULL, 3, P_BII),
     CMD("bytes_from_text", oe_bin_from_text, OE_SDT_BIN,  1, P_T),
     CMD("text_from_bytes", oe_bin_to_text,   OE_SDT_TEXT, 1, P_B),
+    /* event loop */
+    CMD("quit",            oe_quit,          OE_SDT_NULL, 0, NULL),
+};
+
+/* --- timer: the core library's one non-visual component ----------------
+ * Properties and events are declared exactly as a button's are — the whole
+ * point of the `kind` field is that nothing else about the mechanism changes. */
+static const OpenEPL_PropertyDesc TIMER_PROPS[] = {
+    { "interval", OE_SDT_INT,  "1000", NULL },
+    { "enabled",  OE_SDT_BOOL, "true", NULL },
+};
+static const OpenEPL_EventDesc TIMER_EVENTS[] = { { "tick" } };
+
+static const OpenEPL_ComponentDesc CORE_COMPONENTS[] = {
+    { "timer", OE_ROLE_UNKNOWN,
+      (int32_t)(sizeof(TIMER_PROPS) / sizeof(TIMER_PROPS[0])), TIMER_PROPS,
+      (int32_t)(sizeof(TIMER_EVENTS) / sizeof(TIMER_EVENTS[0])), TIMER_EVENTS,
+      OE_COMPONENT_NONVISUAL },
 };
 
 static const OpenEPL_LibInfo CORE_INFO = {
@@ -119,7 +137,8 @@ static const OpenEPL_LibInfo CORE_INFO = {
     0, 2, 0,
     (int32_t)(sizeof(CORE_COMMANDS) / sizeof(CORE_COMMANDS[0])),
     CORE_COMMANDS,
-    0, NULL,   /* the core library contributes no visual components */
+    (int32_t)(sizeof(CORE_COMPONENTS) / sizeof(CORE_COMPONENTS[0])),
+    CORE_COMPONENTS,
 };
 
 const OpenEPL_LibInfo *openepl_get_lib_info(void) {

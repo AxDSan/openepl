@@ -89,6 +89,7 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 | `print_int64` | int64 | — |
 | `print_int` | int | — |
 | `print_text` | text | — |
+| `quit` | — | — |
 | `read_line` | — | text |
 | `remove` | array, int | — |
 | `repeat` | text, int | text |
@@ -151,6 +152,7 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 | `dir_entry` | text, int | text |
 | `dir_exists` | text | bool |
 | `dir_set_current` | text | bool |
+| `file_append_bytes` | text, bytes | bool |
 | `file_append_text` | text, text | bool |
 | `file_at_end` | int | bool |
 | `file_close_all` | — | int |
@@ -162,9 +164,11 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 | `file_modified` | text | int64 |
 | `file_move` | text, text | bool |
 | `file_open` | text, text | int |
+| `file_read_bytes` | text | bytes |
 | `file_read_line` | int | text |
 | `file_read_text` | text | text |
 | `file_size` | text | int64 |
+| `file_write_bytes` | text, bytes | bool |
 | `file_write_line` | int, text | bool |
 | `file_write_text` | text, text | bool |
 | `path_absolute` | text | text |
@@ -400,3 +404,12 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 
 | Command | Parameters | Returns |
 | --- | --- | --- |
+
+## units
+
+`use units`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+| `units_c_to_f` | double | double |
+| `units_f_to_c` | double | double |

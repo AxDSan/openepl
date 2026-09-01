@@ -17,7 +17,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use openepl_ir::sema::resolve_ret;
-use openepl_ir::{BinOp, CmpOp, Elem, Expr, LogicalOp, Module, Registry, Signature, Ty};
+use openepl_ir::registry::ComponentKind;
+use openepl_ir::{
+    BinOp, CmpOp, Component, Elem, Expr, LogicalOp, Module, Registry, Signature, Ty,
+};
 
 /// Accessibility role for a form root (`OE_ROLE_WINDOW`, abi/openepl_abi.h).
 fn form_role() -> i32 {
@@ -97,6 +100,8 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         vars: HashMap::new(),
         used: BTreeSet::new(),
         ui_used: BTreeSet::new(),
+        component_libs: BTreeSet::new(),
+        loop_used: false,
         aggr_used: BTreeSet::new(),
         globals: HashMap::new(),
         allocas: Vec::new(),
@@ -115,9 +120,8 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     // Assign component handles BEFORE lowering subroutines: a handler may
     // address a component, and handles are compile-time constants derived from
     // creation order, so they can be known up front.
-    if let Some(form) = forms.first() {
-        lo.map_components(form);
-    }
+    let module_components: Vec<&Component> = m.components().collect();
+    lo.map_components(forms.first().copied(), &module_components);
 
     // Each subroutine becomes its own function, with its declared parameters
     // and return type as a plain native signature — so a call is a call, and
@@ -210,11 +214,19 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     if let Some(form) = forms.first() {
         lo.form_build(form)?;
     }
+    for c in &module_components {
+        lo.build_component(c)?;
+    }
     if subs.iter().any(|s| s.name == "main") {
         writeln!(lo.body, "  call void @{}()", user_symbol("main")).unwrap();
     }
+    // The event loop runs last, after start-up code has had its say. A module
+    // with a form enters the same loop through `oe_ui_run`, which registers the
+    // window as one source among whatever else is live.
     if !forms.is_empty() {
         lo.form_run();
+    } else {
+        lo.loop_run();
     }
 
     Ok(lo.finish(&m.name, &functions))
@@ -271,6 +283,13 @@ struct Lowerer<'a> {
     used: BTreeSet<String>,
     /// UI-interface symbols referenced (declared separately; see finish()).
     ui_used: BTreeSet<&'static str>,
+    /// Libraries whose own component entry points are referenced. Their names
+    /// are only known at build time, so unlike the UI interface these cannot be
+    /// a fixed set of `&'static str`.
+    component_libs: BTreeSet<String>,
+    /// Whether the entry point runs the event loop itself (a module with a form
+    /// enters it through `oe_ui_run`).
+    loop_used: bool,
     /// Array / byte-set helpers referenced.
     ///
     /// These are plain C functions rather than slot-ABI commands: indexing is
@@ -330,18 +349,69 @@ impl Lowerer<'_> {
         })
     }
 
-    /// Lower a form into the calls that build it at run time.
-    /// Assign each component its compile-time handle constant. The root form is
-    /// always 1 and children follow in declaration order, which is exactly the
-    /// order `form_build` creates them in.
-    fn map_components(&mut self, form: &openepl_ir::Form) {
-        let mut next: u64 = 2;
-        for child in &form.children {
-            self.handles.insert(child.id.clone(), next);
+    /// Assign each component its compile-time handle constant.
+    ///
+    /// Handles count from 1 in creation order, per library (abi/openepl_abi.h),
+    /// which is exactly the order the create calls below are emitted in. The
+    /// form root is the `ui` library's handle 1, so its children start at 2;
+    /// every other library starts at 1. Two libraries' counters never meet,
+    /// because a handle is only ever passed back to the entry points of the
+    /// library that issued it.
+    fn map_components(&mut self, form: Option<&openepl_ir::Form>, module_components: &[&Component]) {
+        let mut next: HashMap<String, u64> = HashMap::new();
+        if form.is_some() {
+            next.insert("ui".to_string(), 2);
+        }
+        let children = form.map(|f| f.children.iter()).into_iter().flatten();
+        for child in children.chain(module_components.iter().copied()) {
+            let lib = self
+                .reg
+                .component(&child.type_name)
+                .map(|d| d.library.clone())
+                .unwrap_or_default();
+            let slot = next.entry(lib).or_insert(1);
+            self.handles.insert(child.id.clone(), *slot);
+            *slot += 1;
             self.component_types
                 .insert(child.id.clone(), child.type_name.clone());
-            next += 1;
         }
+    }
+
+    /// The library whose own entry points address this component, or `None`
+    /// when it is visual and goes through the `ui` widget interface instead.
+    fn owner(&self, id: &str) -> Option<String> {
+        let type_name = self.component_types.get(id)?;
+        let desc = self.reg.component(type_name)?;
+        match desc.kind {
+            ComponentKind::Visual => None,
+            ComponentKind::NonVisual => Some(desc.library.clone()),
+        }
+    }
+
+    /// Create a non-visual component and apply its properties and bindings.
+    ///
+    /// Every step has a visual counterpart in `form_build` doing the same job
+    /// through `oe_ui_*`: that symmetry is the point of the `kind` field, and
+    /// is why the inspector, the checker and the code preview need no new
+    /// concepts to show a timer.
+    fn build_component(&mut self, c: &Component) -> Result<(), LowerError> {
+        let lib = self.owner(&c.id).ok_or_else(|| LowerError {
+            msg: format!("unknown component type `{}`", c.type_name),
+        })?;
+        self.component_libs.insert(lib.clone());
+        let type_op = self.cstr(&c.type_name);
+        let handle = self.fresh();
+        writeln!(
+            self.body,
+            "  {handle} = call i64 @oe_{lib}_component_create(ptr {type_op})"
+        )
+        .unwrap();
+        for (name, value) in &c.properties {
+            let text = self.property_text(value)?;
+            self.set_property(Some(&lib), &handle, name, &text);
+        }
+        self.bind_handlers_to(Some(&lib), &handle, &c.handlers);
+        Ok(())
     }
 
     fn form_build(&mut self, form: &openepl_ir::Form) -> Result<(), LowerError> {
@@ -376,12 +446,12 @@ impl Lowerer<'_> {
             if matches!(name.as_str(), "title" | "width" | "height") {
                 continue;
             }
-            self.set_property(&root, name, &self.property_text(value)?);
+            self.set_property(None, &root, name, &self.property_text(value)?);
         }
         // The accessible name is user-facing TEXT (the title), never the form's
         // identifier — identifiers must not reach the binary (G8).
         self.a11y(&root, form_role(), &title);
-        self.bind_handlers(&root, &form.handlers);
+        self.bind_handlers_to(None, &root, &form.handlers);
 
         // Children.
         for child in &form.children {
@@ -403,7 +473,7 @@ impl Lowerer<'_> {
 
             for (name, value) in &child.properties {
                 let text = self.property_text(value)?;
-                self.set_property(&handle, name, &text);
+                self.set_property(None, &handle, name, &text);
             }
             // The accessible name comes from user-facing text. If a component
             // has none, we emit the role only rather than falling back to the
@@ -417,10 +487,20 @@ impl Lowerer<'_> {
                 }
                 None => self.a11y_role_only(&handle, role),
             }
-            self.bind_handlers(&handle, &child.handlers);
+            self.bind_handlers_to(None, &handle, &child.handlers);
         }
 
         Ok(())
+    }
+
+    /// Enter the runtime event loop. A module with no window has nothing to
+    /// register on its own, but a library command may have — a timer, a
+    /// listening socket — so the call is unconditional and returns at once when
+    /// nothing is live.
+    fn loop_run(&mut self) {
+        self.loop_used = true;
+        let rc = self.fresh();
+        writeln!(self.body, "  {rc} = call i32 @oe_loop_run()").unwrap();
     }
 
     /// Start the event loop and tear down. Emitted after start-up code.
@@ -432,15 +512,26 @@ impl Lowerer<'_> {
         writeln!(self.body, "  call void @oe_ui_shutdown()").unwrap();
     }
 
-    fn set_property(&mut self, handle: &str, name: &str, value: &str) {
+    fn set_property(&mut self, lib: Option<&str>, handle: &str, name: &str, value: &str) {
         let n = self.cstr(name);
         let v = self.cstr(value);
-        self.ui_used.insert("oe_ui_set");
-        writeln!(
-            self.body,
-            "  call i32 @oe_ui_set(i64 {handle}, ptr {n}, ptr {v})"
-        )
-        .unwrap();
+        let f = self.setter(lib);
+        writeln!(self.body, "  call i32 @{f}(i64 {handle}, ptr {n}, ptr {v})").unwrap();
+    }
+
+    /// The property setter for a component: the widget interface, or the
+    /// declaring library's own.
+    fn setter(&mut self, lib: Option<&str>) -> String {
+        match lib {
+            None => {
+                self.ui_used.insert("oe_ui_set");
+                "oe_ui_set".to_string()
+            }
+            Some(lib) => {
+                self.component_libs.insert(lib.to_string());
+                format!("oe_{lib}_component_set")
+            }
+        }
     }
 
     /// Record the a11y role with no accessible name (see the G8 note above).
@@ -464,13 +555,22 @@ impl Lowerer<'_> {
     }
 
     /// Bind events to handler FUNCTION POINTERS (never names — G8).
-    fn bind_handlers(&mut self, handle: &str, handlers: &[(String, String)]) {
+    fn bind_handlers_to(&mut self, lib: Option<&str>, handle: &str, handlers: &[(String, String)]) {
         for (event, sub) in handlers {
             let ev = self.cstr(event);
-            self.ui_used.insert("oe_ui_on");
+            let f = match lib {
+                None => {
+                    self.ui_used.insert("oe_ui_on");
+                    "oe_ui_on".to_string()
+                }
+                Some(lib) => {
+                    self.component_libs.insert(lib.to_string());
+                    format!("oe_{lib}_component_on")
+                }
+            };
             writeln!(
                 self.body,
-                "  call i32 @oe_ui_on(i64 {handle}, ptr {ev}, ptr @{})",
+                "  call i32 @{f}(i64 {handle}, ptr {ev}, ptr @{})",
                 user_symbol(sub)
             )
             .unwrap();
@@ -762,12 +862,8 @@ impl Lowerer<'_> {
                 // The D10 boundary takes textual values, so convert first.
                 let text = self.value_as_text(&v)?;
                 let n = self.cstr(property);
-                self.ui_used.insert("oe_ui_set");
-                writeln!(
-                    self.body,
-                    "  call i32 @oe_ui_set(i64 {handle}, ptr {n}, ptr {text})"
-                )
-                .unwrap();
+                let f = self.setter(self.owner(component).as_deref());
+                writeln!(self.body, "  call i32 @{f}(i64 {handle}, ptr {n}, ptr {text})").unwrap();
                 Ok(())
             }
         }
@@ -784,7 +880,19 @@ impl Lowerer<'_> {
     fn value_as_text(&mut self, v: &Val) -> Result<String, LowerError> {
         match v.ty {
             Ty::Text => Ok(v.operand.clone()),
-            Ty::Bool => err("cannot use a truth value where text is expected"),
+            // A property is textual at the D10 boundary, and `true`/`false` is
+            // what both a descriptor's default value and the property parser on
+            // the other side already spell — so `t.enabled = false` reaches the
+            // component as the same words the source wrote.
+            Ty::Bool => {
+                let yes = self.cstr("true");
+                let no = self.cstr("false");
+                let c = self.fresh();
+                writeln!(self.body, "  {c} = icmp ne i32 {}, 0", v.operand).unwrap();
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = select i1 {c}, ptr {yes}, ptr {no}").unwrap();
+                Ok(t)
+            }
             other if !other.is_numeric() => err(format!(
                 "cannot use {} where text is expected",
                 other.as_str()
@@ -1315,28 +1423,39 @@ impl Lowerer<'_> {
                 let handle = self.handle_of(component)?;
                 let n = self.cstr(property);
                 let ty = self.property_ty(component, property)?;
+                let lib = self.owner(component);
                 match ty {
                     Ty::Int => {
-                        self.ui_used.insert("oe_ui_get_int");
+                        let f = match &lib {
+                            None => {
+                                self.ui_used.insert("oe_ui_get_int");
+                                "oe_ui_get_int".to_string()
+                            }
+                            Some(lib) => {
+                                self.component_libs.insert(lib.clone());
+                                format!("oe_{lib}_component_get_int")
+                            }
+                        };
                         let t = self.fresh();
-                        writeln!(
-                            self.body,
-                            "  {t} = call i32 @oe_ui_get_int(i64 {handle}, ptr {n})"
-                        )
-                        .unwrap();
+                        writeln!(self.body, "  {t} = call i32 @{f}(i64 {handle}, ptr {n})").unwrap();
                         Ok(Val {
                             ty: Ty::Int,
                             operand: t,
                         })
                     }
                     _ => {
-                        self.ui_used.insert("oe_ui_get");
+                        let f = match &lib {
+                            None => {
+                                self.ui_used.insert("oe_ui_get");
+                                "oe_ui_get".to_string()
+                            }
+                            Some(lib) => {
+                                self.component_libs.insert(lib.clone());
+                                format!("oe_{lib}_component_get")
+                            }
+                        };
                         let t = self.fresh();
-                        writeln!(
-                            self.body,
-                            "  {t} = call ptr @oe_ui_get(i64 {handle}, ptr {n})"
-                        )
-                        .unwrap();
+                        writeln!(self.body, "  {t} = call ptr @{f}(i64 {handle}, ptr {n})").unwrap();
                         Ok(Val {
                             ty: Ty::Text,
                             operand: t,
@@ -1680,6 +1799,25 @@ impl Lowerer<'_> {
         }
         if !self.ui_used.is_empty() {
             out.push('\n');
+        }
+
+        // A library's own component entry points (abi/openepl_abi.h). All five
+        // are declared together rather than tracked one at a time: a `declare`
+        // that nothing calls costs nothing, and the five are the whole of what
+        // addressing a component means.
+        for lib in &self.component_libs {
+            writeln!(out, "declare i64 @oe_{lib}_component_create(ptr)").unwrap();
+            writeln!(out, "declare i32 @oe_{lib}_component_set(i64, ptr, ptr)").unwrap();
+            writeln!(out, "declare ptr @oe_{lib}_component_get(i64, ptr)").unwrap();
+            writeln!(out, "declare i32 @oe_{lib}_component_get_int(i64, ptr)").unwrap();
+            writeln!(out, "declare i32 @oe_{lib}_component_on(i64, ptr, ptr)").unwrap();
+        }
+        if !self.component_libs.is_empty() {
+            out.push('\n');
+        }
+
+        if self.loop_used {
+            writeln!(out, "declare i32 @oe_loop_run()\n").unwrap();
         }
 
         for sym in &self.aggr_used {

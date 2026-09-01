@@ -54,6 +54,8 @@ OE_CMD(oe_ary_contains); OE_CMD(oe_ary_index_of); OE_CMD(oe_ary_join); OE_CMD(oe
 /* byte-sets */
 OE_CMD(oe_bin_make); OE_CMD(oe_bin_size); OE_CMD(oe_bin_byte); OE_CMD(oe_bin_put);
 OE_CMD(oe_bin_from_text); OE_CMD(oe_bin_to_text);
+/* event loop */
+OE_CMD(oe_quit);
 
 /* Aggregate access, NOT commands: indexing is syntax, so the backend calls
  * these directly rather than marshaling an argv array to read one element.
@@ -64,6 +66,15 @@ void    oe_ary_set(void *a, int32_t i, int64_t v);
 void   *oe_bin_new(int32_t len);
 int32_t oe_bin_at(void *b, int32_t i);
 void    oe_bin_set(void *b, int32_t i, int32_t v);
+
+/* Core's non-visual components (abi/openepl_abi.h).  NOT commands: the backend
+ * calls these directly, exactly as it calls the oe_ui_* entry points for a
+ * visual one. */
+int64_t     oe_core_component_create(const char *type_name);
+int32_t     oe_core_component_set(int64_t h, const char *prop, const char *value);
+const char *oe_core_component_get(int64_t h, const char *prop);
+int32_t     oe_core_component_get_int(int64_t h, const char *prop);
+int32_t     oe_core_component_on(int64_t h, const char *event, OpenEPL_HandlerFn handler);
 
 /* Shared internals, not commands.  The error slot and handle table are declared
  * in the ABI header so libraries reach them the same way the core does; these

@@ -106,3 +106,12 @@ writing it out directly.
 
 **Events:** none
 
+## timer
+
+| Property | Type |
+| --- | --- |
+| `interval` | int |
+| `enabled` | bool |
+
+**Events:** `tick`
+

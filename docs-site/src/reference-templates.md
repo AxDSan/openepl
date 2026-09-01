@@ -11,3 +11,4 @@ one compiles and runs as it stands.
 | `gui-app` | `gui` | A window with a label and a button, and a handler wired to its click. |
 | `shared-library` | `sharedlib` | A .so/.dll/.dylib. Exports its subroutines for a host to call. |
 | `static-library` | `staticlib` | A .a/.lib archive, linked directly into a host program. |
+| `units-app` | `console` | A terminal program that uses the `units` kit to convert Celsius to Fahrenheit. |

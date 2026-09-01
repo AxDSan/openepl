@@ -19,17 +19,54 @@
  * Only the SDK header — nothing runtime-internal.
  */
 #include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Windows has no fork, so the errno-pipe trick described above is not how it
+ * tells "could not start" from "ran and failed": CreateProcess reports the
+ * failure to start directly, in its return value, which is the same
+ * distinction reached by a shorter road.  The pipe ends are handed to the CRT
+ * with _open_osfhandle, so everything below the spawn — the fd reads, the
+ * FILE* wrapper, the line loop — is the same code on both platforms.
+ *
+ * A child is identified by a HANDLE here and by a pid there, and the five
+ * primitives that differ (spawn, poll, reap, terminate, release) are written
+ * twice and used once. */
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+typedef HANDLE process_pid_t;
+#define PROCESS_NO_PID NULL
+#define read  _read
+#define close _close
+#define fdopen _fdopen
+#else
+#include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+typedef pid_t process_pid_t;
+#define PROCESS_NO_PID ((pid_t)-1)
+#endif
 
 #include "openepl_abi.h"
+
+/* A spawn failure carries a platform code: an errno value on POSIX and a Win32
+ * status on Windows, which is not an errno value and must not be run through
+ * strerror. */
+static void process_fail(int code, const char *what) {
+#ifdef _WIN32
+    char msg[128];
+    snprintf(msg, sizeof msg, "%s: Windows error %d", what, code);
+    oe_error_set((int32_t)code, msg);
+#else
+    oe_error_set_errno(code, what);
+#endif
+}
 
 /* --- small helpers ---------------------------------------------------- */
 
@@ -51,26 +88,69 @@ static char *process_dup_text(const char *s, long n) {
     return o;
 }
 
+#ifndef _WIN32
 /* A wait status turned into the number a shell would report. */
 static int32_t process_status_of(int wstatus) {
     if (WIFEXITED(wstatus)) return (int32_t)WEXITSTATUS(wstatus);
     if (WIFSIGNALED(wstatus)) return (int32_t)(128 + WTERMSIG(wstatus));
     return -1;
 }
+#endif
 
 /* Writing to a child that has closed its input raises SIGPIPE, which would
  * kill the *parent* — a program should get `false` and an error code instead.
  * Disposition is process-wide, so it is set once, lazily, when this library
  * first spawns anything. */
 static void process_ignore_sigpipe(void) {
+#ifdef _WIN32
+    /* Nothing to do: Windows has no SIGPIPE.  A write to a pipe whose reader
+     * has gone returns an error, which is what this call buys on POSIX. */
+#else
     static int done = 0;
     if (!done) { signal(SIGPIPE, SIG_IGN); done = 1; }
+#endif
+}
+
+#ifdef _WIN32
+/* getline is POSIX; this is the same contract — grow the caller's buffer, keep
+ * the newline, return -1 at end of input with nothing read — so the one reader
+ * below needs no branch of its own. */
+static ssize_t process_getline(char **line, size_t *cap, FILE *f) {
+    size_t len = 0;
+    for (;;) {
+        if (len + 2 > *cap) {
+            size_t want = *cap ? *cap * 2 : 128;
+            char *nb = (char *)realloc(*line, want);
+            if (!nb) return -1;
+            *line = nb;
+            *cap = want;
+        }
+        int c = getc(f);
+        if (c == EOF) break;
+        (*line)[len++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (len == 0) return -1;
+    (*line)[len] = '\0';
+    return (ssize_t)len;
+}
+#define getline process_getline
+#endif
+
+/* A millisecond, for the escalation loops in the close function. */
+static void process_nap(void) {
+#ifdef _WIN32
+    Sleep(1);
+#else
+    struct timespec ts = { 0, 1000000 };
+    nanosleep(&ts, NULL);
+#endif
 }
 
 /* --- the child --------------------------------------------------------- */
 
 typedef struct {
-    pid_t pid;
+    process_pid_t pid;
     int   in_fd;     /* write end of the child's stdin, -1 once closed  */
     FILE *out;       /* buffered read end of the child's stdout          */
     int   reaped;    /* the child has been waited for; `status` is real  */
@@ -87,7 +167,113 @@ typedef struct {
  * `in_fd`/`out_fd` are optional: pass NULL for a stream the child should
  * inherit from us instead of having piped.  Returns the pid, or -1 with
  * *err_out set to the errno that explains why it never ran. */
-static pid_t process_spawn(const char *command, int *in_fd, int *out_fd, int *err_out) {
+#ifdef _WIN32
+static process_pid_t process_spawn(const char *command, int *in_fd, int *out_fd, int *err_out) {
+    HANDLE in_r = NULL, in_w = NULL, out_r = NULL, out_w = NULL;
+    *err_out = 0;
+
+    /* The child inherits the pipe ends it reads and writes; OUR ends must not
+     * be inheritable, or the child would hold them open and the reader would
+     * never see end of input. */
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof sa;
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+
+    if (in_fd && (!CreatePipe(&in_r, &in_w, &sa, 0) ||
+                  !SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0))) {
+        *err_out = (int)GetLastError();
+        if (in_r) CloseHandle(in_r);
+        if (in_w) CloseHandle(in_w);
+        return PROCESS_NO_PID;
+    }
+    if (out_fd && (!CreatePipe(&out_r, &out_w, &sa, 0) ||
+                   !SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0))) {
+        *err_out = (int)GetLastError();
+        if (in_r) CloseHandle(in_r);
+        if (in_w) CloseHandle(in_w);
+        if (out_r) CloseHandle(out_r);
+        if (out_w) CloseHandle(out_w);
+        return PROCESS_NO_PID;
+    }
+
+    /* cmd.exe /c is the Windows spelling of /bin/sh -c, so a pipeline and a
+     * redirection work here for the same reason they work there. */
+    const char *shell = getenv("COMSPEC");
+    if (!shell || !*shell) shell = "cmd.exe";
+    size_t n = strlen(shell) + strlen(command) + 8;
+    char *line = (char *)malloc(n);
+    if (!line) {
+        *err_out = (int)ERROR_NOT_ENOUGH_MEMORY;
+        if (in_r) CloseHandle(in_r);
+        if (in_w) CloseHandle(in_w);
+        if (out_r) CloseHandle(out_r);
+        if (out_w) CloseHandle(out_w);
+        return PROCESS_NO_PID;
+    }
+    snprintf(line, n, "%s /c %s", shell, command);
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si);
+    memset(&pi, 0, sizeof pi);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput  = in_fd  ? in_r : GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = out_fd ? out_w : GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+
+    BOOL ok = CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    int code = (int)GetLastError();
+    free(line);
+    /* The child has its own copies now. */
+    if (in_r) CloseHandle(in_r);
+    if (out_w) CloseHandle(out_w);
+    if (!ok) {
+        if (in_w) CloseHandle(in_w);
+        if (out_r) CloseHandle(out_r);
+        *err_out = code;
+        return PROCESS_NO_PID;
+    }
+    CloseHandle(pi.hThread);
+
+    /* Hand the pipe ends to the CRT so the fd-shaped code below is unchanged;
+     * closing the fd from then on closes the HANDLE with it. */
+    if (in_fd)  *in_fd  = _open_osfhandle((intptr_t)in_w, _O_WRONLY);
+    if (out_fd) *out_fd = _open_osfhandle((intptr_t)out_r, _O_RDONLY | _O_BINARY);
+    return pi.hProcess;
+}
+
+/* 1 = it finished and *status is real, 0 = still running, -1 = failure. */
+static int process_poll(process_pid_t pid, int32_t *status) {
+    DWORD w = WaitForSingleObject(pid, 0);
+    if (w == WAIT_TIMEOUT) return 0;
+    if (w != WAIT_OBJECT_0) return -1;
+    DWORD code = 1;
+    if (!GetExitCodeProcess(pid, &code)) return -1;
+    *status = (int32_t)code;
+    return 1;
+}
+
+/* Wait for a child to finish.  1 on success. */
+static int process_reap(process_pid_t pid, int32_t *status) {
+    if (WaitForSingleObject(pid, INFINITE) != WAIT_OBJECT_0) return 0;
+    DWORD code = 1;
+    if (!GetExitCodeProcess(pid, &code)) return 0;
+    *status = (int32_t)code;
+    return 1;
+}
+
+/* Windows has no signals to send, so "stop it now" is the one blunt verb.
+ * 137 is what a shell reports for a SIGKILL, and this is that same event. */
+static int process_terminate(process_pid_t pid) {
+    return TerminateProcess(pid, 137) ? 1 : 0;
+}
+
+/* A pid needs no releasing; a HANDLE does. */
+static void process_release(process_pid_t pid) { CloseHandle(pid); }
+#else
+static process_pid_t process_spawn(const char *command, int *in_fd, int *out_fd, int *err_out) {
     int inp[2] = { -1, -1 }, outp[2] = { -1, -1 }, errp[2] = { -1, -1 };
     *err_out = 0;
 
@@ -164,12 +350,34 @@ static pid_t process_spawn(const char *command, int *in_fd, int *out_fd, int *er
     return pid;
 }
 
-/* Wait for a child, restarting across signals. */
-static int process_reap(pid_t pid, int *wstatus) {
-    int r;
-    do { r = (int)waitpid(pid, wstatus, 0); } while (r < 0 && errno == EINTR);
-    return r;
+/* 1 = it finished and *status is real, 0 = still running, -1 = failure. */
+static int process_poll(process_pid_t pid, int32_t *status) {
+    int st = 0;
+    pid_t r;
+    do { r = waitpid(pid, &st, WNOHANG); } while (r < 0 && errno == EINTR);
+    if (r == 0) return 0;
+    if (r < 0) return -1;
+    *status = process_status_of(st);
+    return 1;
 }
+
+/* Wait for a child, restarting across signals.  1 on success. */
+static int process_reap(process_pid_t pid, int32_t *status) {
+    int st = 0;
+    pid_t r;
+    do { r = waitpid(pid, &st, 0); } while (r < 0 && errno == EINTR);
+    if (r != pid) return 0;
+    *status = process_status_of(st);
+    return 1;
+}
+
+static int process_terminate(process_pid_t pid) {
+    if (kill(pid, SIGKILL) == 0) return 1;
+    return errno == ESRCH;               /* already gone is a success */
+}
+
+static void process_release(process_pid_t pid) { (void)pid; }
+#endif
 
 /* The close function handed to oe_handle_new: it runs on process_close AND on
  * exit cleanup, which is what keeps a forgetful program from accumulating
@@ -183,31 +391,30 @@ static void process_close_fn(void *payload) {
     if (p->out) { fclose(p->out); p->out = NULL; }
 
     if (!p->reaped) {
-        int st;
+        int32_t st = -1;
         /* Give it a moment to notice the closed input, then escalate. */
         for (int i = 0; i < 100; i++) {           /* up to ~100ms */
-            pid_t r = waitpid(p->pid, &st, WNOHANG);
-            if (r == p->pid) { p->reaped = 1; p->status = process_status_of(st); break; }
+            int r = process_poll(p->pid, &st);
+            if (r == 1) { p->reaped = 1; p->status = st; break; }
             if (r < 0) { p->reaped = 1; break; }  /* already gone */
-            struct timespec ts = { 0, 1000000 };  /* 1ms */
-            nanosleep(&ts, NULL);
+            process_nap();
         }
         if (!p->reaped) {
-            kill(p->pid, SIGTERM);
+            process_terminate(p->pid);
             for (int i = 0; i < 100; i++) {
-                pid_t r = waitpid(p->pid, &st, WNOHANG);
-                if (r == p->pid) { p->reaped = 1; p->status = process_status_of(st); break; }
+                int r = process_poll(p->pid, &st);
+                if (r == 1) { p->reaped = 1; p->status = st; break; }
                 if (r < 0) { p->reaped = 1; break; }
-                struct timespec ts = { 0, 1000000 };
-                nanosleep(&ts, NULL);
+                process_nap();
             }
         }
         if (!p->reaped) {
-            kill(p->pid, SIGKILL);
-            if (process_reap(p->pid, &st) == p->pid) p->status = process_status_of(st);
+            process_terminate(p->pid);
+            if (process_reap(p->pid, &st)) p->status = st;
             p->reaped = 1;
         }
     }
+    process_release(p->pid);
     free(p);
 }
 
@@ -231,21 +438,23 @@ void process_run(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *cmd = process_nz(oe_arg_text(argv, 0));
     int err = 0;
-    pid_t pid = process_spawn(cmd, NULL, NULL, &err);
-    if (pid < 0) {
-        oe_error_set_errno(err ? err : ENOENT, "run");
+    process_pid_t pid = process_spawn(cmd, NULL, NULL, &err);
+    if (pid == PROCESS_NO_PID) {
+        process_fail(err, "run");
         oe_ret_int(ret, -1);
         return;
     }
-    int st = 0;
-    if (process_reap(pid, &st) != pid) {
+    int32_t st = -1;
+    if (!process_reap(pid, &st)) {
         int e = errno;
+        process_release(pid);
         oe_error_set_errno(e, "wait");
         oe_ret_int(ret, -1);
         return;
     }
+    process_release(pid);
     oe_error_clear();
-    oe_ret_int(ret, process_status_of(st));
+    oe_ret_int(ret, st);
 }
 
 /* process_run_capture(text command) -> text
@@ -255,9 +464,9 @@ void process_run_capture(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *cmd = process_nz(oe_arg_text(argv, 0));
     int err = 0, out_fd = -1;
-    pid_t pid = process_spawn(cmd, NULL, &out_fd, &err);
-    if (pid < 0) {
-        oe_error_set_errno(err ? err : ENOENT, "run");
+    process_pid_t pid = process_spawn(cmd, NULL, &out_fd, &err);
+    if (pid == PROCESS_NO_PID) {
+        process_fail(err, "run");
         oe_ret_text(ret, process_empty_text());
         return;
     }
@@ -285,8 +494,9 @@ void process_run_capture(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     }
     close(out_fd);
 
-    int st = 0;
+    int32_t st = -1;
     process_reap(pid, &st);              /* reap regardless: no zombies */
+    process_release(pid);
 
     if (read_err) {
         free(buf);
@@ -307,9 +517,9 @@ void process_start(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc;
     const char *cmd = process_nz(oe_arg_text(argv, 0));
     int err = 0, in_fd = -1, out_fd = -1;
-    pid_t pid = process_spawn(cmd, &in_fd, &out_fd, &err);
-    if (pid < 0) {
-        oe_error_set_errno(err ? err : ENOENT, "start");
+    process_pid_t pid = process_spawn(cmd, &in_fd, &out_fd, &err);
+    if (pid == PROCESS_NO_PID) {
+        process_fail(err, "start");
         oe_ret_int(ret, 0);
         return;
     }
@@ -317,8 +527,9 @@ void process_start(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     if (!out) {
         int e = errno;
         close(in_fd); close(out_fd);
-        kill(pid, SIGKILL);
-        { int st; process_reap(pid, &st); }
+        process_terminate(pid);
+        { int32_t st; process_reap(pid, &st); }
+        process_release(pid);
         oe_error_set_errno(e, "start");
         oe_ret_int(ret, 0);
         return;
@@ -326,8 +537,9 @@ void process_start(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     Proc *p = (Proc *)malloc(sizeof *p);
     if (!p) {
         fclose(out); close(in_fd);
-        kill(pid, SIGKILL);
-        { int st; process_reap(pid, &st); }
+        process_terminate(pid);
+        { int32_t st; process_reap(pid, &st); }
+        process_release(pid);
         oe_error_set(OE_ERR_TABLE_FULL, "out of memory");
         oe_ret_int(ret, 0);
         return;
@@ -442,14 +654,13 @@ void process_is_running(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     if (!p) { oe_ret_bool(ret, 0); return; }
     if (p->reaped) { oe_error_clear(); oe_ret_bool(ret, 0); return; }
 
-    int st = 0;
-    pid_t r;
-    do { r = waitpid(p->pid, &st, WNOHANG); } while (r < 0 && errno == EINTR);
+    int32_t st = -1;
+    int r = process_poll(p->pid, &st);
     int e = errno;
     if (r == 0) { oe_error_clear(); oe_ret_bool(ret, 1); return; }
     if (r < 0) { oe_error_set_errno(e, "wait"); oe_ret_bool(ret, 0); return; }
     p->reaped = 1;
-    p->status = process_status_of(st);
+    p->status = st;
     oe_error_clear();
     oe_ret_bool(ret, 0);
 }
@@ -465,15 +676,15 @@ void process_wait(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     if (p->reaped) { oe_error_clear(); oe_ret_int(ret, p->status); return; }
 
     if (p->in_fd >= 0) { close(p->in_fd); p->in_fd = -1; }
-    int st = 0;
-    if (process_reap(p->pid, &st) != p->pid) {
+    int32_t st = -1;
+    if (!process_reap(p->pid, &st)) {
         int e = errno;
         oe_error_set_errno(e, "wait");
         oe_ret_int(ret, -1);
         return;
     }
     p->reaped = 1;
-    p->status = process_status_of(st);
+    p->status = st;
     oe_error_clear();
     oe_ret_int(ret, p->status);
 }
@@ -487,12 +698,14 @@ void process_kill(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     if (!p) { oe_ret_bool(ret, 0); return; }
     if (p->reaped) { oe_error_clear(); oe_ret_bool(ret, 1); return; }
 
-    if (kill(p->pid, SIGKILL) != 0) {
+    if (!process_terminate(p->pid)) {
         int e = errno;
-        if (e != ESRCH) { oe_error_set_errno(e, "kill"); oe_ret_bool(ret, 0); return; }
+        oe_error_set_errno(e ? e : EPERM, "kill");
+        oe_ret_bool(ret, 0);
+        return;
     }
-    int st = 0;
-    if (process_reap(p->pid, &st) == p->pid) p->status = process_status_of(st);
+    int32_t st = -1;
+    if (process_reap(p->pid, &st)) p->status = st;
     p->reaped = 1;
     oe_error_clear();
     oe_ret_bool(ret, 1);

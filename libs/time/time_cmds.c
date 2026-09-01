@@ -16,6 +16,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+
+/* Windows has neither gmtime_r nor clock_gettime in its own C library — mingw
+ * supplies both, MSVC supplies neither — so the two clocks and the one
+ * conversion below go through Win32 there.  Everything else in this file is
+ * arithmetic and needs no branch. */
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "openepl_abi.h"
 
 /* --- civil-date arithmetic ------------------------------------------------
@@ -49,7 +58,11 @@ static int month_length(int y, int m) {
 static int utc_fields(int64_t ts, struct tm *out) {
     time_t t = (time_t)ts;
     memset(out, 0, sizeof *out);
+#ifdef _WIN32
+    return gmtime_s(out, &t) == 0;
+#else
     return gmtime_r(&t, out) != NULL;
+#endif
 }
 
 static char *time_alloc(long len) { return (char *)oe_malloc(len + 1); }
@@ -62,9 +75,20 @@ static char *time_alloc(long len) { return (char *)oe_malloc(len + 1); }
  * not for measuring how long something took. Infallible. */
 void time_now_ms(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)argv;
+#ifdef _WIN32
+    /* A FILETIME counts 100ns ticks from 1601-01-01; 11644473600 seconds
+     * separate that epoch from the Unix one. */
+    FILETIME ft;
+    ULARGE_INTEGER u;
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    oe_ret_int64(ret, (int64_t)(u.QuadPart / 10000) - 11644473600000LL);
+#else
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) { oe_ret_int64(ret, (int64_t)time(NULL) * 1000); return; }
     oe_ret_int64(ret, (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+#endif
 }
 
 /* time_monotonic_ms() -> int64 : milliseconds from an ARBITRARY, unspecified
@@ -73,9 +97,16 @@ void time_now_ms(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
  * one, formatted, or passed to time_month and friends. Infallible. */
 void time_monotonic_ms(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)argv;
+#ifdef _WIN32
+    /* GetTickCount64 rather than QueryPerformanceCounter: this command's unit
+     * is the millisecond, and a counter that already counts them cannot drift
+     * from its own frequency. */
+    oe_ret_int64(ret, (int64_t)GetTickCount64());
+#else
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) { oe_ret_int64(ret, 0); return; }
     oe_ret_int64(ret, (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+#endif
 }
 
 /* --- calendar fields of a timestamp, UTC ----------------------------------

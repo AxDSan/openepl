@@ -62,7 +62,12 @@ int oe_ui_on(OpenEPL_Widget w, const char *event, OpenEPL_EventFn handler);
  * information exists when the bridge is built, rather than being retrofitted. */
 int oe_ui_set_a11y(OpenEPL_Widget w, int32_t role, const char *name);
 
-/* Run the event loop until the window closes. Returns the exit code.
+/* Register the window as an event source and enter the runtime's loop, which
+ * returns once nothing is left alive. Returns the exit code.
+ *
+ * The loop belongs to the runtime, not to this library: a program may hold a
+ * window and a timer at once, and two loops could not both be entered. Closing
+ * the window still ends the program rather than merely retiring this source.
  *
  * Test hooks (honoured only when the corresponding environment variable is set,
  * so they cost nothing in a shipped app):

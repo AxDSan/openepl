@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use crate::sema::{
     callee, check_args_labeled, property_type, type_of_expr_hinted, type_of_expr_in, Components,
 };
+use crate::registry::ComponentKind;
 use crate::{Component, Expr, Item, Module, Registry, Stmt, StmtKind, Sub, Target, Ty};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +161,40 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                 ), 0);
             }
             check_component(reg, form.name.as_str(), child, &by_name, &mut push);
+            // A form is a place to draw things. A timer inside one would have
+            // to be rewritten by the designer along with the widgets it does
+            // not resemble, so it belongs at module level and is told so.
+            if let Some(desc) = reg.component(&child.type_name) {
+                if desc.kind == ComponentKind::NonVisual {
+                    push(format!(
+                        "form `{}`: `{}` is not a visual component — declare it at \
+                         module level, outside the form",
+                        form.name, child.type_name
+                    ), 0);
+                }
+            }
+        }
+    }
+
+    // Module-level components: the same check, plus the one thing that differs.
+    let module_components: Vec<_> = m.components().collect();
+    for c in &module_components {
+        check_component_like(
+            reg,
+            &c.type_name,
+            &c.id,
+            &c.properties,
+            &c.handlers,
+            &by_name,
+            &mut push,
+        );
+        if let Some(desc) = reg.component(&c.type_name) {
+            if desc.kind == ComponentKind::Visual {
+                push(format!(
+                    "`{}`: `{}` is a visual component — it has to live inside a form",
+                    c.id, c.type_name
+                ), 0);
+            }
         }
     }
 
@@ -168,6 +203,11 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     for form in &forms {
         for child in &form.children {
             components.insert(child.id.clone(), child.type_name.clone());
+        }
+    }
+    for c in &module_components {
+        if components.insert(c.id.clone(), c.type_name.clone()).is_some() {
+            push(format!("duplicate component id `{}`", c.id), 0);
         }
     }
 

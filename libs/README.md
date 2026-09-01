@@ -23,9 +23,16 @@ Read arguments with `oe_arg_int` / `oe_arg_int64` / `oe_arg_double` /
 Heap results go through `oe_malloc`, never `malloc` — the runtime owns program
 data and frees it at exit.
 
-**Only five types exist**: `int`, `int64`, `double`, `bool`, `text`, plus void.
-There is no array, no record, and no byte buffer. A collection is exposed as a
-count plus an indexed accessor:
+**The types are** `int`, `int64`, `double`, `bool`, `text`, arrays (`T[]`) and
+`bytes`, plus void. There is no record and no dictionary. Read an argument of
+an aggregate type straight out of the slot's pointer — `argv[i].v.ptr`, cast to
+`OpenEPL_Array *` or `OpenEPL_Bin *` — and return one by writing that pointer
+back with the matching tag; the layouts are stated in `abi/openepl_abi.h`, and
+both are allocated by the runtime (`oe_ary_new` / `oe_bin_new`).
+
+Where a collection is a *view* of something the library owns rather than a
+value it hands over, it is still exposed as a count plus an indexed accessor,
+because a snapshot the program can hold is not what a live directory is:
 
 ```
 thing_count(x) -> int        # -1 on failure
@@ -56,6 +63,7 @@ a sentinel and leaves the detail in the error slot:
 | handle (int) | `0` |
 | count, size, position, timestamp | `-1` |
 | text | `""` |
+| bytes | an EMPTY byte-set — never a null pointer |
 | bool | `false` |
 
 Every exit path of a fallible command calls exactly one of `oe_error_clear()`
@@ -118,6 +126,47 @@ both.
 Implementation symbols share one link line too, so prefix those as well
 (`file_read_text`, not `read_text`).
 
+## Portability
+
+Everything under `libs/` must compile for Windows as well as for POSIX. The
+line is `#ifdef _WIN32`, and the rule is that the branch is a *thin shim*: one
+place in the file knows the platform, and the command bodies read the same on
+both. `libs/file` shows the shape — a block of wrappers (`file_fopen`,
+`file_stat`, `file_unlink`) with two implementations, and no `#ifdef` in any
+command below it.
+
+Three things about Windows that are easy to get wrong, and that every library
+here already gets right:
+
+- **A path is UTF-16.** OpenEPL text is UTF-8, so the *wide* entry points are
+  used and the results converted. The ANSI ones go through the machine's
+  codepage and mangle any name outside it, which for a path is a common case,
+  not an exotic one.
+- **A Win32 or Winsock status is not an errno value.** It reaches the error
+  slot through `oe_error_set`, never `oe_error_set_errno` — running it through
+  `strerror` produces a confident wrong sentence, and comparing it against
+  `ECONNREFUSED` compares two unrelated numbering schemes.
+- **Both separators are separators**, and a root may be `C:\` or
+  `\\server\share`. `libs/file` asks `file_is_sep` and `file_root_len`
+  rather than comparing against `'/'`, so `..` cannot rewind past a drive.
+
+Verify a change with the mingw-w64 cross compiler, from Linux, in one command:
+
+```sh
+x86_64-w64-mingw32-gcc -fsyntax-only -Wall -Wextra -I abi -I runtime libs/<name>/<name>_cmds.c
+```
+
+And then actually RUN it — link a small driver that stands in for the runtime
+against the library's `_cmds.c`, cross-compile it, and put it under Wine. A
+branch that only ever compiled is a branch nobody has read carefully enough,
+and the difference costs about twenty minutes. `net` needs `-lws2_32` on the
+link line, which `lib.json` has no platform-conditional key to express; MSVC
+picks it up from a `#pragma comment(lib, ...)` in the source, mingw does not.
+
+If a library genuinely cannot be ported, leave the Windows branch as an
+`#error` saying so. Code that looks portable and is not costs more than an
+honest gap.
+
 ## Checklist
 
 - [ ] `libs/<name>/<name>_libinfo.c` with a unique `guid` and every command
@@ -126,3 +175,4 @@ Implementation symbols share one link line too, so prefix those as well
       with no pkg-config flags
 - [ ] `openepl commands --use <name>` lists what you expect
 - [ ] an `examples/<name>lib.oir` that exercises it
+- [ ] it cross-compiles for Windows (see **Portability** above)

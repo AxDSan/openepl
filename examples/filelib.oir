@@ -7,6 +7,15 @@
 module filelib
 use file
 
+# Every binary check below reports through here, the same shape arrays.oir uses.
+sub check(what: text, ok: bool)
+  if ok
+    call print_text(what + ": ok")
+  else
+    call print_text(what + ": FAIL")
+  end
+end
+
 sub main
   let dir: text = "filelib-scratch"
   let note: text = concat(dir, "/note.txt")
@@ -83,6 +92,41 @@ sub main
   if not file_exists(path_join(dir, "nope.txt")) and last_error_code() = 0
     call print_text("absent, and that is an answer not an error")
   end
+
+  # --- bytes: the path that survives a NUL --------------------------------
+  # A PNG is full of NUL bytes, and text stops at the first one.  This is that
+  # difference made visible: the same three bytes, read both ways.
+  let blob: text = path_join(dir, "blob.bin")
+  var raw: bytes = bytes_new(3)
+  raw[1] = 65
+  raw[2] = 0
+  raw[3] = 66
+
+  call check("file_write_bytes", file_write_bytes(blob, raw))
+  call check("size on disk is 3", file_size(blob) = int_to_int64(3))
+
+  let back: bytes = file_read_bytes(blob)
+  call check("read back 3 bytes", bytes_count(back) = 3)
+  call check("byte 1 survived", back[1] = 65)
+  call check("the NUL survived", back[2] = 0)
+  call check("byte 3 survived", back[3] = 66)
+
+  # The text path truncates at the NUL — one character, not three.  That is
+  # not a bug in file_read_text; it is what a C string is, and why the bytes
+  # commands exist beside it.
+  call check("the text path stops at the NUL", length(file_read_text(blob)) = 1)
+
+  call check("file_append_bytes", file_append_bytes(blob, raw))
+  let both: bytes = file_read_bytes(blob)
+  call check("appending doubled it", bytes_count(both) = 6)
+  call check("the second copy is intact", both[4] = 65 and both[5] = 0 and both[6] = 66)
+
+  # Failure is an empty byte-set plus the error slot, the way "" is for text.
+  let gone: bytes = file_read_bytes(path_join(dir, "no-such.bin"))
+  call check("a missing file reads empty", bytes_count(gone) = 0)
+  call check("and says why", last_error_code() <> 0)
+
+  call check("cleaned up the blob", file_delete(blob))
 
   # --- tidy up ------------------------------------------------------------
   if file_delete(moved) and file_delete(note) and dir_delete(dir)

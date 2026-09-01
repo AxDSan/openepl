@@ -13,22 +13,42 @@
  * program's arguments (oe_arg_total / oe_arg_at) and the "" text sentinel
  * (oe_empty_text) are runtime internals, not part of the third-party ABI.
  */
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include <errno.h>
-#include <pwd.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 #include "openepl_core.h"
 
+#ifdef _WIN32
+/* Windows has no password database, no /proc and no nanosleep, so the account,
+ * the machine, the binary's own path and the sleep all go through Win32.
+ *
+ * Those four are asked for in their WIDE form and converted to UTF-8, because
+ * OpenEPL text is UTF-8 and the ANSI entry points would silently mangle a user
+ * whose name is not in the machine's codepage.  The ENVIRONMENT is the one
+ * thing that stays narrow: getenv and the environment block are C-library
+ * surface, and reading half of it wide would mean two disagreeing views of the
+ * same variables. */
+#include <windows.h>
+#include <process.h>
+#define getpid _getpid
+/* <stdlib.h> already declares _environ, which is the same block environ names
+ * on POSIX; redeclaring it here would drop its dllimport attribute. */
+#define environ _environ
+#else
+#include <pwd.h>
+#include <unistd.h>
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
-
 /* POSIX guarantees this; declaring it here rather than relying on a
  * feature-test macro keeps the translation unit portable across libcs. */
 extern char **environ;
+#endif
 
 /* --- small helpers ---------------------------------------------------- */
 
@@ -43,6 +63,20 @@ static char *sys_dup_text(const char *s) {
     return out;
 }
 
+#ifdef _WIN32
+/* UTF-16 in, runtime-owned UTF-8 out; NULL when the conversion fails, which a
+ * caller reports the same way it reports an out-of-memory result. */
+static char *sys_from_wide(const wchar_t *w) {
+    if (!w) return oe_empty_text();
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    if (n <= 0) return NULL;
+    char *out = (char *)oe_malloc(n);
+    if (!out) return NULL;
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, out, n, NULL, NULL) <= 0) return NULL;
+    return out;
+}
+#endif
+
 /* Fail with `code`/`msg` and return the "" text sentinel. */
 static void sys_fail_text(OpenEPL_Slot *ret, int32_t code, const char *msg) {
     oe_error_set(code, msg);
@@ -53,6 +87,20 @@ static void sys_fail_text_errno(OpenEPL_Slot *ret, int e, const char *what) {
     oe_error_set_errno(e, what);
     oe_ret_text(ret, oe_empty_text());
 }
+
+#ifdef _WIN32
+/* A Win32 status is NOT an errno value, so it goes through oe_error_set rather
+ * than oe_error_set_errno: the number a program reads back from
+ * last_error_code() is what GetLastError() said, and comparing it against an
+ * errno constant would be meaningless. */
+static void sys_fail_win(OpenEPL_Slot *ret, const char *what) {
+    DWORD code = GetLastError();
+    char msg[128];
+    snprintf(msg, sizeof msg, "%s: Windows error %lu", what, (unsigned long)code);
+    oe_error_set((int32_t)code, msg);
+    oe_ret_text(ret, oe_empty_text());
+}
+#endif
 
 /* A name that is empty or contains '=' cannot address a variable at all — that
  * is a mistake in the program, not a missing variable, so it is a failure
@@ -106,8 +154,14 @@ void system_env_set(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
         return;
     }
     if (!value) value = "";
+#ifdef _WIN32
+    /* _putenv_s returns an errno value directly rather than setting errno. */
+    int rc = (int)_putenv_s(name, value);
+    int e = rc;
+#else
     int rc = setenv(name, value, 1);
     int e = errno;
+#endif
     if (rc != 0) {
         oe_error_set_errno(e, "env_set");
         oe_ret_bool(ret, 0);
@@ -127,8 +181,15 @@ void system_env_unset(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
         oe_ret_bool(ret, 0);
         return;
     }
+#ifdef _WIN32
+    /* Assigning an empty value is how Windows removes a variable; there is no
+     * separate unset call. */
+    int rc = (int)_putenv_s(name, "");
+    int e = rc;
+#else
     int rc = unsetenv(name);
     int e = errno;
+#endif
     if (rc != 0) {
         oe_error_set_errno(e, "env_unset");
         oe_ret_bool(ret, 0);
@@ -213,6 +274,18 @@ void system_os_arch(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 /* os_host_name() -> text.  "" on failure. */
 void system_os_host_name(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)argv;
+#ifdef _WIN32
+    wchar_t w[256];
+    DWORD n = (DWORD)(sizeof w / sizeof w[0]);
+    if (!GetComputerNameExW(ComputerNameDnsHostname, w, &n)) {
+        sys_fail_win(ret, "os_host_name");
+        return;
+    }
+    char *out = sys_from_wide(w);
+    if (!out) { sys_fail_text(ret, OE_ERR_UNSUPPORTED, "os_host_name: out of memory"); return; }
+    oe_error_clear();
+    oe_ret_text(ret, out);
+#else
     char buf[256];
     buf[0] = '\0';
     int rc = gethostname(buf, sizeof buf);
@@ -221,6 +294,7 @@ void system_os_host_name(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     buf[sizeof buf - 1] = '\0';   /* truncation may leave it unterminated */
     oe_error_clear();
     oe_ret_text(ret, sys_dup_text(buf));
+#endif
 }
 
 /* The account's name and home come from the environment first, because that is
@@ -228,6 +302,17 @@ void system_os_host_name(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
  * and from the password database only when it is missing. */
 void system_os_user_name(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)argv;
+#ifdef _WIN32
+    const char *v = getenv("USERNAME");
+    if (v && *v) { oe_error_clear(); oe_ret_text(ret, sys_dup_text(v)); return; }
+    wchar_t w[256];
+    DWORD n = (DWORD)(sizeof w / sizeof w[0]);
+    if (!GetUserNameW(w, &n)) { sys_fail_win(ret, "os_user_name"); return; }
+    char *out = sys_from_wide(w);
+    if (!out) { sys_fail_text(ret, OE_ERR_UNSUPPORTED, "os_user_name: out of memory"); return; }
+    oe_error_clear();
+    oe_ret_text(ret, out);
+#else
     const char *v = getenv("USER");
     if (!v || !*v) v = getenv("LOGNAME");
     if (v && *v) { oe_error_clear(); oe_ret_text(ret, sys_dup_text(v)); return; }
@@ -241,11 +326,20 @@ void system_os_user_name(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     }
     oe_error_clear();
     oe_ret_text(ret, sys_dup_text(pw->pw_name));
+#endif
 }
 
 void system_os_home_dir(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)argv;
     const char *v = getenv("HOME");
+#ifdef _WIN32
+    /* HOME is honoured first because a shell that set it meant it; USERPROFILE
+     * is what Windows itself sets, and there is no password database behind
+     * either of them. */
+    if (!v || !*v) v = getenv("USERPROFILE");
+    if (v && *v) { oe_error_clear(); oe_ret_text(ret, sys_dup_text(v)); return; }
+    sys_fail_text(ret, OE_ERR_UNSUPPORTED, "os_home_dir: no home directory");
+#else
     if (v && *v) { oe_error_clear(); oe_ret_text(ret, sys_dup_text(v)); return; }
     errno = 0;
     struct passwd *pw = getpwuid(getuid());
@@ -257,17 +351,31 @@ void system_os_home_dir(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     }
     oe_error_clear();
     oe_ret_text(ret, sys_dup_text(pw->pw_dir));
+#endif
 }
 
 /* os_temp_dir() -> text.  There is always an answer — the environment's, or the
  * platform default — so this cannot fail and never touches the slot. */
 void system_os_temp_dir(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)argv;
+#ifdef _WIN32
+    /* GetTempPathW consults TMP, TEMP and USERPROFILE in turn and falls back to
+     * the Windows directory, so it already IS the search this command performs
+     * by hand elsewhere.  It returns a trailing backslash, which is dropped so
+     * the answer joins like every other directory this library reports. */
+    wchar_t w[MAX_PATH + 2];
+    DWORD n = GetTempPathW((DWORD)(sizeof w / sizeof w[0]), w);
+    if (n == 0 || n >= sizeof w / sizeof w[0]) { oe_ret_text(ret, sys_dup_text("C:\\Windows\\Temp")); return; }
+    while (n > 1 && (w[n - 1] == L'\\' || w[n - 1] == L'/')) w[--n] = L'\0';
+    char *out = sys_from_wide(w);
+    oe_ret_text(ret, out ? out : sys_dup_text("C:\\Windows\\Temp"));
+#else
     const char *v = getenv("TMPDIR");
     if (!v || !*v) v = getenv("TMP");
     if (!v || !*v) v = getenv("TEMP");
     if (!v || !*v) v = "/tmp";
     oe_ret_text(ret, sys_dup_text(v));
+#endif
 }
 
 /* --- sys_* ------------------------------------------------------------ */
@@ -303,7 +411,16 @@ void system_sys_arg(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
  * which the caller controls and may not be a path at all. */
 static int sys_exe_path(char *buf, size_t cap, int *saved_errno) {
     *saved_errno = 0;
-#if defined(__linux__)
+#if defined(_WIN32)
+    wchar_t w[4096];
+    DWORD n = GetModuleFileNameW(NULL, w, (DWORD)(sizeof w / sizeof w[0]));
+    if (n == 0 || n >= sizeof w / sizeof w[0]) { *saved_errno = ENAMETOOLONG; return 0; }
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, (int)cap, NULL, NULL) <= 0) {
+        *saved_errno = ENAMETOOLONG;
+        return 0;
+    }
+    return 1;
+#elif defined(__linux__)
     ssize_t n = readlink("/proc/self/exe", buf, cap - 1);
     int e = errno;
     if (n < 0) { *saved_errno = e; return 0; }
@@ -341,6 +458,12 @@ void system_sys_program_dir(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv)
     if (rc < 0) { sys_fail_text(ret, OE_ERR_UNSUPPORTED, "sys_program_dir: unsupported platform"); return; }
     if (rc == 0) { sys_fail_text_errno(ret, e, "sys_program_dir"); return; }
     char *slash = strrchr(buf, '/');
+#ifdef _WIN32
+    /* GetModuleFileNameW answers in backslashes, and a program may still have
+     * been launched through a path that mixes the two. */
+    char *back = strrchr(buf, '\\');
+    if (!slash || (back && back > slash)) slash = back;
+#endif
     if (!slash) { oe_error_clear(); oe_ret_text(ret, sys_dup_text(".")); return; }
     if (slash == buf) buf[1] = '\0'; else *slash = '\0';
     oe_error_clear();
@@ -359,6 +482,12 @@ void system_sys_process_id(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) 
  * -1 on failure. */
 void system_sys_tick_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)argv;
+#ifdef _WIN32
+    /* GetTickCount64 already counts milliseconds and cannot fail, so the -1
+     * this command documents is unreachable here. */
+    oe_error_clear();
+    oe_ret_int64(ret, (int64_t)GetTickCount64());
+#else
     struct timespec ts;
     int rc = clock_gettime(CLOCK_MONOTONIC, &ts);
     int e = errno;
@@ -369,6 +498,7 @@ void system_sys_tick_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) 
     }
     oe_error_clear();
     oe_ret_int64(ret, (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000));
+#endif
 }
 
 /* sys_sleep_ms(int ms) : void.  A negative or zero wait returns at once.
@@ -379,11 +509,15 @@ void system_sys_sleep_ms(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
     (void)argc; (void)ret;
     int ms = oe_arg_int(argv, 0);
     if (ms <= 0) return;
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
     struct timespec req;
     req.tv_sec = ms / 1000;
     req.tv_nsec = (long)(ms % 1000) * 1000000L;
     struct timespec rem;
     while (nanosleep(&req, &rem) != 0 && errno == EINTR) req = rem;
+#endif
 }
 
 /* sys_quit(int code) : void, and does not return.  Runtime teardown runs first,

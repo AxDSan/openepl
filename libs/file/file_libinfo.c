@@ -10,6 +10,7 @@
 D(file_read_text)   D(file_write_text)  D(file_append_text) D(file_exists)
 D(file_size)        D(file_delete)      D(file_copy)        D(file_move)
 D(file_modified)    D(file_line_count)
+D(file_read_bytes)  D(file_write_bytes) D(file_append_bytes)
 D(file_open)        D(file_read_line)   D(file_at_end)      D(file_write_line)
 D(file_close)       D(file_close_all)
 D(dir_exists)       D(dir_create)       D(dir_delete)       D(dir_current)
@@ -23,6 +24,7 @@ static const int32_t P_TT[]  = { OE_SDT_TEXT, OE_SDT_TEXT };
 static const int32_t P_TI[]  = { OE_SDT_TEXT, OE_SDT_INT };
 static const int32_t P_I[]   = { OE_SDT_INT };
 static const int32_t P_IT[]  = { OE_SDT_INT, OE_SDT_TEXT };
+static const int32_t P_TB[]  = { OE_SDT_TEXT, OE_SDT_BIN };
 
 static const OpenEPL_CommandDesc FILE_COMMANDS[] = {
     /* --- one-shot, path-level: the documented surface ------------------ */
@@ -36,6 +38,11 @@ static const OpenEPL_CommandDesc FILE_COMMANDS[] = {
     { "file_move",        "file_move",        OE_SDT_BOOL,  2, P_TT },
     { "file_modified",    "file_modified",    OE_SDT_INT64, 1, P_T  },
     { "file_line_count",  "file_line_count",  OE_SDT_INT,   1, P_T  },
+
+    /* --- the same three, in bytes: what a PNG needs and text cannot do -- */
+    { "file_read_bytes",   "file_read_bytes",   OE_SDT_BIN,  1, P_T  },
+    { "file_write_bytes",  "file_write_bytes",  OE_SDT_BOOL, 2, P_TB },
+    { "file_append_bytes", "file_append_bytes", OE_SDT_BOOL, 2, P_TB },
 
     /* --- handles: the escape hatch for what does not fit in memory ----- */
     { "file_open",        "file_open",        OE_SDT_INT,   2, P_TT },

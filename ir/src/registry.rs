@@ -14,15 +14,34 @@ use crate::{Module, Signature, Ty};
 pub struct PropertyDesc {
     pub name: String,
     pub ty: Ty,
+    /// Which editor an inspector should offer (`"color"`, `"file"`, `"font"`,
+    /// `"multiline"`); empty asks for the plain one the type implies. Carried
+    /// through from the descriptor for tools that want it — the compiler has no
+    /// use for a hint.
+    pub editor: String,
 }
 
-/// A visual component type contributed by a support library.
+/// Whether a component occupies a rectangle. A timer has properties, events and
+/// an inspector row exactly as a button does; what it lacks is a parent to be
+/// drawn inside, which is why this is one field rather than a second model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentKind {
+    Visual,
+    NonVisual,
+}
+
+/// A component type contributed by a support library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentDesc {
     pub name: String,
     /// Accessibility role (`OE_ROLE_*`) — carried from the descriptor so a11y
     /// data exists from the start.
     pub a11y_role: i32,
+    pub kind: ComponentKind,
+    /// The library that declared it. A non-visual component is created through
+    /// that library's own entry points, so the name is what the backend needs
+    /// to emit a call at all.
+    pub library: String,
     pub properties: Vec<PropertyDesc>,
     pub events: Vec<String>,
 }
@@ -279,6 +298,9 @@ impl Registry {
             cmd("bytes_set", "oe_bin_put", &[Bytes, Int, Int], None);
             cmd("bytes_from_text", "oe_bin_from_text", &[Text], Some(Bytes));
             cmd("text_from_bytes", "oe_bin_to_text", &[Bytes], Some(Text));
+
+            // --- Event loop --------------------------------------------------
+            cmd("quit", "oe_quit", &[], None);
         }
         r
     }

@@ -1,4 +1,4 @@
-/* OpenEPL support-library ABI + SDK — v1 (Phase 2).
+/* OpenEPL support-library ABI + SDK — v2 (Phase 2).
  *
  * The single documented contract between the OpenEPL runtime/compiler and a
  * support library, a clean-room descendant of EPL's
@@ -23,7 +23,7 @@
 extern "C" {
 #endif
 
-#define OPENEPL_ABI_VERSION 1
+#define OPENEPL_ABI_VERSION 2
 
 /* --- Data-type tags (SDT_*) — the ABI type system. ---------
  * Numeric values are frozen.  Phase 2 uses INT/INT64/DOUBLE/TEXT; the rest are
@@ -217,6 +217,31 @@ int32_t oe_handle_close(int32_t h, int32_t kind);    /* 1 ok, 0 failed       */
 int32_t oe_handle_close_kind(int32_t kind);          /* -> count closed      */
 void    oe_handle_close_all(void);                   /* idempotent           */
 
+/* --- Event loop -------------------------------------------------------
+ * A program lives while any event source is live.  The loop belongs to the
+ * runtime rather than to any one library because a timer, a socket and a window
+ * are all the same shape from here, and the alternative — whichever library
+ * happens to be present owning the loop — leaves a console program with no way
+ * to wait for anything at all.
+ *
+ * A source is a `pump` plus a period.  The loop calls `pump` when the period
+ * has elapsed (0 = every turn, which is what a window wants), sleeps until the
+ * earliest next due time when nothing is ready, and drops a source whose pump
+ * answers 1.  When the last source is gone the loop returns, so a program that
+ * registers nothing exits exactly as it would with no loop at all.
+ *
+ * `oe_loop_quit` latches: calling it before the loop starts — from `main`, the
+ * common case — makes `oe_loop_run` return immediately rather than blocking on
+ * sources that will never be serviced. */
+typedef int32_t (*OpenEPL_PumpFn)(void *state);   /* 0 = still live, 1 = done  */
+
+/* Returns a source id (>= 1), or 0 with the error slot set. */
+int32_t oe_loop_add(OpenEPL_PumpFn pump, void *state, int32_t period_ms);
+void    oe_loop_remove(int32_t source);
+int32_t oe_loop_live(void);      /* sources still registered                  */
+int32_t oe_loop_run(void);       /* -> the exit code passed to oe_loop_quit   */
+void    oe_loop_quit(int32_t code);
+
 /* --- Library metadata (LibInfo / GetNewInf analog). -------------------
  * Design-time metadata: names, signatures, versions.  It references command
  * symbols by NAME (`symbol`), not by pointer, so it can live in a metadata-only
@@ -224,8 +249,8 @@ void    oe_handle_close_all(void);                   /* idempotent           */
  * into a shipped program — the compiler resolves symbols at link time.  This is
  * EPL's `.fne` (design-time) vs `.fnr` (runtime) split, and the G8 "no metadata
  * in release output" story. */
-/* --- Visual components. -----------------
- * A library contributes visual components through the SAME LibInfo mechanism
+/* --- Components. -----------------
+ * A library contributes components through the SAME LibInfo mechanism
  * that carries commands.  A component declares its properties and events by
  * NAME, which is what makes the Object Inspector, form streaming, and the
  * designer generic — one primitive, exactly as Delphi's `published` RTTI does
@@ -234,6 +259,35 @@ void    oe_handle_close_all(void);                   /* idempotent           */
  * Accessibility is part of the descriptor, not an afterthought:
  * every component states its a11y role here, and per-instance name/state travel
  * with the properties below. */
+
+/* A component either occupies a rectangle or it does not.  A timer, a server
+ * and a tray icon have properties, events and an inspector row exactly as a
+ * button does; what they lack is a parent to be drawn inside, which is why this
+ * is one field rather than a second component mechanism.
+ *
+ * A non-visual component is created through its OWN library's entry points
+ * instead of the oe_ui_* ones, named after the library that declares it:
+ *
+ *     int64_t     oe_<lib>_component_create(const char *type_name);
+ *     int32_t     oe_<lib>_component_set(int64_t h, const char *prop, const char *value);
+ *     const char *oe_<lib>_component_get(int64_t h, const char *prop);
+ *     int32_t     oe_<lib>_component_get_int(int64_t h, const char *prop);
+ *     int32_t     oe_<lib>_component_on(int64_t h, const char *event, void (*fn)(void));
+ *
+ * Handles count from 1 in creation order, per library, so the compiler knows
+ * every handle as a constant and no instance id reaches the binary — the same
+ * contract `oe_ui_create` already keeps (form root 1, children 2, 3, ...).
+ * Two libraries' counters never meet: a handle is only ever passed back to the
+ * entry points of the library that issued it. */
+enum {
+    OE_COMPONENT_VISUAL    = 0,   /* drawn inside a form                      */
+    OE_COMPONENT_NONVISUAL = 1    /* declared at module level; no rectangle   */
+};
+
+/* An event handler emitted by the compiler.  Bound by function POINTER, never
+ * by name: there is no name-based dispatch at run time, so no user identifier
+ * reaches the shipped binary. */
+typedef void (*OpenEPL_HandlerFn)(void);
 
 /* Accessibility roles (subset of the AccessKit/platform role vocabulary). */
 enum {
@@ -251,6 +305,11 @@ typedef struct OpenEPL_PropertyDesc {
     const char *name;          /* surface property name, e.g. "text"        */
     int32_t     tag;           /* OE_SDT_* value type                       */
     const char *default_value; /* textual default; NULL = none              */
+    /* Which editor an inspector should offer: "color", "file", "font",
+     * "multiline".  NULL asks for the plain one the tag implies.  A hint, not
+     * a type — a colour is still text, and a tool free to ignore this still
+     * shows something correct. */
+    const char *editor;
 } OpenEPL_PropertyDesc;
 
 typedef struct OpenEPL_EventDesc {
@@ -264,6 +323,7 @@ typedef struct OpenEPL_ComponentDesc {
     const OpenEPL_PropertyDesc *properties;
     int32_t                     event_count;
     const OpenEPL_EventDesc    *events;
+    int32_t                     kind;        /* OE_COMPONENT_*; 0 = visual       */
 } OpenEPL_ComponentDesc;
 
 typedef struct OpenEPL_CommandDesc {

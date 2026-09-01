@@ -20,7 +20,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use openepl_ir::registry::{ComponentDesc, PropertyDesc};
+use openepl_ir::registry::{ComponentDesc, ComponentKind, PropertyDesc};
 use openepl_ir::{Registry, Signature, Ty};
 
 extern "C" {
@@ -45,6 +45,7 @@ struct PropertyDescC {
     name: *const c_char,
     tag: i32,
     default_value: *const c_char,
+    editor: *const c_char,
 }
 
 #[repr(C)]
@@ -60,6 +61,7 @@ struct ComponentDescC {
     properties: *const PropertyDescC,
     event_count: i32,
     events: *const EventDescC,
+    kind: i32,
 }
 
 #[repr(C)]
@@ -76,7 +78,7 @@ struct LibInfoC {
     components: *const ComponentDescC,
 }
 
-const OPENEPL_ABI_VERSION: i32 = 1;
+const OPENEPL_ABI_VERSION: i32 = 2;
 
 /// The result of resolving a module's libraries.
 pub struct LibPlan {
@@ -269,17 +271,33 @@ fn introspect_into(so_path: &Path, name: &str, registry: &mut Registry) -> Resul
             return Err(format!("library `{name}` returned a null LibInfo"));
         }
         let info = &*info;
-        if info.abi_version != OPENEPL_ABI_VERSION {
+        // Copied before dlclose: the format argument would otherwise be read
+        // back out of a library that is no longer mapped, so the one path that
+        // exists to report a bad ABI would segfault instead of reporting it.
+        let found = info.abi_version;
+        if found != OPENEPL_ABI_VERSION {
             dlclose(handle);
             return Err(format!(
-                "library `{name}` ABI version {} != {OPENEPL_ABI_VERSION}",
-                info.abi_version
+                "library `{name}` ABI version {found} != {OPENEPL_ABI_VERSION}"
             ));
         }
 
         let result = register_commands(info, name, registry);
         dlclose(handle);
         result
+    }
+}
+
+/// An optional C string field. NULL is the descriptor's way of saying "none",
+/// which is the empty string on the Rust side rather than an `Option` nobody
+/// would ever match on.
+///
+/// SAFETY: `p` is NULL or a NUL-terminated string owned by the loaded library.
+unsafe fn cstr_or_empty(p: *const c_char) -> String {
+    if p.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(p).to_string_lossy().into_owned()
     }
 }
 
@@ -338,7 +356,11 @@ unsafe fn register_commands(
                     pd.tag
                 )
             })?;
-            properties.push(PropertyDesc { name: pname, ty });
+            properties.push(PropertyDesc {
+                name: pname,
+                ty,
+                editor: cstr_or_empty(pd.editor),
+            });
         }
 
         let mut events = Vec::new();
@@ -350,6 +372,12 @@ unsafe fn register_commands(
         if !registry.insert_component(ComponentDesc {
             name: name.clone(),
             a11y_role: cd.a11y_role,
+            kind: if cd.kind == 1 {
+                ComponentKind::NonVisual
+            } else {
+                ComponentKind::Visual
+            },
+            library: lib.to_string(),
             properties,
             events,
         }) {
@@ -394,6 +422,15 @@ mod tests {
                 "command `{name}` signature/symbol drifted from LibInfo"
             );
         }
+        // Components are deliberately absent from the hard-coded table: they
+        // reach the compiler only through this dlopen path, so mirroring them
+        // in Rust would create a second source of truth that nothing reads.
+        // Core's own `timer` is covered end-to-end in `cli/tests/build.rs`.
+        assert_eq!(
+            hard.component_names().count(),
+            0,
+            "the hard-coded table must not grow components"
+        );
     }
 }
 
