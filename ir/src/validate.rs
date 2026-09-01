@@ -15,10 +15,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::sema::{
-    callee, check_args_labeled, property_type, type_of_expr_hinted, type_of_expr_in, Components,
+    callee, check_args_labeled, field_type, property_type, type_of_expr_hinted, type_of_expr_in,
+    Components,
 };
 use crate::registry::ComponentKind;
-use crate::{Component, Expr, Item, Module, Registry, Stmt, StmtKind, Sub, Target, Ty};
+use crate::{
+    Component, Elem, Expr, Item, Module, RecordDef, Registry, Stmt, StmtKind, Sub, Target, Ty,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidateError {
@@ -68,7 +71,34 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
             line,
         );
     }
+    for name in with_subs.register_records(m) {
+        let line = m
+            .records()
+            .find(|r| r.name == name)
+            .map_or(0, |r| r.line);
+        push(
+            format!(
+                "record `{name}` has the same name as a library command, a subroutine, \
+                 or another record — rename the record"
+            ),
+            line,
+        );
+    }
     let reg = &with_subs;
+
+    // --- record declarations ---------------------------------------------
+    let records: Vec<&RecordDef> = m.records().collect();
+    for rec in &records {
+        for (fname, fty) in &rec.fields {
+            if let Some(bad) = undeclared_type(*fty, reg) {
+                push(
+                    format!("record `{}` field `{fname}`: unknown type `{bad}`", rec.name),
+                    rec.line,
+                );
+            }
+        }
+    }
+    check_record_cycles(&records, &mut push);
 
     // --- entry point -----------------------------------------------------
     // What counts as a valid entry depends on the target: a GUI module is
@@ -215,6 +245,9 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     let globals: Vec<_> = m.globals().collect();
     let mut global_types: HashMap<String, Ty> = HashMap::new();
     for g in &globals {
+        if let Some(bad) = undeclared_type(g.ty, reg) {
+            push(format!("`var {}`: unknown type `{bad}`", g.name), 0);
+        }
         // A global's initializer may call commands but must not read another
         // global: order-dependent global initialisation is a swamp, and a clear
         // error now beats a subtle one later.
@@ -259,6 +292,22 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
             push(format!("`{id}` is both a component id and a subroutine"), 0);
         }
     }
+    // A record is written in expression position, so its name is in the same
+    // namespace every other callable name is in.
+    for rec in &records {
+        if components.contains_key(&rec.name) {
+            push(
+                format!("`{}` is both a record and a component id", rec.name),
+                rec.line,
+            );
+        }
+        if global_types.contains_key(&rec.name) {
+            push(
+                format!("`{}` is both a record and a module variable", rec.name),
+                rec.line,
+            );
+        }
+    }
 
     // --- subroutine bodies -----------------------------------------------
     for item in &m.items {
@@ -279,7 +328,22 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         // their own diagnostic, because "declare it with `var`" is not advice
         // an author can act on here.
         let mut loop_vars: HashSet<String> = HashSet::new();
+        if let Some(bad) = sub.ret.and_then(|t| undeclared_type(t, reg)) {
+            push(
+                format!("`{}` returns unknown type `{bad}`", sub.name),
+                sub.line,
+            );
+        }
         for (pname, pty) in &sub.params {
+            if let Some(bad) = undeclared_type(*pty, reg) {
+                push(
+                    format!(
+                        "in `{}`: parameter `{pname}` has unknown type `{bad}`",
+                        sub.name
+                    ),
+                    sub.line,
+                );
+            }
             if vars.insert(pname.clone(), *pty).is_some() {
                 push(
                     format!(
@@ -305,6 +369,12 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                         value,
                         mutable,
                     } => {
+                        if let Some(bad) = undeclared_type(*ty, reg) {
+                            push(
+                                format!("in `{}`: `{name}` has unknown type `{bad}`", sub.name),
+                                stmt.line,
+                            );
+                        }
                         match type_of_expr_hinted(value, Some(*ty), &vars, reg, &components) {
                             Ok(got) if got == *ty => {}
                             Ok(got) => push(format!(
@@ -468,6 +538,34 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                 "in `{}`: assignment to undefined variable `{name}`",
                                 sub.name
                             ), stmt.line),
+                            // `d["k"] = v` is `dict_set` spelled as a
+                            // subscript. It stores under a key rather than at a
+                            // position, so it is the one subscript assignment
+                            // that never fails: a key that is not there is
+                            // created.
+                            Some(Ty::Dict(v)) => {
+                                match type_of_expr_in(index, &vars, reg, &components) {
+                                    Ok(Ty::Text) => {}
+                                    Ok(other) => push(format!(
+                                        "in `{}`: a dictionary is keyed by text, got {}",
+                                        sub.name,
+                                        other.as_str()
+                                    ), stmt.line),
+                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                }
+                                match type_of_expr_hinted(
+                                    value, Some(v.ty()), &vars, reg, &components,
+                                ) {
+                                    Ok(got) if got == v.ty() => {}
+                                    Ok(got) => push(format!(
+                                        "in `{}`: `{name}` holds {} values, cannot store {}",
+                                        sub.name,
+                                        v.as_str(),
+                                        got.as_str()
+                                    ), stmt.line),
+                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                }
+                            }
                             Some(Ty::Array(_)) | Some(Ty::Bytes) => {
                                 let expected = match target {
                                     Some(Ty::Array(e)) => e.ty(),
@@ -514,10 +612,38 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                 }
                             }
                             Some(other) => push(format!(
-                                "in `{}`: `{name}` is {} — only an array or a byte-set has elements",
+                                "in `{}`: `{name}` is {} — only an array, a byte-set or a \
+                                 dictionary has elements",
                                 sub.name,
                                 other.as_str()
                             ), stmt.line),
+                        }
+                    }
+                    // `p.x = 5` writes a record field when `p` is a record and
+                    // a component property otherwise — resolved exactly as the
+                    // matching read is, or the two would disagree.
+                    StmtKind::SetProperty {
+                        component,
+                        property,
+                        value,
+                    } if matches!(vars.get(component), Some(Ty::Record(_))) => {
+                        let Some(Ty::Record(rec)) = vars.get(component).copied() else {
+                            unreachable!("guarded above")
+                        };
+                        match field_type(rec, property, reg) {
+                            Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                            Ok(expected) => match type_of_expr_hinted(
+                                value, Some(expected), &vars, reg, &components,
+                            ) {
+                                Ok(got) if got == expected => {}
+                                Ok(got) => push(format!(
+                                    "in `{}`: `{component}.{property}` is {}, cannot store {}",
+                                    sub.name,
+                                    expected.as_str(),
+                                    got.as_str()
+                                ), stmt.line),
+                                Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                            },
                         }
                     }
                     StmtKind::SetProperty {
@@ -681,6 +807,20 @@ fn check_initializer(
             }
             Ok(())
         }
+        Expr::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                check_initializer(v, globals, reg)?;
+            }
+            Ok(())
+        }
+        Expr::DictLit(pairs) => {
+            for (k, v) in pairs {
+                check_initializer(k, globals, reg)?;
+                check_initializer(v, globals, reg)?;
+            }
+            Ok(())
+        }
+        Expr::Field { base, .. } => check_initializer(base, globals, reg),
         Expr::Index { base, index } => {
             check_initializer(base, globals, reg)?;
             check_initializer(index, globals, reg)
@@ -689,6 +829,77 @@ fn check_initializer(
             Err("cannot read a component property before the form exists".to_string())
         }
         _ => Ok(()),
+    }
+}
+
+/// The record name in `ty` that no `record` declaration defines, if any.
+///
+/// The parser reads any unrecognised word in type position as a record name,
+/// because a record may be declared after the subroutine that uses it. This is
+/// where a word that names nothing is caught — and it has to run at every
+/// declaration site, since a misspelt type reaching the backend is a crash
+/// rather than a diagnostic.
+fn undeclared_type(ty: Ty, reg: &Registry) -> Option<&'static str> {
+    let name = match ty {
+        Ty::Record(n) => n,
+        Ty::Array(Elem::Record(n)) | Ty::Dict(Elem::Record(n)) => n,
+        _ => return None,
+    };
+    if reg.record(name).is_some() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Reject a record that contains itself.
+///
+/// Only a *direct* field counts: a record is built with every field given at
+/// once and there is no empty value a field could hold in the meantime, so a
+/// record whose field is itself can never be constructed. A field that is a
+/// LIST of the same record is fine — `[]` is a real value — and a tree is
+/// exactly what that spelling is for.
+///
+/// The walk is an explicit stack, not recursion: the graph being checked is
+/// the one that might contain a cycle, so the checker must not be the thing
+/// that follows it forever.
+fn check_record_cycles(records: &[&RecordDef], push: &mut impl FnMut(String, usize)) {
+    let by_name: HashMap<&str, &RecordDef> =
+        records.iter().map(|r| (r.name.as_str(), *r)).collect();
+    for rec in records {
+        // Depth-first from this record, following direct record fields only.
+        // `seen` bounds the walk to each record once, so a cycle anywhere in
+        // the graph ends the search instead of extending it.
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack: Vec<&str> = vec![rec.name.as_str()];
+        let mut cycles = false;
+        while let Some(cur) = stack.pop() {
+            let Some(def) = by_name.get(cur) else { continue };
+            for (_, fty) in &def.fields {
+                let Ty::Record(next) = fty else { continue };
+                if *next == rec.name.as_str() {
+                    cycles = true;
+                    break;
+                }
+                if seen.insert(next) {
+                    stack.push(next);
+                }
+            }
+            if cycles {
+                break;
+            }
+        }
+        if cycles {
+            push(
+                format!(
+                    "record `{}` contains itself — every field is given a value when the \
+                     record is made, so this one could never be built. A list of them \
+                     (`{}[]`) can.",
+                    rec.name, rec.name
+                ),
+                rec.line,
+            );
+        }
     }
 }
 
@@ -1190,7 +1401,7 @@ mod tests {
             ("let n: int = count(5)", "expects an array"),
             ("let xs: text[] = []\n  let n: int = index_of(xs, 1)", "must match what the array holds"),
             ("let xs: int[] = []\n  let a: int = xs[\"one\"]", "an index counts with `int`"),
-            ("let a: int = 1\n  a[0] = 2", "only an array or a byte-set has elements"),
+            ("let a: int = 1\n  a[0] = 2", "only an array, a byte-set or a dictionary has elements"),
             ("let xs: int[] = []\n  xs[0] = \"no\"", "holds int values, cannot store text"),
         ] {
             let m = parse(&format!("module m\nsub main\n  {src}\nend\n")).unwrap();
@@ -1200,6 +1411,115 @@ mod tests {
                 "expected {want:?} with a line, got {errs:?}"
             );
         }
+    }
+
+    /// The record rules, each with the line of the statement that broke it.
+    /// Construction is where all three of the interesting mistakes live.
+    #[test]
+    fn record_diagnostics() {
+        const DECL: &str = "module m\nrecord point\n  x: int\n  y: int\nend\n";
+        for (src, want) in [
+            ("let p: point = point(x: 1, y: 2, z: 3)", "has no field `z`"),
+            ("let p: point = point(x: 1, y: \"two\")", "field `y` is int, got text"),
+            ("let p: point = point(x: 1)", "is missing field `y`"),
+            ("let p: point = point(x: 1, x: 2, y: 3)", "gives field `x` twice"),
+            ("let p: point = point(x: 1, y: 2)\n  let n: int = p.z", "has no field `z`"),
+            ("let n: int = 1\n  let m: int = n.x", "only a record has fields"),
+            ("let p: circle = 1", "unknown type `circle`"),
+            ("let p: point = point(x: 1, y: 2)\n  p.x = \"no\"", "cannot store text"),
+        ] {
+            let m = parse(&format!("{DECL}sub main\n  {src}\nend\n")).unwrap();
+            let errs = validate(&m, &reg()).unwrap_err();
+            assert!(
+                errs.iter().any(|e| e.msg.contains(want) && e.line > 0),
+                "expected {want:?} with a line, got {errs:?}"
+            );
+        }
+    }
+
+    /// A record whose field is its own type can never be built — and the check
+    /// that says so must not be the thing that follows the cycle forever.
+    /// Mutual recursion is the case a one-record `seen` set would miss.
+    #[test]
+    fn a_record_cannot_contain_itself() {
+        for src in [
+            "module m\nrecord node\n  next: node\nend\nsub main\nend\n",
+            "module m\nrecord a\n  b: b\nend\nrecord b\n  a: a\nend\nsub main\nend\n",
+        ] {
+            let errs = errors(src);
+            assert!(
+                errs.iter().any(|e| e.msg.contains("contains itself") && e.line > 0),
+                "{errs:?}"
+            );
+        }
+        // A LIST of the same record is a different thing: `[]` is a real value,
+        // so a tree is constructible and must stay legal.
+        accepts("module m\nrecord node\n  kids: node[]\nend\nsub main\n  let n: node = node(kids: [])\nend\n");
+    }
+
+    /// A record name is written where a call is written, so it lives in the
+    /// same namespace and a clash has to be reported rather than resolved.
+    #[test]
+    fn a_record_cannot_take_a_command_or_subroutine_name() {
+        let errs = errors("module m\nrecord length\n  n: int\nend\nsub main\nend\n");
+        assert!(errs.iter().any(|e| e.msg.contains("same name as a library command")), "{errs:?}");
+    }
+
+    /// The dictionary rules. `get` on a missing key is a RUN-time answer, not a
+    /// compile error, so what is checked here is only the shape of the access.
+    #[test]
+    fn dict_diagnostics() {
+        for (src, want) in [
+            ("let d: int{} = {\"a\": 1, \"b\": \"two\"}", "value 2 is text"),
+            ("let d: int{} = {1: 1}", "keyed by text"),
+            ("let d: int{} = {}\n  let n: int = d[1]", "keyed by text"),
+            ("let d: int{} = {}\n  d[1] = 2", "keyed by text"),
+            ("let d: int{} = {}\n  d[\"a\"] = \"no\"", "cannot store text"),
+            ("let d: int{} = {}\n  call dict_set(d, \"a\", \"no\")", "must match what the dictionary holds"),
+            ("let n: int = dict_count(5)", "expects a dictionary"),
+            ("let d: int{} = {\"a\": 1}\n  let n: text = d[\"a\"]", "declared text but expression is int"),
+        ] {
+            let m = parse(&format!("module m\nsub main\n  {src}\nend\n")).unwrap();
+            let errs = validate(&m, &reg()).unwrap_err();
+            assert!(
+                errs.iter().any(|e| e.msg.contains(want) && e.line > 0),
+                "expected {want:?} with a line, got {errs:?}"
+            );
+        }
+    }
+
+    /// An empty dictionary has no value to infer from, exactly as `[]` has no
+    /// element — so the declaration is the only thing that can say.
+    #[test]
+    fn an_empty_dictionary_needs_a_declared_type() {
+        let errs = errors("module m\nsub main\n  call print_int(count({}))\nend\n");
+        assert!(
+            errs.iter().any(|e| e.msg.contains("does not say what it holds")),
+            "{errs:?}"
+        );
+        accepts("module m\nsub main\n  var d: text{} = {}\n  d[\"k\"] = \"v\"\nend\n");
+    }
+
+    /// `sort` and `join` read element VALUES, and a record's value is an
+    /// address. Ordering by address is a confident wrong answer, which is worse
+    /// than a refusal.
+    #[test]
+    fn a_list_of_records_cannot_be_sorted_or_joined() {
+        const DECL: &str = "module m\nrecord point\n  x: int\nend\n";
+        for cmd in ["call sort(ps)", "let s: text = join(ps, \",\")"] {
+            let src = format!(
+                "{DECL}sub main\n  var ps: point[] = [point(x: 1)]\n  {cmd}\nend\n"
+            );
+            let errs = errors(&src);
+            assert!(
+                errs.iter().any(|e| e.msg.contains("has no order and no spelling")),
+                "{errs:?}"
+            );
+        }
+        // The commands that only move elements around stay available.
+        accepts(&format!(
+            "{DECL}sub main\n  var ps: point[] = [point(x: 1)]\n               ps = append(ps, point(x: 2))\n  call print_int(count(ps))\nend\n"
+        ));
     }
 
     /// An empty list has no element to infer from, so the declaration is the

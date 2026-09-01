@@ -568,6 +568,13 @@ fn designer_produces_a_working_app() {
         eprintln!("designer not built (run designer/build.sh); skipping");
         return;
     }
+    // The designed app declares a form, so compiling it needs the UI stack
+    // that the designer binary itself was built against. A stale designer
+    // beside an unvendored tree would otherwise fail here as a product bug.
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
     let project = std::env::temp_dir().join("openepl_designed.oir");
     std::fs::write(
         &project,
@@ -720,6 +727,12 @@ fn designer_output_always_compiles() {
     let designer = repo.join("designer/openepl-designer");
     if !designer.exists() {
         eprintln!("designer not built; skipping");
+        return;
+    }
+    // What it saves declares a form, so checking that it compiles needs the
+    // vendored UI stack.
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
         return;
     }
     let project = std::env::temp_dir().join("openepl_roundtrip.oir");
@@ -1164,9 +1177,15 @@ fn openepl(args: &[&str]) -> std::process::Output {
 fn every_template_creates_a_project_that_builds() {
     let listing = openepl(&["templates"]);
     let text = String::from_utf8_lossy(&listing.stdout);
+    // `template: <id> <target>`. A `gui` template links the vendored UI stack,
+    // which a fresh checkout does not have; skipping it is honest, and failing
+    // on it would make every unvendored build red for a reason that is not a
+    // defect in the template.
+    let ui_vendored = repo().join("vendor/RmlUi/build/librmlui.a").exists();
     let ids: Vec<&str> = text
         .lines()
         .filter_map(|l| l.strip_prefix("template: "))
+        .filter(|l| ui_vendored || !l.split_whitespace().nth(1).is_some_and(|t| t == "gui"))
         .filter_map(|l| l.split_whitespace().next())
         .collect();
     assert!(!ids.is_empty(), "no templates listed:\n{text}");
@@ -1701,4 +1720,401 @@ fn quit_from_main_ends_a_program_that_never_enters_the_loop() {
         vec!["nothing to do"],
         "quit from main must latch — the loop may not run a single tick:\n{stdout}"
     );
+}
+
+// --- records and dictionaries -------------------------------------------
+//
+// Both are runtime-owned aggregates carried in the slot as a pointer, the way
+// arrays and byte-sets already are. What only a built-and-run program can show
+// is the part the type checker cannot: that a record is a REFERENCE, that a
+// dictionary keeps its insertion order, and that a missing key answers a
+// sentinel with the reason left in the error slot.
+
+/// Records end to end: construction, field reads through a chain, a record in
+/// and out of a subroutine, reference semantics, and a list of them.
+#[test]
+fn records_build_and_run() {
+    let stdout = run(&build_as("records", "run"));
+    assert_eq!(
+        stdout.lines().collect::<Vec<&str>>(),
+        vec![
+            "midpoint x=4",
+            "midpoint y=15",
+            "Ada (36) at 1,2",
+            // `same` and `ada` are two names for one record, so the birthday
+            // is seen through both. A copy would still print 36 here.
+            "Ada (37) at 1,2",
+            "  Ada (37) at 1,2",
+            "  Grace (45) at 3,4",
+        ],
+        "unexpected records output:\n{stdout}"
+    );
+}
+
+/// Dictionaries end to end. The `dict_keys` order is asserted exactly, which
+/// is a promise: entries are kept in insertion order, so iterating one twice
+/// gives the same answer and a program's output is reproducible.
+#[test]
+fn dict_builds_and_runs() {
+    let stdout = run(&build_as("dict", "run"));
+    assert_eq!(
+        stdout.lines().collect::<Vec<&str>>(),
+        vec![
+            "people: 3",
+            "Ada is 36",
+            // Reached through the marshalled command rather than the
+            // subscript — the same entry either way.
+            "Alan is now 42",
+            // The sentinel for an int dictionary, and the reason behind it —
+            // which is the whole of what `get` on a missing key promises.
+            "missing reads as 0",
+            "...because: no key `Nobody` in a dictionary of 3 entries",
+            "Ada -> 36",
+            "Alan -> 42",
+            "Grace -> 45",
+            "after removing Alan: 2",
+            // Removing what is already gone is an answer, not a failure.
+            "removing Alan again does nothing",
+        ],
+        "unexpected dict output:\n{stdout}"
+    );
+}
+
+/// A record and a dictionary must be as dead-strippable as everything else:
+/// a program that uses neither may not carry either one's code.
+#[test]
+fn a_program_that_uses_neither_links_neither() {
+    let bin = build_as("hello", "no_aggregates");
+    let syms = Command::new("nm")
+        .arg("-C")
+        .arg(&bin)
+        .output()
+        .expect("run nm");
+    let text = String::from_utf8_lossy(&syms.stdout);
+    for sym in ["oe_dict_at", "oe_dict_put", "oe_rec_new", "oe_rec_get"] {
+        assert!(
+            !text.contains(sym),
+            "`{sym}` survived into a program that never mentions one:\n{text}"
+        );
+    }
+}
+
+/// Records and dictionaries in one program. Neither feature's own example can
+/// show this: a dictionary holds one type of value, a record is a type, and
+/// whether `person{}` works at all is a fact about the two together.
+///
+/// The last three assertions are the ones worth having. A record has no
+/// printable empty value, so `get` on a missing key can only answer *no*
+/// record — and this pins that the miss is caught at the field read rather
+/// than followed into a null dereference.
+#[test]
+fn records_and_dictionaries_compose() {
+    let stdout = run(&build_as("compose", "run"));
+    assert_eq!(
+        stdout.lines().collect::<Vec<&str>>(),
+        vec![
+            "people: 2",
+            "Ada (36)",
+            "  Ada (36)",
+            "  Grace (45)",
+            // The record in the dictionary is the record the name holds — a
+            // copying `get` would still print 36 here.
+            "after a birthday: Ada (37)",
+            "missing lookup said: no key `nobody` in a dictionary of 2 entries",
+            "[]",
+            "reading its field said: field 1 of a record with 0 field(s) cannot be read",
+            "dict_has agrees there is no such person",
+            "over forty: 1",
+            "  Grace (45)",
+        ],
+        "unexpected compose output:\n{stdout}"
+    );
+}
+
+/// An `httpserver` handler reaching records, a dictionary and a subroutine
+/// parameter — the composition the server example cannot assert, because
+/// nothing in the test suite had ever spoken HTTP to a built program.
+///
+/// The client is Rust rather than OpenEPL on purpose: a program that requested
+/// its own port would block its only thread inside `net_tcp_receive_line`
+/// waiting for a reply that only the same thread's pump can produce.
+#[test]
+fn an_http_handler_reaches_records_and_a_dictionary() {
+    use std::io::{Read, Write};
+    let dir = std::env::temp_dir().join("openepl_httpd_compose");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let src = dir.join("main.oir");
+    std::fs::write(
+        &src,
+        r#"module httpcompose
+use net
+
+record hit
+  path: text
+  n: int
+end
+
+httpserver site
+  port = 8137
+  on request: on_request
+end
+
+var seen: int{} = {}
+
+sub label(h: hit): text
+  return h.path + " x" + int_to_text(h.n)
+end
+
+sub serve(req: int)
+  let p: text = net_req_path(req)
+  if dict_has(seen, p)
+    call dict_set(seen, p, dict_get(seen, p) + 1)
+  else
+    call dict_set(seen, p, 1)
+  end
+  if p = "/quit"
+    call net_req_reply(req, 200, "bye")
+    call quit()
+  else
+    call net_req_reply(req, 200, label(hit(path: p, n: dict_get(seen, p))))
+  end
+end
+
+sub on_request
+  call serve(net_request())
+end
+
+sub main
+  call print_text("ready")
+end
+"#,
+    )
+    .expect("write source");
+
+    let bin = dir.join("httpcompose");
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", src.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+        .status()
+        .expect("run openepl");
+    assert!(status.success(), "building the http composition failed");
+
+    // A port in use is somebody else's machine, not a product failure: the
+    // server says so on stderr and exits rather than running deaf, and the
+    // test declines to invent a verdict from that.
+    if std::net::TcpListener::bind("127.0.0.1:8137").is_err() {
+        eprintln!("port 8137 is busy; skipping the http composition test");
+        return;
+    }
+
+    let mut child = Command::new(&bin)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start server");
+
+    let ask = |path: &str| -> String {
+        // The listener opens on the first turn of the loop, so the first
+        // connection may beat it. Retry rather than sleep a guessed amount.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Ok(mut s) = std::net::TcpStream::connect("127.0.0.1:8137") {
+                let _ = write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n");
+                let mut reply = String::new();
+                let _ = s.read_to_string(&mut reply);
+                if let Some((_, body)) = reply.split_once("\r\n\r\n") {
+                    return body.to_string();
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the server never answered on 127.0.0.1:8137"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+
+    assert_eq!(ask("/a"), "/a x1");
+    // The dictionary is module state, so the count survives into the next
+    // request — the thing a request handle parked in a global would get wrong.
+    assert_eq!(ask("/a"), "/a x2");
+    assert_eq!(ask("/b"), "/b x1");
+    assert_eq!(ask("/quit"), "bye");
+
+    let out = child.wait_with_output().expect("server exit");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("ready"),
+        "the server never got as far as `main`"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A window and a server in one program: two event sources on the runtime's
+/// loop at once, which is the whole reason the loop belongs to the runtime and
+/// not to whichever library is linked. A request handler here also writes to a
+/// widget, so the two halves are not merely coexisting.
+#[test]
+fn a_window_and_a_server_share_one_loop() {
+    use std::io::{Read, Write};
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join("openepl_uinet_compose");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let src = dir.join("main.oir");
+    std::fs::write(
+        &src,
+        r#"module uinet
+use ui
+use net
+
+var hits: int = 0
+
+httpserver site
+  port = 8138
+  on request: on_request
+end
+
+form main_window
+  title  = "ui + net"
+  width  = 420
+  height = 160
+
+  label status
+    text  = "0 requests"
+    left  = 20
+    top   = 20
+    width = 380
+  end
+end
+
+sub on_request
+  hits = hits + 1
+  status.text = int_to_text(hits) + " requests"
+  call net_req_reply(net_request(), 200, "ok")
+end
+
+sub main
+  call print_text("gui+server up")
+end
+"#,
+    )
+    .expect("write source");
+
+    let bin = dir.join("uinet");
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", src.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+        .status()
+        .expect("run openepl");
+    assert!(status.success(), "building the ui+net composition failed");
+
+    if std::net::TcpListener::bind("127.0.0.1:8138").is_err() {
+        eprintln!("port 8138 is busy; skipping the ui+net composition test");
+        return;
+    }
+
+    // Frames are uncapped, so the count is a lifetime, not a duration: enough
+    // turns of the loop that a request has somewhere to arrive.
+    let mut child = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "30000")
+        .env("OPENEPL_UI_DUMP_A11Y", "1")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start ui+net program");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut answered = false;
+    while std::time::Instant::now() < deadline && !answered {
+        if let Ok(mut s) = std::net::TcpStream::connect("127.0.0.1:8138") {
+            let _ = write!(s, "GET /one HTTP/1.1\r\nHost: x\r\n\r\n");
+            let mut reply = String::new();
+            let _ = s.read_to_string(&mut reply);
+            answered = reply.ends_with("ok");
+        }
+        if !answered {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    assert!(
+        answered,
+        "the server never answered while the window was running"
+    );
+
+    let out = child.wait_with_output().expect("program exit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The accessible name mirrors the live label, so it is the evidence that
+    // the handler reached the widget and not merely the socket.
+    let label = stdout
+        .lines()
+        .find(|l| l.starts_with("a11y: id=2"))
+        .unwrap_or_else(|| panic!("no label node in the a11y tree:\n{stdout}"));
+    assert!(
+        label.contains("name=\"1 requests\""),
+        "the request handler did not update the window: {label}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `quit(code)` — and anything else that stops the loop with a status — must
+/// reach the shell. `ECodeStart` returned a hard 0, so a server that could not
+/// bind announced failure on stderr and then told the caller it had succeeded,
+/// which is the one thing a script cannot recover from.
+#[test]
+fn a_failed_start_exits_non_zero() {
+    let dir = std::env::temp_dir().join("openepl_exitcode");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let src = dir.join("main.oir");
+    std::fs::write(
+        &src,
+        r#"module bindfail
+use net
+
+httpserver site
+  port = 8139
+  on request: on_request
+end
+
+sub on_request
+  call net_req_reply(net_request(), 200, "hi")
+end
+
+sub main
+  call print_text("starting")
+end
+"#,
+    )
+    .expect("write source");
+
+    let bin = dir.join("bindfail");
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args(["build", src.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+        .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+        .status()
+        .expect("run openepl");
+    assert!(status.success(), "building the bind-failure program failed");
+
+    // Hold the port from the test process, so the program cannot have it.
+    let hog = match std::net::TcpListener::bind("127.0.0.1:8139") {
+        Ok(l) => l,
+        Err(_) => {
+            eprintln!("port 8139 is busy; skipping");
+            return;
+        }
+    };
+    let out = Command::new(&bin).output().expect("run bindfail");
+    drop(hog);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a server that cannot listen must not report success; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot listen"),
+        "and it must say why: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

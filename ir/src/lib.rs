@@ -23,6 +23,27 @@ pub use parser::{parse, ParseError};
 pub use registry::Registry;
 pub use validate::{validate, ValidateError};
 
+/// A name that lives for the rest of the process, so a type can carry one.
+///
+/// `Ty` is `Copy` — every `vars.get(..).copied()` in the checker depends on it,
+/// and a `String` inside would end that. A record type is named, though, and a
+/// diagnostic that cannot say *which* record is barely a diagnostic. Interning
+/// buys both: the name is a `&'static str`, and the leak is bounded by the
+/// number of distinct spellings in a compilation, not by how often they are
+/// used.
+pub fn intern(s: &str) -> &'static str {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut set = NAMES.get_or_init(|| Mutex::new(HashSet::new())).lock().unwrap();
+    if let Some(found) = set.get(s) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
+    set.insert(leaked);
+    leaked
+}
+
 /// What an array holds.  A separate, deliberately small enum rather than a
 /// `Box<Ty>`: arrays of arrays are out of scope, and spelling that in the type
 /// itself means the checker never has to discover it — `Ty` also stays `Copy`,
@@ -34,6 +55,10 @@ pub enum Elem {
     Double,
     Text,
     Bool,
+    /// A record, named. Records are references — an element is the same pointer
+    /// the slot carries — so a list of them costs exactly what a list of text
+    /// costs.
+    Record(&'static str),
 }
 
 impl Elem {
@@ -45,6 +70,7 @@ impl Elem {
             Elem::Double => Ty::Double,
             Elem::Text => Ty::Text,
             Elem::Bool => Ty::Bool,
+            Elem::Record(n) => Ty::Record(n),
         }
     }
 
@@ -57,6 +83,7 @@ impl Elem {
             Ty::Double => Elem::Double,
             Ty::Text => Elem::Text,
             Ty::Bool => Elem::Bool,
+            Ty::Record(n) => Elem::Record(n),
             _ => return None,
         })
     }
@@ -98,6 +125,17 @@ pub enum Ty {
     /// This is what makes `append(xs, 5)` on a `text[]` an error with a line
     /// number instead of a silently mistyped element.
     AnyElem,
+    /// A record type, by name. The value in the slot is a pointer to a
+    /// runtime-owned record, exactly as an array is.
+    Record(&'static str),
+    /// A dictionary from `text` keys to `Elem` values, spelled `int{}`.
+    /// One value type per dictionary, so reading one out has a type without a
+    /// run-time question.
+    Dict(Elem),
+    /// **Signature-only**: "a dictionary, whatever it holds" — the `AnyArray`
+    /// of the keyed collection, and for the same reason: `dict_count` does not
+    /// care, and five spellings of it would be five chances to disagree.
+    AnyDict,
 }
 
 impl Ty {
@@ -120,6 +158,12 @@ impl Ty {
             // phrase spell it out themselves.
             Ty::AnyArray => "array",
             Ty::AnyElem => "element",
+            Ty::Record(n) => n,
+            // Interned rather than matched out: an element type that is itself
+            // named has no fixed set of spellings to enumerate.
+            Ty::Dict(e) => intern(&format!("{}{{}}", e.as_str())),
+            Ty::AnyDict => "dictionary",
+            Ty::Array(Elem::Record(n)) => intern(&format!("{n}[]")),
         }
     }
 
@@ -150,12 +194,28 @@ impl Ty {
         }
     }
 
+    /// What this dictionary holds, or `None` if it is not one dictionary in
+    /// particular.
+    pub fn value(self) -> Option<Elem> {
+        match self {
+            Ty::Dict(e) => Some(e),
+            _ => None,
+        }
+    }
+
     /// Whether a value of this type is a pointer in the slot's value union —
     /// text and both aggregates. The backend marshals all of them identically.
     pub fn is_pointer(self) -> bool {
         matches!(
             self,
-            Ty::Text | Ty::Bytes | Ty::Array(_) | Ty::AnyArray | Ty::AnyElem
+            Ty::Text
+                | Ty::Bytes
+                | Ty::Array(_)
+                | Ty::AnyArray
+                | Ty::AnyElem
+                | Ty::Record(_)
+                | Ty::Dict(_)
+                | Ty::AnyDict
         )
     }
 
@@ -166,6 +226,8 @@ impl Ty {
     /// expressible without moving `int`.
     pub fn sdt_tag(self) -> i32 {
         const ARRAY: i32 = 0x100; // OE_SDT_ARRAY_FLAG
+        const DICT: i32 = 0x200; // OE_SDT_DICT_FLAG
+        const RECORD: i32 = 13; // OE_SDT_RECORD
         const ALL: i32 = 255; // OE_SDT_ALL
         match self {
             Ty::Int => 3,    // OE_SDT_INT
@@ -177,6 +239,12 @@ impl Ty {
             Ty::Array(e) => ARRAY | e.ty().sdt_tag(),
             Ty::AnyArray => ARRAY | ALL,
             Ty::AnyElem => ALL,
+            // One tag for every record type: which record it is, is a
+            // compile-time fact, and a field is reached by index, so nothing at
+            // run time has to tell two records apart.
+            Ty::Record(_) => RECORD,
+            Ty::Dict(e) => DICT | e.ty().sdt_tag(),
+            Ty::AnyDict => DICT | ALL,
         }
     }
 
@@ -184,9 +252,16 @@ impl Ty {
     /// this phase (or `OE_SDT_NULL`, used for void returns).
     pub fn from_sdt_tag(tag: i32) -> Option<Ty> {
         const ARRAY: i32 = 0x100;
+        const DICT: i32 = 0x200;
         const ALL: i32 = 255;
         if tag == ARRAY | ALL {
             return Some(Ty::AnyArray);
+        }
+        if tag == DICT | ALL {
+            return Some(Ty::AnyDict);
+        }
+        if tag & DICT != 0 {
+            return Elem::from_ty(Ty::from_sdt_tag(tag & !DICT)?).map(Ty::Dict);
         }
         if tag & ARRAY != 0 {
             return Elem::from_ty(Ty::from_sdt_tag(tag & !ARRAY)?).map(Ty::Array);
@@ -307,6 +382,26 @@ pub enum Expr {
     /// `[]` takes its type from where it is going, which is why the checker
     /// carries an expected type rather than inferring bottom-up alone.
     ArrayLit(Vec<Expr>),
+    /// `point(x: 1, y: 2)` — a new record, every field named.
+    ///
+    /// Named rather than positional because the three mistakes worth catching
+    /// — an unknown field, a wrong type, a missing one — are only *nameable*
+    /// this way; positional construction can report the last two and has no
+    /// word for the first.
+    RecordLit {
+        name: String,
+        fields: Vec<(String, Expr)>,
+    },
+    /// `EXPR.name` — one field of a record.
+    ///
+    /// `p.x` on its own arrives as `GetProperty` (a component read and a field
+    /// read are the same three tokens); this is what a `.` further along a
+    /// chain becomes, so `people[1].name` works.
+    Field { base: Box<Expr>, name: String },
+    /// `{"a": 1, "b": 2}` — a new dictionary. Every key is `text` and every
+    /// value shares one type; an empty `{}` takes its type from where it is
+    /// going, exactly as `[]` does.
+    DictLit(Vec<(Expr, Expr)>),
     /// `-EXPR` — arithmetic negation of a numeric value.
     ///
     /// Negated *literals* never reach here: the parser folds `-5` into
@@ -466,11 +561,13 @@ pub struct Form {
     pub children: Vec<Component>,
 }
 
-/// A top-level module item.  Remaining seam: `UserType`, `Const`, `Enum`
+/// A top-level module item.  Remaining seam: `Const`, `Enum`
 ///.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Sub(Sub),
+    /// A record declaration: `record point ... end`.
+    UserType(RecordDef),
     Form(Form),
     /// A non-visual component declared at module level: `timer ticker`.
     ///
@@ -483,6 +580,34 @@ pub enum Item {
     /// This is where state that must outlive a single event handler lives —
     /// without it, an app has nowhere to keep a counter but the UI itself.
     Var(GlobalVar),
+}
+
+/// A record type: a name for a group of related values.
+///
+/// A record is a **reference**, like an array and unlike a number: two names
+/// for one record are two names for the same fields, and writing through
+/// either is seen through both. That is the same bargain `xs[1] = 2` already
+/// makes, and the alternative — copying on every assignment and every call —
+/// would make a record the one aggregate in the language that behaves
+/// differently from the rest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordDef {
+    pub name: String,
+    /// Fields in declaration order. The order is the layout: a field is reached
+    /// by index at run time, so no field name reaches the shipped binary.
+    pub fields: Vec<(String, Ty)>,
+    /// 1-based source line of the `record` keyword; 0 when unknown.
+    pub line: usize,
+}
+
+impl RecordDef {
+    /// The 1-based position of `name` among the fields, and its type.
+    pub fn field(&self, name: &str) -> Option<(usize, Ty)> {
+        self.fields
+            .iter()
+            .position(|(n, _)| n == name)
+            .map(|i| (i + 1, self.fields[i].1))
+    }
 }
 
 /// A module-level variable.
@@ -590,6 +715,14 @@ impl Module {
     pub fn globals(&self) -> impl Iterator<Item = &GlobalVar> {
         self.items.iter().filter_map(|i| match i {
             Item::Var(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Iterate the record declarations, in declaration order.
+    pub fn records(&self) -> impl Iterator<Item = &RecordDef> {
+        self.items.iter().filter_map(|i| match i {
+            Item::UserType(r) => Some(r),
             _ => None,
         })
     }

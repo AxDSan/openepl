@@ -1,0 +1,65 @@
+# Records and dictionaries in the same program — the combination neither
+# feature can demonstrate on its own.
+#
+# A dictionary holds one type of value, and a record IS a type, so `person{}`
+# is a directory of people found by name. The two features were built
+# separately; this is the program that says they meet.
+module compose
+
+record person
+  name: text
+  age: int
+end
+
+sub describe(p: person): text
+  return p.name + " (" + int_to_text(p.age) + ")"
+end
+
+sub main
+  var staff: person{} = {}
+  call dict_set(staff, "ada", person(name: "Ada", age: 36))
+  call dict_set(staff, "grace", person(name: "Grace", age: 45))
+  call print_text(concat("people: ", int_to_text(dict_count(staff))))
+
+  # Read one back and pass it to a subroutine as a record, not as its parts.
+  call print_text(describe(dict_get(staff, "ada")))
+
+  # Insertion order, so iterating a directory of records is reproducible.
+  let names: text[] = dict_keys(staff)
+  for i = 1 to count(names)
+    call print_text(concat("  ", describe(staff[names[i]])))
+  end
+
+  # A record read out of a dictionary is the SAME record, not a copy — the
+  # reference semantics records already have, seen through the dictionary.
+  let ada: person = staff["ada"]
+  ada.age = 37
+  call print_text(concat("after a birthday: ", describe(dict_get(staff, "ada"))))
+
+  # A key that is not there answers the sentinel for the value type. A record
+  # has no printable empty value, so the sentinel is no record at all — and
+  # that is caught rather than followed: reading a field of it fails the way an
+  # out-of-range index does, and says so, instead of crashing.
+  let nobody: person = staff["nobody"]
+  call print_text(concat("missing lookup said: ", last_error_text()))
+  call print_text(concat("[", concat(nobody.name, "]")))
+  call print_text(concat("reading its field said: ", last_error_text()))
+  if dict_has(staff, "nobody")
+    call print_text("BUG: it was stored after all")
+  else
+    call print_text("dict_has agrees there is no such person")
+  end
+
+  # A list of records built from a dictionary — three features at once.
+  var older: person[] = []
+  for k = 1 to count(names)
+    let p: person = staff[names[k]]
+    if p.age >= 40
+      older = append(older, p)
+    end
+  end
+  call print_text(concat("over forty: ", int_to_text(count(older))))
+  for j = 1 to count(older)
+    call print_text(concat("  ", describe(older[j])))
+  end
+end

@@ -102,25 +102,47 @@ MD
 rm -f /tmp/openepl-core-cmds.$$
 
 # --- components -----------------------------------------------------------
+# Grouped by the library that declares them, and discovered the same way the
+# command tables are. A component is no longer a `ui` thing: core ships `timer`
+# and `net` ships `httpserver`, so a page built from one library's list would
+# quietly omit whatever the newest one added.
 {
     echo "$banner"
     echo
     cat <<'MD'
 # Components
 
-The visual components the `ui` library provides. Place one in a form, set its
-properties, and bind its events to subroutines — from the designer, or by
-writing it out directly.
+A component has properties you set and events you bind to subroutines — from
+the designer, or by writing it out directly. Most draw a rectangle; some, like
+`timer` and `httpserver`, have no pixels at all and are declared at module
+level rather than inside a form.
 
 MD
-    for c in $("$OPENEPL" commands --use ui | sed -n 's/^component: //p' | sort); do
-        printf '## %s\n\n' "$c"
-        printf '| Property | Type |\n| --- | --- |\n'
-        "$OPENEPL" commands --use ui | sed -n "s/^property: $c //p" |
-            while read -r name ty; do printf '| `%s` | %s |\n' "$name" "$ty"; done
-        events=$("$OPENEPL" commands --use ui | sed -n "s/^event: $c //p" | sed 's/^/`/; s/$/`/' | paste -sd', ')
-        printf '\n**Events:** %s\n\n' "${events:-none}"
+    "$OPENEPL" commands | sed -n 's/^component: //p' | sort > /tmp/openepl-core-comps.$$
+
+    emit_components() {   # $1 = heading, $2… = `commands` invocation output file
+        local list
+        list=$(sed -n 's/^component: //p' "$2" | sort | comm -13 "$3" -)
+        [ -n "$list" ] || return 0
+        printf '\n# %s\n\n' "$1"
+        for c in $list; do
+            printf '## %s\n\n' "$c"
+            printf '| Property | Type |\n| --- | --- |\n'
+            sed -n "s/^property: $c //p" "$2" |
+                while read -r name ty; do printf '| `%s` | %s |\n' "$name" "$ty"; done
+            events=$(sed -n "s/^event: $c //p" "$2" | sed 's/^/`/; s/$/`/' | paste -sd', ')
+            printf '\n**Events:** %s\n\n' "${events:-none}"
+        done
+    }
+
+    : > /tmp/openepl-empty.$$
+    "$OPENEPL" commands > /tmp/openepl-core-all.$$
+    emit_components "Core" /tmp/openepl-core-all.$$ /tmp/openepl-empty.$$
+    for l in "${LIBS[@]}"; do
+        "$OPENEPL" commands --use "$l" > /tmp/openepl-lib-all.$$
+        emit_components "$l" /tmp/openepl-lib-all.$$ /tmp/openepl-core-comps.$$
     done
+    rm -f /tmp/openepl-core-comps.$$ /tmp/openepl-core-all.$$ /tmp/openepl-lib-all.$$ /tmp/openepl-empty.$$
 } > "$OUT/reference-components.md"
 
 # --- templates ------------------------------------------------------------

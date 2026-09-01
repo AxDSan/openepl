@@ -26,6 +26,8 @@ static const OpenEPL_PropertyDesc BUTTON_PROPS[] = {
     { "background_color", OE_SDT_TEXT, "#4a86e8", "color" },
     { "color",            OE_SDT_TEXT, "#ffffff", "color" },
     { "border_radius",    OE_SDT_INT,  "6",       NULL },
+    { "enabled",          OE_SDT_BOOL, "true",    NULL },
+    { "action",           OE_SDT_TEXT, "",        NULL },
 };
 static const OpenEPL_EventDesc BUTTON_EVENTS[] = { { "click" } };
 
@@ -87,8 +89,28 @@ static const OpenEPL_PropertyDesc PROG_PROPS[] = {
     { "height", OE_SDT_INT, "16",  NULL },
 };
 
+/* --- action ----------------------------------------------------------- *
+ *
+ * The one thing in Delphi this language had no answer for: the text, the
+ * enabled state and the code behind a command live in ONE place, and every
+ * control that offers that command follows it.  A button points at an action
+ * through its `action` property; disabling the action greys the button.
+ *
+ * The reference is by `name` rather than by the component's identifier
+ * because a property value is a literal (backend/src/lib.rs) and component
+ * identifiers deliberately never reach the binary.
+ */
+static const OpenEPL_PropertyDesc ACTION_PROPS[] = {
+    { "name",     OE_SDT_TEXT, "",        NULL },
+    { "text",     OE_SDT_TEXT, "",        NULL },
+    { "shortcut", OE_SDT_TEXT, "",        NULL },
+    { "enabled",  OE_SDT_BOOL, "true",    NULL },
+};
+static const OpenEPL_EventDesc ACTION_EVENTS[] = { { "execute" } };
+
 #define N(a) (int32_t)(sizeof(a) / sizeof((a)[0]))
 #define VISUAL OE_COMPONENT_VISUAL
+#define NONVISUAL OE_COMPONENT_NONVISUAL
 
 static const OpenEPL_ComponentDesc UI_COMPONENTS[] = {
     { "form",   OE_ROLE_WINDOW, N(FORM_PROPS),   FORM_PROPS,   N(FORM_EVENTS),   FORM_EVENTS,   VISUAL },
@@ -99,6 +121,7 @@ static const OpenEPL_ComponentDesc UI_COMPONENTS[] = {
     { "groupbox", OE_ROLE_GROUP,  N(GROUP_PROPS),  GROUP_PROPS,  0,               0,            VISUAL },
     { "image",   OE_ROLE_UNKNOWN, N(IMAGE_PROPS),  IMAGE_PROPS,  0,               0,            VISUAL },
     { "progressbar", OE_ROLE_UNKNOWN, N(PROG_PROPS), PROG_PROPS, 0,               0,            VISUAL },
+    { "action", OE_ROLE_UNKNOWN, N(ACTION_PROPS), ACTION_PROPS, N(ACTION_EVENTS), ACTION_EVENTS, NONVISUAL },
 };
 
 static const OpenEPL_LibInfo UI_INFO = {

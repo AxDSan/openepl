@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Module, Signature, Ty};
+use crate::{Module, RecordDef, Signature, Ty};
 
 /// A component property, as declared in a library's `ComponentDesc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +77,14 @@ pub struct Registry {
     /// collision instead of overwriting. Lookup order is commands first, then
     /// these, and `get` still means "library command" for every existing caller.
     subs: HashMap<String, Signature>,
+    /// Record types declared in the module being compiled, by name.
+    ///
+    /// They live here rather than in a parameter threaded through the checker
+    /// because a record name is resolved in exactly the places a command name
+    /// is — an expression, an argument, a declared type — and one lookup table
+    /// for all of them is what keeps the validator and the backend agreeing
+    /// about what `point` means.
+    records: HashMap<String, RecordDef>,
 }
 
 impl Registry {
@@ -85,6 +93,7 @@ impl Registry {
             map: HashMap::new(),
             components: HashMap::new(),
             subs: HashMap::new(),
+            records: HashMap::new(),
         }
     }
 
@@ -101,6 +110,37 @@ impl Registry {
             self.subs.insert(sub.name.clone(), sub.signature());
         }
         collisions
+    }
+
+    /// Record every record declaration in `m`, returning the names that collide
+    /// with a library command or a subroutine (the caller reports them — the
+    /// validator has the line numbers).
+    ///
+    /// A record name is written in expression position (`point(x: 1)`), so it
+    /// shares the one flat callable namespace with commands and subroutines.
+    pub fn register_records(&mut self, m: &Module) -> Vec<String> {
+        let mut collisions = Vec::new();
+        for rec in m.records() {
+            if self.map.contains_key(&rec.name)
+                || self.subs.contains_key(&rec.name)
+                || self.records.contains_key(&rec.name)
+            {
+                collisions.push(rec.name.clone());
+                continue;
+            }
+            self.records.insert(rec.name.clone(), rec.clone());
+        }
+        collisions
+    }
+
+    /// The declaration of `name`, if it names a record type.
+    pub fn record(&self, name: &str) -> Option<&RecordDef> {
+        self.records.get(name)
+    }
+
+    /// Known record type names, for diagnostics.
+    pub fn record_names(&self) -> impl Iterator<Item = &str> {
+        self.records.keys().map(|s| s.as_str())
     }
 
     /// The signature of a user subroutine, if `name` is one.
@@ -298,6 +338,22 @@ impl Registry {
             cmd("bytes_set", "oe_bin_put", &[Bytes, Int, Int], None);
             cmd("bytes_from_text", "oe_bin_from_text", &[Text], Some(Bytes));
             cmd("text_from_bytes", "oe_bin_to_text", &[Bytes], Some(Text));
+
+            // --- Dictionaries ------------------------------------------------
+            // Declared over `AnyDict`/`AnyElem` for the reason the array
+            // commands are: the dictionary carries its value tag at run time,
+            // and the checker pairs the two so `dict_set(ages, "k", "x")` on an
+            // `int{}` is still an error.
+            //
+            // `dict_get` on a key that is not there answers the sentinel for
+            // its value type (0, "", false) and sets the error slot; `dict_has`
+            // is the predicate that tells that apart from a stored 0.
+            cmd("dict_count", "oe_dict_count", &[AnyDict], Some(Int));
+            cmd("dict_has", "oe_dict_has", &[AnyDict, Text], Some(Bool));
+            cmd("dict_get", "oe_dict_lookup", &[AnyDict, Text], Some(AnyElem));
+            cmd("dict_set", "oe_dict_store", &[AnyDict, Text, AnyElem], None);
+            cmd("dict_remove", "oe_dict_erase", &[AnyDict, Text], Some(Bool));
+            cmd("dict_keys", "oe_dict_keys", &[AnyDict], Some(Array(crate::Elem::Text)));
 
             // --- Event loop --------------------------------------------------
             cmd("quit", "oe_quit", &[], None);

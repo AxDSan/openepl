@@ -37,6 +37,10 @@ types are not defined.
 | `double` | a number with a fractional part |
 | `text` | UTF-8 text |
 | `bool` | `true` or `false` |
+| `T[]` | a list of `T` |
+| `T{}` | a dictionary of `T`, found by text key |
+| `bytes` | a run of raw bytes |
+| a record | a group of named fields you declare yourself |
 
 Types are written after a colon and are not inferred:
 
@@ -53,6 +57,46 @@ There is no implicit conversion between them. Convert explicitly:
 let n: int = 42
 call print_text(concat("answer: ", int_to_text(n)))
 ```
+
+## Groups of values
+
+A list is written with `[]`, a dictionary with `{}`, and both count from 1 —
+as does every other indexed thing in the language, so a loop runs `1` to the
+count with no `- 1` anywhere.
+
+```
+var names: text[] = ["Ada", "Grace"]
+names = append(names, "Alan")
+call print_text(names[1])              # Ada
+
+var ages: int{} = {"Ada": 36}
+ages["Grace"] = 45
+call print_int(ages["Ada"])
+```
+
+A dictionary holds one type of value. Asking for a key that is not there
+answers that type's sentinel — `0`, `""`, `false` — and leaves the reason in
+the error slot, so `dict_has` is what separates a missing key from a stored
+`0`.
+
+A `record` names a group of related values, and is the way a subroutine gives
+back more than one thing:
+
+```
+record point
+  x: int
+  y: int
+end
+
+sub midpoint(a: point, b: point): point
+  return point(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+end
+```
+
+Fields are given by name when a record is built, and read and written with a
+dot: `p.x`, `p.x = 5`. A record is a **reference**, exactly as a list is — two
+names for one record are two names for the same fields — so passing one to a
+subroutine does not copy it.
 
 ## Values that change, and values that do not
 

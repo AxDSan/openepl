@@ -1,0 +1,71 @@
+# A web service in twenty lines, with no socket anywhere in sight.
+#
+#   openepl run examples/webserver.oir
+#   curl localhost:8080/hello?name=Ada
+#   curl localhost:8080/quit
+#
+# The server is a component: it has properties and an event, exactly as a
+# button does, and what it lacks is a rectangle. `main` prints one line and
+# returns — the program stays alive because the server is a live event source,
+# the same way examples/loopdemo.oir stays alive on a timer.
+#
+# It listens on 127.0.0.1 because that is the default and this program never
+# says otherwise. Setting `bind = "0.0.0.0"` would put it on every interface of
+# the machine, which is a decision, not a default.
+module webserver
+use net
+
+httpserver site
+  port = 8080
+  on request: on_request
+end
+
+# The event handler takes no parameters — the compiler calls it with none.
+# `net_request()` answers the request being dispatched right now, and passing
+# it on is what makes the real work a subroutine with a parameter: a request
+# parked in a global would serve the first caller and quietly hand the second
+# caller the first one's data.
+sub on_request
+  call route(net_request())
+end
+
+sub route(req: int)
+  let path: text = net_req_path(req)
+  if path = "/"
+    call reply_home(req)
+  end
+  if path = "/hello"
+    call reply_hello(req)
+  end
+  if path = "/echo"
+    call net_req_reply(req, 200, net_req_body(req))
+  end
+  if path = "/quit"
+    call net_req_reply(req, 200, "stopping\n")
+    call quit()
+  end
+  # Anything else: a handler that answers nothing still gets a 200 with an
+  # empty body, so this says what it means instead of relying on that.
+  if path <> "/" and path <> "/hello" and path <> "/echo" and path <> "/quit"
+    call net_req_reply(req, 404, concat("no route for ", path))
+  end
+end
+
+sub reply_home(req: int)
+  let page: text = "<h1>OpenEPL</h1><p>Try <a href='/hello?name=Ada'>/hello?name=Ada</a>.</p>"
+  call net_req_reply_as(req, 200, "text/html; charset=utf-8", page)
+end
+
+sub reply_hello(req: int)
+  let who: text = net_req_query(req, "name")
+  if who = ""
+    let who2: text = "world"
+    call net_req_reply(req, 200, concat("hello, ", who2))
+  else
+    call net_req_reply(req, 200, concat(concat("hello, ", who), concat(" via ", net_req_method(req))))
+  end
+end
+
+sub main
+  call print_text("serving on http://127.0.0.1:8080 — curl it, then GET /quit")
+end

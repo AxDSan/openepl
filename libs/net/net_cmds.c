@@ -29,86 +29,42 @@
  * protocols; binary content is what net_http_download is for — it writes bytes
  * to a file and never through a text slot.
  */
-#include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "net_internal.h"
 
-/* Winsock is the same BSD socket API with three differences that matter here:
- * it must be started before use, its errors live in WSAGetLastError() rather
- * than errno and are NOT errno values, and a socket is closed by closesocket
- * rather than close.  Everything below is written once and reads the same on
- * both platforms through the shims in this block. */
+/* --- small helpers, shared with net_httpd.c (net_internal.h) ---------- */
+
 #ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <stdint.h>
-
-#define net_errno()      WSAGetLastError()
-#define NET_EWOULDBLOCK  WSAEWOULDBLOCK
-/* Winsock reports a connect that has not finished as WOULDBLOCK, where POSIX
- * says EINPROGRESS; the two spell the same state. */
-#define NET_EINPROGRESS  WSAEWOULDBLOCK
-#define NET_EINTR        WSAEINTR
-#define NET_ETIMEDOUT    WSAETIMEDOUT
-#define NET_ECONNREFUSED WSAECONNREFUSED
-#define NET_EPIPE        WSAECONNRESET
-#define close            closesocket
-#define poll             WSAPoll
-#define strcasecmp       _stricmp
-#define MSG_NOSIGNAL     0
-#ifdef _MSC_VER
-typedef SSIZE_T ssize_t;
-#endif
-/* MSVC and clang-cl honour this; a mingw link needs -lws2_32 on the command
- * line, which no lib.json key can express today. */
-#if defined(_MSC_VER)
-#pragma comment(lib, "ws2_32.lib")
-#endif
-
 /* Winsock refuses every call until WSAStartup has run.  The runtime is
  * single-threaded — see the sort-tag comment in runtime/oe_array.c — so a
  * plain flag is enough, and a library has no initialiser hook to do it in. */
 static int g_wsa_ready = 0;
-static int net_start(void) {
+int net_start(void) {
     if (g_wsa_ready) return 1;
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
     g_wsa_ready = 1;
     return 1;
 }
+int net_set_nonblocking(int fd) {
+    u_long on = 1;
+    return ioctlsocket(fd, FIONBIO, &on) == 0;
+}
+int64_t net_now_ms(void) { return (int64_t)GetTickCount64(); }
 #else
-#include <fcntl.h>
-#include <netdb.h>
-#include <poll.h>
-#include <strings.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-
-#define net_errno()      errno
-#define NET_EWOULDBLOCK  EWOULDBLOCK
-#define NET_EINPROGRESS  EINPROGRESS
-#define NET_EINTR        EINTR
-#define NET_ETIMEDOUT    ETIMEDOUT
-#define NET_ECONNREFUSED ECONNREFUSED
-#define NET_EPIPE        EPIPE
-static int net_start(void) { return 1; }
-
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
+int net_start(void) { return 1; }
+int net_set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return 0;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+int64_t net_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 #endif
 
-#include "openepl_abi.h"
-
-/* A socket failure carries a platform code, and a Winsock code is not an errno
- * value — comparing one against ECONNREFUSED would be meaningless — so it
- * reaches the error slot as itself, with the number spelled out in the
- * message rather than run through strerror. */
-static void net_fail(int code, const char *what) {
+void net_fail(int code, const char *what) {
 #ifdef _WIN32
     char msg[128];
     snprintf(msg, sizeof msg, "%s: Winsock error %d", what, code);
@@ -118,27 +74,18 @@ static void net_fail(int code, const char *what) {
 #endif
 }
 
-/* --- small helpers ---------------------------------------------------- */
+const char *net_nz(const char *s) { return s ? s : ""; }
 
-static const char *net_nz(const char *s) { return s ? s : ""; }
-
-/* Every text result is runtime-owned, including the "" failure sentinel, so a
- * program can hold a failed result with no special case. */
-static char *net_text(const char *p, size_t n) {
+char *net_text(const char *p, size_t n) {
     char *o = (char *)oe_malloc((long)n + 1);
     if (!o) return NULL;                 /* oe_malloc aborts, but be explicit */
     if (n) memcpy(o, p, n);
     o[n] = '\0';
     return o;
 }
-static char *net_empty(void) { return net_text("", 0); }
+char *net_empty(void) { return net_text("", 0); }
 
-/* A growable scratch buffer.  Plain malloc, deliberately: this is library
- * bookkeeping, not program data, so it must not sit in the runtime's tracked
- * block list where it would outlive the command that built it. */
-typedef struct { char *p; size_t n, cap; } NetBuf;
-
-static int net_buf_add(NetBuf *b, const char *s, size_t n) {
+int net_buf_add(NetBuf *b, const char *s, size_t n) {
     if (b->n + n + 1 > b->cap) {
         size_t want = b->cap ? b->cap * 2 : 1024;
         while (want < b->n + n + 1) want *= 2;
@@ -152,7 +99,7 @@ static int net_buf_add(NetBuf *b, const char *s, size_t n) {
     b->p[b->n] = '\0';
     return 1;
 }
-static void net_buf_free(NetBuf *b) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
+void net_buf_free(NetBuf *b) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
 
 /* A response larger than this is refused rather than silently truncated. */
 #define NET_MAX_BODY (64L * 1024L * 1024L)
@@ -281,14 +228,7 @@ static int net_dial(const char *host, int port) {
 
 /* --- socket handles --------------------------------------------------- */
 
-typedef struct {
-    int  fd;
-    int  eof;              /* the peer closed, or a read returned 0          */
-    char buf[4096];        /* pushback, so receive_line can stop at a byte   */
-    int  blen, bpos;
-} NetSock;
-
-static void net_sock_close(void *payload) {
+void net_sock_close(void *payload) {
     NetSock *s = (NetSock *)payload;
     if (!s) return;
     if (s->fd >= 0) close(s->fd);

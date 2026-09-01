@@ -27,9 +27,20 @@ struct Client {
 impl Client {
     /// Start the server and complete the initialize handshake.
     fn start() -> Client {
+        Client::start_in(&repo(), &repo())
+    }
+
+    /// Start the server rooted at `workspace`, with `home` pinned.
+    ///
+    /// Both are inputs to kit resolution, so a test that inherited the
+    /// developer's would pass or fail on what they happen to have installed —
+    /// the same hazard `kits.rs` documents.
+    fn start_in(workspace: &std::path::Path, home: &std::path::Path) -> Client {
         let mut child = Command::new(env!("CARGO_BIN_EXE_openepl"))
             .arg("lsp")
-            .current_dir(repo())
+            .current_dir(workspace)
+            .env("HOME", home)
+            .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -43,7 +54,7 @@ impl Client {
             stdout,
         };
 
-        let root = format!("file://{}", repo().display());
+        let root = format!("file://{}", workspace.display());
         c.send(serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": { "capabilities": {}, "rootUri": root }
@@ -53,6 +64,17 @@ impl Client {
         assert!(
             reply["result"]["capabilities"]["textDocumentSync"] == 1,
             "server should advertise full-text sync: {reply}"
+        );
+        // A capability that is implemented but not advertised is never asked
+        // for: no client sends `signatureHelp` to a server that did not claim
+        // it, so the feature would be dead in every editor while every test
+        // that pokes it directly still passed.
+        let sig = &reply["result"]["capabilities"]["signatureHelpProvider"];
+        assert!(
+            sig["triggerCharacters"]
+                .as_array()
+                .is_some_and(|t| t.iter().any(|c| c == "(")),
+            "signature help must be advertised, triggered by `(`: {reply}"
         );
         c.send(serde_json::json!({
             "jsonrpc": "2.0", "method": "initialized", "params": {}
@@ -423,5 +445,207 @@ fn document_symbols_list_module_level_names() {
         .collect();
     assert!(names.contains(&"go"), "subroutine: {names:?}");
     assert!(names.contains(&"ok"), "component: {names:?}");
+    c.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Kits, signature help
+// ---------------------------------------------------------------------------
+
+/// A project kit: the same shape `kits.rs` builds, kept here rather than
+/// shared because a test crate is its own compilation unit.
+fn write_project_kit(root: &std::path::Path, name: &str) {
+    let dir = root.join("kits").join(name);
+    std::fs::create_dir_all(&dir).expect("create kit dir");
+    std::fs::write(
+        dir.join(format!("{name}_libinfo.c")),
+        format!(
+            r#"#include "openepl_abi.h"
+void {name}_answer(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+static const OpenEPL_CommandDesc C[] = {{
+    {{ "{name}_answer", "{name}_answer", OE_SDT_INT, 0, 0 }},
+}};
+static const OpenEPL_LibInfo I = {{
+    OPENEPL_ABI_VERSION, "{name}", "openepl-lsptest-{name}", 1, 0, 0,
+    (int32_t)(sizeof(C) / sizeof(C[0])), C,
+}};
+const OpenEPL_LibInfo *openepl_get_lib_info(void) {{ return &I; }}
+"#
+        ),
+    )
+    .expect("write libinfo");
+    std::fs::write(
+        dir.join(format!("{name}_cmds.c")),
+        format!(
+            r#"#include "openepl_abi.h"
+void {name}_answer(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {{
+    (void)argc; (void)argv; oe_ret_int(ret, 42);
+}}
+"#
+        ),
+    )
+    .expect("write cmds");
+}
+
+fn scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("openepl_lspdx_{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch");
+    dir
+}
+
+/// The worst bug an editor can have is disagreeing with the compiler. A kit's
+/// commands build, so they must complete and they must not be underlined.
+#[test]
+fn a_project_kits_commands_complete_and_do_not_error() {
+    let root = scratch("kit_ws");
+    let home = scratch("kit_home");
+    write_project_kit(&root, "widget");
+
+    let mut c = Client::start_in(&root, &home);
+    let uri = "file:///tmp/openepl_lsp_kit.oir";
+    let src = "module m\nuse widget\nsub main\n  let n: int = widget_answer()\n  \nend\n";
+    c.open(uri, src);
+    let diags = c.diagnostics(uri);
+    assert!(
+        diags.is_empty(),
+        "a kit's command compiles, so the editor must not underline it: {diags:?}"
+    );
+
+    let r = c.request(80, "textDocument/completion", Client::at(uri, 4, 2));
+    let labels: Vec<String> = r
+        .as_array()
+        .expect("completion list")
+        .iter()
+        .map(|i| i["label"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        labels.contains(&"widget_answer".to_string()),
+        "the kit's command must be offered: {labels:?}"
+    );
+    c.shutdown();
+}
+
+/// The names legal on a `use` line are exactly the resolvable kits, and they
+/// are the one thing that cannot be guessed from the file you are editing.
+#[test]
+fn use_line_completion_offers_resolvable_kits() {
+    let root = scratch("use_ws");
+    let home = scratch("use_home");
+    write_project_kit(&root, "widget");
+
+    let mut c = Client::start_in(&root, &home);
+    let uri = "file:///tmp/openepl_lsp_use.oir";
+    c.open(uri, "module m\nuse \nsub main\nend\n");
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(81, "textDocument/completion", Client::at(uri, 1, 4));
+    let labels: Vec<String> = r
+        .as_array()
+        .expect("completion list")
+        .iter()
+        .map(|i| i["label"].as_str().unwrap().to_string())
+        .collect();
+    assert!(labels.contains(&"widget".to_string()), "project kit: {labels:?}");
+    assert!(labels.contains(&"file".to_string()), "bundled library: {labels:?}");
+    assert!(
+        !labels.contains(&"module".to_string()),
+        "a keyword is not a library name: {labels:?}"
+    );
+    c.shutdown();
+}
+
+/// Signature help while typing a call — for a command, and for the module's
+/// own subroutines, whose parameter *names* the registry cannot supply.
+#[test]
+fn signature_help_tracks_the_argument_being_typed() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_sig.oir";
+    let src = "module m\nsub join_two(left: text, right: text): text\n  return concat(left, right)\n\
+               end\nsub main\n  call print_text(join_two(\"a\", \"b\"))\nend\n";
+    c.open(uri, src);
+    let _ = c.diagnostics(uri);
+
+    // Inside `concat(left, |right)` on line 3 — the second argument.
+    let r = c.request(82, "textDocument/signatureHelp", Client::at(uri, 2, 22));
+    let sig = &r["signatures"][0];
+    assert!(
+        sig["label"].as_str().unwrap_or("").starts_with("concat("),
+        "should describe the call being typed: {r}"
+    );
+    assert_eq!(r["activeParameter"], 1, "second argument: {r}");
+
+    // Inside `join_two("a", |"b")` on line 6 — a subroutine, with its own
+    // parameter names.
+    let r = c.request(83, "textDocument/signatureHelp", Client::at(uri, 5, 33));
+    let label = r["signatures"][0]["label"].as_str().unwrap_or("").to_string();
+    assert!(label.contains("left: text"), "parameter names: {label}");
+    assert_eq!(r["activeParameter"], 1, "second argument: {r}");
+
+    // A string containing a comma must not move the highlight.
+    let uri2 = "file:///tmp/openepl_lsp_sig2.oir";
+    c.open(uri2, "module m\nsub main\n  call print_text(concat(\"a, b\", \"c\"))\nend\n");
+    let _ = c.diagnostics(uri2);
+    let r = c.request(84, "textDocument/signatureHelp", Client::at(uri2, 2, 34));
+    assert_eq!(r["activeParameter"], 1, "the comma inside the literal counted: {r}");
+    c.shutdown();
+}
+
+/// Hover on a subroutine shows its signature. Without it the only way to
+/// recall a parameter list is to scroll to the declaration.
+#[test]
+fn hover_on_a_subroutine_shows_its_parameters() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_subhover.oir";
+    c.open(
+        uri,
+        "module m\nsub twice(n: int): int\n  return n * 2\nend\nsub main\n  let x: int = twice(2)\nend\n",
+    );
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(85, "textDocument/hover", Client::at(uri, 5, 16));
+    let text = r["contents"]["value"].as_str().unwrap_or("").to_string();
+    assert!(text.contains("twice(n: int): int"), "hover: {text}");
+    c.shutdown();
+}
+
+/// The types that landed this week must be visible to the editor, or a user
+/// meets them for the first time as a red squiggle. Three things at once: the
+/// dictionary commands complete like any other, a record name is offered as a
+/// type, and hovering one says *record* — not "component type", which is what
+/// an index with no category for a record would have to call it.
+#[test]
+fn records_and_dictionaries_reach_the_editor() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_aggregates.oir";
+    //          1        2                3        4      5         6
+    c.open(
+        uri,
+        "module m\nrecord person\n  name: text\nend\nsub main\n  var d: int{} = {}\n  \nend\n",
+    );
+    let diags = c.diagnostics(uri);
+    assert!(diags.is_empty(), "a record and a dictionary must be clean: {diags:?}");
+
+    let r = c.request(90, "textDocument/completion", serde_json::json!({
+        "textDocument": { "uri": uri },
+        "position": { "line": 6, "character": 2 }
+    }));
+    let items = r.as_array().expect("completion list");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    for cmd in ["dict_get", "dict_set", "dict_has", "dict_keys", "dict_count", "dict_remove"] {
+        assert!(labels.contains(&cmd), "`{cmd}` should complete: {labels:?}");
+    }
+    assert!(labels.contains(&"person"), "the record type: {labels:?}");
+    let person = items.iter().find(|i| i["label"] == "person").unwrap();
+    assert_eq!(
+        person["detail"].as_str().unwrap_or(""),
+        "record type",
+        "a record must not be presented as something else: {person}"
+    );
+
+    // Hover on the declaration itself.
+    let h = c.request(91, "textDocument/hover", Client::at(uri, 1, 8));
+    let text = h["contents"]["value"].as_str().unwrap_or("").to_string();
+    assert!(text.contains("record type"), "hover on a record: {text}");
     c.shutdown();
 }

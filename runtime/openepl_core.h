@@ -12,6 +12,45 @@
 
 #include "openepl_abi.h"
 
+/* --- Record and dictionary layouts ------------------------------------
+ * Their tags are in abi/openepl_abi.h with every other SDT_* value; what
+ * follows is the memory each one actually has.
+ *
+ * A record: a fixed number of slot-width fields, one runtime-owned allocation.
+ *
+ *     { int32 count; int32 _pad; int64 fields[count]; }
+ *
+ * The shape an array has, minus the element tag — a record's fields do not
+ * share one type, and each field's type is a compile-time fact, so nothing at
+ * run time has to ask.  Fields are reached by POSITION, counting from 1, which
+ * is also why no field name reaches a shipped binary. */
+typedef struct OpenEPL_Record {
+    int32_t count;
+    int32_t _pad;
+} OpenEPL_Record;
+
+/* One key and its value.  The value is the same 64 raw bits a slot carries, so
+ * a dictionary of text holds pointers exactly as one of int holds ints. */
+typedef struct OpenEPL_DictEntry {
+    char   *key;
+    int64_t val;
+} OpenEPL_DictEntry;
+
+/* A dictionary: a header the program holds, and an entry block that grows.
+ *
+ * TWO allocations, unlike an array's one, and that is the whole design: a
+ * dictionary grows in place — `d["new"] = 1` must be visible through every
+ * name that holds it — so the thing that MOVES when it grows must not be the
+ * thing the program is holding.  The header address never changes; the entry
+ * block behind it is what reallocates. */
+typedef struct OpenEPL_Dict {
+    int32_t            val_tag;  /* OE_SDT_* of one value                    */
+    int32_t            len;      /* entries in use                           */
+    int32_t            cap;      /* entries allocated; always >= len         */
+    int32_t            _pad;
+    OpenEPL_DictEntry *entries;
+} OpenEPL_Dict;
+
 /* Program entry emitted by the backend. */
 extern int ECodeStart(void);
 
@@ -54,6 +93,9 @@ OE_CMD(oe_ary_contains); OE_CMD(oe_ary_index_of); OE_CMD(oe_ary_join); OE_CMD(oe
 /* byte-sets */
 OE_CMD(oe_bin_make); OE_CMD(oe_bin_size); OE_CMD(oe_bin_byte); OE_CMD(oe_bin_put);
 OE_CMD(oe_bin_from_text); OE_CMD(oe_bin_to_text);
+/* dictionaries */
+OE_CMD(oe_dict_count); OE_CMD(oe_dict_has); OE_CMD(oe_dict_lookup);
+OE_CMD(oe_dict_store); OE_CMD(oe_dict_erase); OE_CMD(oe_dict_keys);
 /* event loop */
 OE_CMD(oe_quit);
 
@@ -66,6 +108,14 @@ void    oe_ary_set(void *a, int32_t i, int64_t v);
 void   *oe_bin_new(int32_t len);
 int32_t oe_bin_at(void *b, int32_t i);
 void    oe_bin_set(void *b, int32_t i, int32_t v);
+/* A field is named in the source and reached by position here, so these take
+ * the index the compiler worked out rather than the name it read. */
+void   *oe_rec_new(int32_t field_count);
+int64_t oe_rec_get(void *r, int32_t i);
+void    oe_rec_set(void *r, int32_t i, int64_t v);
+void   *oe_dict_new(int32_t val_tag);
+int64_t oe_dict_at(void *d, const char *key);
+void    oe_dict_put(void *d, const char *key, int64_t v);
 
 /* Core's non-visual components (abi/openepl_abi.h).  NOT commands: the backend
  * calls these directly, exactly as it calls the oe_ui_* entry points for a

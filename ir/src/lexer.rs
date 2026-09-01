@@ -38,6 +38,8 @@ pub enum Tok {
     RParen,
     LBracket,
     RBracket,
+    LBrace,
+    RBrace,
     Comma,
     Colon,
     Dot,
@@ -125,6 +127,14 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
             }
             b']' => {
                 push(&mut out, Tok::RBracket, line, start_col);
+                i += 1;
+            }
+            b'{' => {
+                push(&mut out, Tok::LBrace, line, start_col);
+                i += 1;
+            }
+            b'}' => {
+                push(&mut out, Tok::RBrace, line, start_col);
                 i += 1;
             }
             b',' => {

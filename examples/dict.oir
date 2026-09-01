@@ -1,0 +1,48 @@
+# Dictionaries: values found by name. Keys are text, and one dictionary holds
+# one type of value.
+module dict
+
+sub main
+  # A literal, then a key added afterwards. `ages["Grace"] = 45` is `dict_set`
+  # spelled as a subscript.
+  var ages: int{} = {"Ada": 36, "Alan": 41}
+  ages["Grace"] = 45
+  call print_text(concat("people: ", int_to_text(dict_count(ages))))
+
+  # Reading back. A key that IS there clears the error slot.
+  call print_text(concat("Ada is ", int_to_text(ages["Ada"])))
+
+  # `dict_get` and `dict_set` are the same two operations written out. The
+  # subscript is sugar; either spelling reaches the same entry.
+  call dict_set(ages, "Alan", 42)
+  call print_text(concat("Alan is now ", int_to_text(dict_get(ages, "Alan"))))
+
+  # A key that is NOT there answers the sentinel for the value type — 0 here —
+  # and leaves the reason in the error slot. `dict_has` is what tells that
+  # apart from a stored 0, which is why it exists.
+  let missing: int = ages["Nobody"]
+  call print_text(concat("missing reads as ", int_to_text(missing)))
+  if dict_has(ages, "Nobody")
+    call print_text("...and it was stored")
+  else
+    call print_text(concat("...because: ", last_error_text()))
+  end
+
+  # The keys as a list, in the order they were added — which is what makes
+  # iterating a dictionary reproducible now that arrays exist.
+  let names: text[] = dict_keys(ages)
+  for i = 1 to count(names)
+    let who: text = names[i]
+    call print_text(concat(concat(who, " -> "), int_to_text(ages[who])))
+  end
+
+  # Removing answers whether there was anything to remove.
+  if dict_remove(ages, "Alan")
+    call print_text(concat("after removing Alan: ", int_to_text(dict_count(ages))))
+  end
+  if dict_remove(ages, "Alan")
+    call print_text("removed twice?")
+  else
+    call print_text("removing Alan again does nothing")
+  end
+end

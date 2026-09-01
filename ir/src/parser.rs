@@ -10,20 +10,25 @@
 //! return  := "return" expr? NEWLINE
 //! let     := "let" IDENT ":" type "=" expr NEWLINE
 //! call    := "call" IDENT "(" (expr ("," expr)*)? ")" NEWLINE
-//! type    := ("int" | "int64" | "double" | "text" | "bool" | "bytes") ("[" "]")?
+//! record  := "record" IDENT NEWLINE (IDENT ":" type NEWLINE)+ "end" NEWLINE
+//! type    := ("int" | "int64" | "double" | "text" | "bool" | "bytes" | IDENT)
+//!            ("[" "]" | "{" "}")?
 //! expr    := term (("+" | "-") term)*
 //! term    := factor (("*" | "/" | "%") factor)*
 //! factor  := "-"? postfix
-//! postfix := primary ("[" expr "]")*
-//! primary := INT | FLOAT | STRING | list | call | IDENT | "(" expr ")"
+//! postfix := primary ("[" expr "]" | "." IDENT)*
+//! primary := INT | FLOAT | STRING | list | dict | new | call | IDENT
+//!          | "(" expr ")"
 //! list    := "[" (expr ("," expr)*)? "]"
+//! dict    := "{" (expr ":" expr ("," expr ":" expr)*)? "}"
+//! new     := IDENT "(" IDENT ":" expr ("," IDENT ":" expr)* ")"
 //! call    := IDENT "(" (expr ("," expr)*)? ")"
 //! ```
 
 use crate::lexer::{lex, Spanned, Tok};
 use crate::{
-    BinOp, CmpOp, Component, Elem, Expr, Form, GlobalVar, Item, LogicalOp, Module, Stmt, StmtKind,
-    Sub, Target, Ty,
+    intern, BinOp, CmpOp, Component, Elem, Expr, Form, GlobalVar, Item, LogicalOp, Module,
+    RecordDef, Stmt, StmtKind, Sub, Target, Ty,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +63,10 @@ impl Parser {
     }
     fn line(&self) -> usize {
         self.toks[self.pos].line
+    }
+    /// The token `n` places past the cursor, saturating at the final `Eof`.
+    fn peek_at(&self, n: usize) -> &Tok {
+        &self.toks[(self.pos + n).min(self.toks.len() - 1)].tok
     }
     fn bump(&mut self) -> Tok {
         let t = self.toks[self.pos].tok.clone();
@@ -146,6 +155,13 @@ impl Parser {
                 Tok::Sub => items.push(Item::Sub(self.sub()?)),
                 Tok::Form => items.push(Item::Form(self.form()?)),
                 Tok::Var => items.push(Item::Var(self.global_var()?)),
+                // `record` is a SOFT keyword, matched in this one position:
+                // `record point` and `timer ticker` are the same two tokens, so
+                // the word itself has to decide, and reserving it would steal an
+                // ordinary noun from every variable in the language.
+                Tok::Ident(w) if w == "record" => {
+                    items.push(Item::UserType(self.record_def()?))
+                }
                 // `type id` at module level is a NON-VISUAL component — a timer,
                 // a server. It reads exactly as it does inside a form, because
                 // the only thing it lacks is a rectangle to be drawn in; the
@@ -315,6 +331,58 @@ impl Parser {
         Ok(form)
     }
 
+    /// ```text
+    /// record := "record" IDENT NEWLINE (IDENT ":" type NEWLINE)+ "end" NEWLINE
+    /// ```
+    fn record_def(&mut self) -> Result<RecordDef, ParseError> {
+        let line = self.line();
+        self.bump(); // `record`
+        let name = self.ident("record name")?;
+        self.expect(&Tok::Newline, "newline after record name")?;
+        let mut fields: Vec<(String, Ty)> = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek().clone() {
+                Tok::End => {
+                    self.bump();
+                    break;
+                }
+                Tok::Ident(field) => {
+                    self.bump();
+                    self.expect(&Tok::Colon, "`:` after a field name")?;
+                    let ty = self.type_keyword()?;
+                    self.expect(&Tok::Newline, "newline after a field")?;
+                    if fields.iter().any(|(n, _)| *n == field) {
+                        return self
+                            .err(format!("record `{name}` declares field `{field}` twice"));
+                    }
+                    fields.push((field, ty));
+                }
+                Tok::Eof => {
+                    return self.err("unexpected end of file inside `record` (missing `end`)")
+                }
+                other => {
+                    return self.err(format!("expected a field or `end`, found {other:?}"))
+                }
+            }
+        }
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        // Every field is named at construction, so a record with none could
+        // only be written `point()` — which is a call, and would need a rule of
+        // its own for no gain.
+        if fields.is_empty() {
+            return Err(ParseError {
+                line,
+                msg: format!(
+                    "record `{name}` has no fields — a record names a group of values"
+                ),
+            });
+        }
+        Ok(RecordDef { name, fields, line })
+    }
+
     /// A component instance; `type_name` has already been consumed.
     fn component(&mut self, type_name: String) -> Result<Component, ParseError> {
         let id = self.ident("component id")?;
@@ -392,31 +460,34 @@ impl Parser {
         let base = match self.bump() {
             Tok::Ident(w) => match Ty::from_keyword(&w) {
                 Some(t) => t,
-                None => {
-                    return self.err(format!(
-                        "expected a type (int/int64/double/text/bool/bytes, or `int[]` \
-                         for an array), found `{w}`"
-                    ))
-                }
+                // Any other word is a record type, by name. Whether a record
+                // with that name exists is the validator's question: a record
+                // may be declared after the subroutine that uses it, and a
+                // one-pass parser has not read it yet.
+                None => Ty::Record(intern(&w)),
             },
             other => return self.err(format!("expected a type, found {other:?}")),
         };
-        if !matches!(self.peek(), Tok::LBracket) {
-            return Ok(base);
-        }
+        // `[]` for a list, `{}` for a dictionary keyed by text. The suffix
+        // follows the element type in both, so `int[]` and `int{}` read as
+        // "ints" and "ints by name" in the order the rest of a declaration does.
+        let (close, closing, wrap, what): (Tok, &str, fn(Elem) -> Ty, &str) = match self.peek() {
+            Tok::LBracket => (Tok::RBracket, "`]` after `[` in an array type", Ty::Array, "a list"),
+            Tok::LBrace => (Tok::RBrace, "`}` after `{` in a dictionary type", Ty::Dict, "a dictionary"),
+            _ => return Ok(base),
+        };
         self.bump();
-        self.expect(&Tok::RBracket, "`]` after `[` in an array type")?;
-        // A second `[]` is caught here rather than left to the checker so the
+        self.expect(&close, closing)?;
+        // A second suffix is caught here rather than left to the checker so the
         // message names the real limitation instead of the token that follows.
-        if matches!(self.peek(), Tok::LBracket) {
-            return self.err("an array cannot hold arrays — `int[][]` is not a type");
+        if matches!(self.peek(), Tok::LBracket | Tok::LBrace) {
+            return self.err(format!(
+                "{what} cannot hold arrays or dictionaries — `int[][]` is not a type"
+            ));
         }
         match Elem::from_ty(base) {
-            Some(e) => Ok(Ty::Array(e)),
-            None => self.err(format!(
-                "an array cannot hold {} values",
-                base.as_str()
-            )),
+            Some(e) => Ok(wrap(e)),
+            None => self.err(format!("{what} cannot hold {} values", base.as_str())),
         }
     }
 
@@ -796,19 +867,36 @@ impl Parser {
         self.postfix(primary)
     }
 
-    /// `[` … `]` after a value, repeatedly — indexing binds tighter than any
-    /// operator, so `xs[0] + 1` adds to the element and not to the array.
+    /// `[` … `]` and `.field` after a value, repeatedly — both bind tighter
+    /// than any operator, so `xs[0] + 1` adds to the element and not to the
+    /// array, and `people[1].age * 2` doubles the age.
+    ///
+    /// The first `.` of a chain never arrives here: `p.x` is read in `primary`,
+    /// where it is indistinguishable from a component property read and is left
+    /// as one for the checker to resolve.
     fn postfix(&mut self, mut e: Expr) -> Result<Expr, ParseError> {
-        while matches!(self.peek(), Tok::LBracket) {
-            self.bump();
-            let index = self.expr()?;
-            self.expect(&Tok::RBracket, "`]` after the index")?;
-            e = Expr::Index {
-                base: Box::new(e),
-                index: Box::new(index),
-            };
+        loop {
+            match self.peek() {
+                Tok::LBracket => {
+                    self.bump();
+                    let index = self.expr()?;
+                    self.expect(&Tok::RBracket, "`]` after the index")?;
+                    e = Expr::Index {
+                        base: Box::new(e),
+                        index: Box::new(index),
+                    };
+                }
+                Tok::Dot => {
+                    self.bump();
+                    let name = self.ident("field name")?;
+                    e = Expr::Field {
+                        base: Box::new(e),
+                        name,
+                    };
+                }
+                _ => return Ok(e),
+            }
         }
-        Ok(e)
     }
 
     fn primary(&mut self) -> Result<Expr, ParseError> {
@@ -835,6 +923,37 @@ impl Parser {
             self.expect(&Tok::RBracket, "`]` closing the list")?;
             return Ok(Expr::ArrayLit(items));
         }
+        // `{"a": 1, "b": 2}` — a dictionary. The key is an expression, not a
+        // bare word, because a key is data: the common case is one a program
+        // computed, not one it typed out.
+        if matches!(self.peek(), Tok::LBrace) {
+            self.bump();
+            let mut pairs = Vec::new();
+            self.skip_newlines();
+            if !matches!(self.peek(), Tok::RBrace) {
+                loop {
+                    self.skip_newlines();
+                    let key = self.expr()?;
+                    self.expect(&Tok::Colon, "`:` between a key and its value")?;
+                    let value = self.expr()?;
+                    pairs.push((key, value));
+                    self.skip_newlines();
+                    match self.peek() {
+                        Tok::Comma => {
+                            self.bump();
+                        }
+                        Tok::RBrace => break,
+                        other => {
+                            return self.err(format!(
+                                "expected `,` or `}}` in a dictionary, found {other:?}"
+                            ))
+                        }
+                    }
+                }
+            }
+            self.expect(&Tok::RBrace, "`}` closing the dictionary")?;
+            return Ok(Expr::DictLit(pairs));
+        }
         match self.bump() {
             Tok::True => Ok(Expr::BoolLit(true)),
             Tok::False => Ok(Expr::BoolLit(false)),
@@ -842,6 +961,35 @@ impl Parser {
             Tok::Float(v) => Ok(Expr::DoubleLit(v)),
             Tok::Str(s) => Ok(Expr::TextLit(s)),
             Tok::Ident(name) => {
+                // `point(x: 1, y: 2)` — a record. A named first argument is
+                // what separates it from a call, and two tokens of lookahead
+                // are enough to see one.
+                if matches!(self.peek(), Tok::LParen)
+                    && matches!(self.peek_at(1), Tok::Ident(_))
+                    && matches!(self.peek_at(2), Tok::Colon)
+                {
+                    self.bump();
+                    let mut fields: Vec<(String, Expr)> = Vec::new();
+                    loop {
+                        let field = self.ident("field name")?;
+                        self.expect(&Tok::Colon, "`:` after a field name")?;
+                        let value = self.expr()?;
+                        fields.push((field, value));
+                        match self.peek() {
+                            Tok::Comma => {
+                                self.bump();
+                            }
+                            Tok::RParen => break,
+                            other => {
+                                return self.err(format!(
+                                    "expected `,` or `)` in `{name}`, found {other:?}"
+                                ))
+                            }
+                        }
+                    }
+                    self.expect(&Tok::RParen, "`)` after the fields")?;
+                    return Ok(Expr::RecordLit { name, fields });
+                }
                 if matches!(self.peek(), Tok::LParen) {
                     // Call-expression: NAME(args...)
                     self.bump();
@@ -1104,6 +1252,79 @@ mod tests {
     #[test]
     fn rejects_an_array_of_byte_sets() {
         assert!(parse("module m\nsub main\n  let b: bytes[] = []\nend\n").is_err());
+    }
+
+    #[test]
+    fn parses_a_record_declaration_and_a_construction() {
+        let m = parse(
+            "module m\nrecord point\n  x: int\n  y: text\nend\n\
+             sub main\n  let p: point = point(x: 1, y: \"a\")\nend\n",
+        )
+        .unwrap();
+        let r = m.records().next().expect("a record");
+        assert_eq!(r.name, "point");
+        assert_eq!(r.fields, vec![("x".into(), Ty::Int), ("y".into(), Ty::Text)]);
+        assert_eq!(r.field("y"), Some((2, Ty::Text)));
+        let s = m.subs().next().unwrap();
+        let StmtKind::Let { ty, value, .. } = &s.body[0].kind else {
+            panic!("expected a let")
+        };
+        assert_eq!(*ty, Ty::Record("point"));
+        assert!(matches!(value, Expr::RecordLit { .. }), "{value:?}");
+    }
+
+    /// `record` stays an ordinary word everywhere except that one position, or
+    /// adding records would break files that already use it as a name.
+    #[test]
+    fn record_is_a_soft_keyword() {
+        let m = parse("module m\nsub main\n  var record: int = 1\n  record = 2\nend\n").unwrap();
+        assert_eq!(m.subs().next().unwrap().body.len(), 2);
+    }
+
+    /// `point(1, 2)` is a call and `point(x: 1)` is a record: the named first
+    /// argument is the only difference, and two tokens of lookahead see it.
+    #[test]
+    fn a_named_first_argument_is_what_makes_it_a_record() {
+        let m = parse("module m\nsub main\n  let a: int = f(1, 2)\n  let b: int = f(x: 1)\nend\n")
+            .unwrap();
+        let s = m.subs().next().unwrap();
+        let StmtKind::Let { value, .. } = &s.body[0].kind else { panic!() };
+        assert!(matches!(value, Expr::Call { .. }), "{value:?}");
+        let StmtKind::Let { value, .. } = &s.body[1].kind else { panic!() };
+        assert!(matches!(value, Expr::RecordLit { .. }), "{value:?}");
+    }
+
+    /// A `.` further along a chain is a field read; the first one is left as a
+    /// property read for the checker to resolve.
+    #[test]
+    fn a_dot_after_an_index_is_a_field() {
+        let m = parse("module m\nsub main\n  let n: int = ps[1].x\nend\n").unwrap();
+        let s = m.subs().next().unwrap();
+        let StmtKind::Let { value, .. } = &s.body[0].kind else { panic!() };
+        let Expr::Field { base, name } = value else {
+            panic!("expected a field read, got {value:?}")
+        };
+        assert_eq!(name, "x");
+        assert!(matches!(**base, Expr::Index { .. }));
+    }
+
+    #[test]
+    fn parses_a_dictionary_type_and_literal() {
+        let m = parse(
+            "module m\nsub main\n  var ages: int{} = {\"Ada\": 36}\n  ages[\"Alan\"] = 41\nend\n",
+        )
+        .unwrap();
+        let s = m.subs().next().unwrap();
+        let StmtKind::Let { ty, value, .. } = &s.body[0].kind else { panic!() };
+        assert_eq!(*ty, Ty::Dict(Elem::Int));
+        assert!(matches!(value, Expr::DictLit(p) if p.len() == 1), "{value:?}");
+        assert!(matches!(s.body[1].kind, StmtKind::SetIndex { .. }));
+    }
+
+    #[test]
+    fn rejects_a_record_with_no_fields() {
+        let e = parse("module m\nrecord empty\nend\nsub main\nend\n").unwrap_err();
+        assert!(e.msg.contains("has no fields"), "{}", e.msg);
     }
 
     #[test]

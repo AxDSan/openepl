@@ -61,6 +61,22 @@ enum {
 };
 #define OE_SDT_ARRAY_OF(elem_tag) (OE_SDT_ARRAY_FLAG | (elem_tag))
 
+/* A record and a dictionary, added the same way and for the same reason: no
+ * frozen value moves.  13 is the first unassigned scalar tag, and the
+ * dictionary flag sits one bit above the array flag, so `int{}` is expressible
+ * without disturbing `int` or `int[]`.
+ *
+ * Which record a value is stays a compile-time fact — no record's identity
+ * reaches a signature, only that it IS one.  The compiler mirrors these in
+ * ir/src/lib.rs (`Ty::sdt_tag`) and the two MUST agree, because a library's
+ * declared signature is read back through them. */
+enum {
+    OE_SDT_RECORD    = 13,          /* any record; which one is compile-time  */
+    OE_SDT_DICT_FLAG = 0x200,       /* keyed collection of the value tag      */
+    OE_SDT_ANY_DICT  = 0x200 | 255  /* declarations only: "a dictionary"      */
+};
+#define OE_SDT_DICT_OF(value_tag) (OE_SDT_DICT_FLAG | (value_tag))
+
 /* --- Array object layout (SDT_ARRAY_OF) --------------------------------
  * A header followed by the elements, all one runtime-owned allocation:
  *

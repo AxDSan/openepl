@@ -6,6 +6,12 @@
  *
  * There is no https here, and there is no command that could accidentally
  * introduce it — see the header comment in net_cmds.c.
+ *
+ * The server side is one non-visual component plus the commands that read a
+ * request and answer it.  They are named net_req_* rather than http_* because
+ * one flat command namespace is shared with core and every other library, this
+ * library owns the net_ prefix, and net_http_header already means something
+ * else here — the header of the last response a CLIENT received.
  */
 #include "openepl_abi.h"
 
@@ -26,9 +32,19 @@ void net_http_post(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
 void net_http_status(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
 void net_http_header(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
 void net_http_download(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void net_request(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void net_req_method(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void net_req_path(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void net_req_body(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void net_req_header(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void net_req_query(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void net_req_reply(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void net_req_reply_as(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
 
 static const int32_t P_I[]   = { OE_SDT_INT };
 static const int32_t P_T[]   = { OE_SDT_TEXT };
+static const int32_t P_IIT[] = { OE_SDT_INT, OE_SDT_INT, OE_SDT_TEXT };
+static const int32_t P_IITT[]= { OE_SDT_INT, OE_SDT_INT, OE_SDT_TEXT, OE_SDT_TEXT };
 static const int32_t P_TI[]  = { OE_SDT_TEXT, OE_SDT_INT };
 static const int32_t P_IT[]  = { OE_SDT_INT,  OE_SDT_TEXT };
 static const int32_t P_II[]  = { OE_SDT_INT,  OE_SDT_INT };
@@ -57,6 +73,33 @@ static const OpenEPL_CommandDesc NET_COMMANDS[] = {
     { "net_http_status",      "net_http_status",      OE_SDT_INT,  0, 0     },
     { "net_http_header",      "net_http_header",      OE_SDT_TEXT, 1, P_T   },
     { "net_http_download",    "net_http_download",    OE_SDT_BOOL, 2, P_TT  },
+    /* --- serving: the request being handled right now ------------------ */
+    { "net_request",          "net_request",          OE_SDT_INT,  0, 0     },
+    { "net_req_method",       "net_req_method",       OE_SDT_TEXT, 1, P_I   },
+    { "net_req_path",         "net_req_path",         OE_SDT_TEXT, 1, P_I   },
+    { "net_req_body",         "net_req_body",         OE_SDT_TEXT, 1, P_I   },
+    { "net_req_header",       "net_req_header",       OE_SDT_TEXT, 2, P_IT  },
+    { "net_req_query",        "net_req_query",        OE_SDT_TEXT, 2, P_IT  },
+    { "net_req_reply",        "net_req_reply",        OE_SDT_BOOL, 3, P_IIT },
+    { "net_req_reply_as",     "net_req_reply_as",     OE_SDT_BOOL, 4, P_IITT},
+};
+
+/* --- httpserver: net's non-visual component ----------------------------
+ * Two properties and one event is the whole surface: someone drops a server on
+ * a form, sets a port, wires `request`, and has a web service.  `bind` is
+ * loopback by default and has to be changed on purpose — the default is the
+ * documentation for everyone who does not read any. */
+static const OpenEPL_PropertyDesc HTTPD_PROPS[] = {
+    { "port", OE_SDT_INT,  "8080",      NULL },
+    { "bind", OE_SDT_TEXT, "127.0.0.1", NULL },
+};
+static const OpenEPL_EventDesc HTTPD_EVENTS[] = { { "request" } };
+
+static const OpenEPL_ComponentDesc NET_COMPONENTS[] = {
+    { "httpserver", OE_ROLE_UNKNOWN,
+      (int32_t)(sizeof(HTTPD_PROPS) / sizeof(HTTPD_PROPS[0])), HTTPD_PROPS,
+      (int32_t)(sizeof(HTTPD_EVENTS) / sizeof(HTTPD_EVENTS[0])), HTTPD_EVENTS,
+      OE_COMPONENT_NONVISUAL },
 };
 
 static const OpenEPL_LibInfo NET_INFO = {
@@ -66,7 +109,8 @@ static const OpenEPL_LibInfo NET_INFO = {
     0, 1, 0,
     (int32_t)(sizeof(NET_COMMANDS) / sizeof(NET_COMMANDS[0])),
     NET_COMMANDS,
-    0, 0,
+    (int32_t)(sizeof(NET_COMPONENTS) / sizeof(NET_COMPONENTS[0])),
+    NET_COMPONENTS,
 };
 
 const OpenEPL_LibInfo *openepl_get_lib_info(void) {

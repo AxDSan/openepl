@@ -57,6 +57,12 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 | `contains` | array, element | bool |
 | `cos` | double | double |
 | `count` | array | int |
+| `dict_count` | dictionary | int |
+| `dict_get` | dictionary, text | element |
+| `dict_has` | dictionary, text | bool |
+| `dict_keys` | dictionary | text[] |
+| `dict_remove` | dictionary, text | bool |
+| `dict_set` | dictionary, text, element | — |
 | `double_to_int` | double | int |
 | `double_to_text` | double | text |
 | `exp` | double | double |
@@ -275,6 +281,14 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 | `net_http_header` | text | text |
 | `net_http_post` | text, text, text | text |
 | `net_http_status` | — | int |
+| `net_req_body` | int | text |
+| `net_req_header` | int, text | text |
+| `net_req_method` | int | text |
+| `net_req_path` | int | text |
+| `net_req_query` | int, text | text |
+| `net_req_reply_as` | int, int, text, text | bool |
+| `net_req_reply` | int, int, text | bool |
+| `net_request` | — | int |
 | `net_tcp_at_end` | int | bool |
 | `net_tcp_close_all` | — | int |
 | `net_tcp_close` | int | bool |

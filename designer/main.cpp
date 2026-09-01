@@ -77,14 +77,14 @@ inline const std::vector<Menu>& menus() {
 
 struct PlannedTool { const char* section; const char* name; };
 const PlannedTool PLANNED[] = {
-    // These need language or platform features that do not exist yet: list
-    // controls need arrays, and the System components need timers and native
-    // dialogs. Listed greyed rather than omitted, so the toolbox shows the
-    // intended shape without pretending they work.
+    // Controls that do not exist yet. Listed greyed rather than omitted, so
+    // the toolbox shows the intended shape without pretending they work.
+    // `Timer` is deliberately absent: it exists, but it is declared at module
+    // level rather than dropped into a form, so an entry here would be an
+    // invitation to place something a form cannot hold.
     {"Common Controls", "ListBox"},  {"Common Controls", "ComboBox"},
     {"Containers", "TabControl"},    {"Containers", "Splitter"},
-    {"System", "Timer"},             {"System", "FileDialog"},
-    {"System", "TrayIcon"},
+    {"System", "FileDialog"},        {"System", "TrayIcon"},
 };
 
 struct Designer {
@@ -405,6 +405,11 @@ std::string build_toolbox() {
             for (int i = 0; i < lib->component_count; i++) {
                 const char* n = lib->components[i].name;
                 if (std::strcmp(n, "form") == 0) continue;
+                /* The toolbox places things into a form, and a non-visual
+                 * component has nowhere to be placed: dropping one would
+                 * produce a validator error at build time instead of a
+                 * control. `kind` is the library's own answer to that. */
+                if (lib->components[i].kind != OE_COMPONENT_VISUAL) continue;
                 if (!matches_search(n)) continue;
                 body += "<div class='tool' oe-add='" + std::string(n) + "'>"
                         "<span class='ico'>■</span> " + n + "</div>";

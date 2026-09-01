@@ -25,7 +25,7 @@ mod lsp_index;
 mod templates;
 
 use openepl_backend::lower_module;
-use openepl_ir::{parse, validate, Target};
+use openepl_ir::{parse, validate, Module, Target};
 
 fn main() {
     // Die quietly when a reader goes away, the way every other command-line
@@ -193,7 +193,7 @@ fn cmd_emit(rest: &[String]) -> i32 {
         }
     };
     match compile_with(&io.input, io.target, false) {
-        Ok((ll, _plan, _t)) => {
+        Ok((ll, _plan, _t, _m)) => {
             print!("{ll}");
             0
         }
@@ -384,7 +384,7 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
         }
     };
     let input = io.input;
-    let (ll, plan, target) = match compile(&input, io.target) {
+    let (mut ll, plan, target, module) = match compile(&input, io.target) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
@@ -392,6 +392,18 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
         }
     };
     let out_bin = io.output.unwrap_or_else(|| default_output(&input, target));
+
+    // Only a program builds a form, so only a program has pictures to carry.
+    if target.is_executable() {
+        match embed_resources(&module, &input) {
+            Ok(Some(table)) => ll.push_str(&table),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("openepl: {e}");
+                return 1;
+            }
+        }
+    }
 
     let ll_path = out_bin.with_extension("ll");
     if let Err(e) = std::fs::write(&ll_path, &ll) {
@@ -421,7 +433,10 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
 
 /// Parse, introspect libraries, validate, and lower to LLVM IR.
 /// Returns the `.ll` text and the implementation sources to static-link.
-fn compile(input: &Path, target_override: Option<Target>) -> Result<(String, libload::LibPlan, Target), String> {
+fn compile(
+    input: &Path,
+    target_override: Option<Target>,
+) -> Result<(String, libload::LibPlan, Target, Module), String> {
     compile_with(input, target_override, true)
 }
 
@@ -433,7 +448,7 @@ fn compile_with(
     input: &Path,
     target_override: Option<Target>,
     require_impl: bool,
-) -> Result<(String, libload::LibPlan, Target), String> {
+) -> Result<(String, libload::LibPlan, Target, Module), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let mut module = parse(&src).map_err(|e| e.to_string())?;
@@ -474,7 +489,117 @@ fn compile_with(
         ));
     }
     let ll = lower_module(&module, &plan.registry).map_err(|e| e.to_string())?;
-    Ok((ll, plan, target))
+    Ok((ll, plan, target, module))
+}
+
+/// Compile every picture a form names INTO the program.
+///
+/// `image.source = "logo.png"` is otherwise a promise about the machine the
+/// program was built on, and "ship one file" is the claim the whole model rests
+/// on. The bytes go into the program's own object as a table the `ui` library
+/// reads instead of reaching for the filesystem (`libs/ui/ui_rmlui.cpp`).
+///
+/// A source that does not exist is a BUILD error. The alternative — an empty
+/// picture in a running program — is the same missing file discovered by
+/// whoever the program was shipped to.
+///
+/// Returns `None` when the module names no resources, so a program that has
+/// none defines no table at all and the weak declaration on the other side sees
+/// the empty one.
+fn embed_resources(module: &Module, input: &Path) -> Result<Option<String>, String> {
+    // Relative to the SOURCE, not to the working directory: a project is built
+    // from wherever the person happens to be standing.
+    let base = input.parent().unwrap_or(Path::new("."));
+    let mut found: Vec<(String, Vec<u8>)> = Vec::new();
+    for form in module.forms() {
+        for child in &form.children {
+            if child.type_name != "image" {
+                continue;
+            }
+            for (name, value) in &child.properties {
+                if name != "source" {
+                    continue;
+                }
+                let src = literal_text(value);
+                if src.is_empty() {
+                    continue;
+                }
+                if found.iter().any(|(n, _)| *n == src) {
+                    continue;
+                }
+                let path = base.join(&src);
+                let bytes = std::fs::read(&path).map_err(|e| {
+                    format!(
+                        "{}: `{}` has source `{src}`, which cannot be read: {e}",
+                        input.display(),
+                        child.id
+                    )
+                })?;
+                if bytes.is_empty() {
+                    // A zero-length picture is a file that exists and says
+                    // nothing, which is the failure this check is for.
+                    return Err(format!(
+                        "{}: `{}` has source `{src}`, which is empty",
+                        input.display(),
+                        child.id
+                    ));
+                }
+                found.push((src, bytes));
+            }
+        }
+    }
+    if found.is_empty() {
+        return Ok(None);
+    }
+
+    let mut out = String::from(
+        "\n; Resources embedded at build time; read by libs/ui through a null-terminated\n\
+         ; table, so a program that names none can leave the symbol undefined.\n",
+    );
+    for (i, (name, bytes)) in found.iter().enumerate() {
+        out.push_str(&format!(
+            "@.res.name{i} = private unnamed_addr constant [{} x i8] c\"{}\\00\"\n",
+            name.len() + 1,
+            llvm_bytes(name.as_bytes())
+        ));
+        out.push_str(&format!(
+            "@.res.data{i} = private unnamed_addr constant [{} x i8] c\"{}\"\n",
+            bytes.len(),
+            llvm_bytes(bytes)
+        ));
+    }
+    let mut rows: Vec<String> = found
+        .iter()
+        .enumerate()
+        .map(|(i, (_, bytes))| {
+            format!(
+                "{{ ptr, ptr, i64 }} {{ ptr @.res.name{i}, ptr @.res.data{i}, i64 {} }}",
+                bytes.len()
+            )
+        })
+        .collect();
+    rows.push("{ ptr, ptr, i64 } zeroinitializer".to_string());
+    out.push_str(&format!(
+        "@oe_embedded_resources = constant [{} x {{ ptr, ptr, i64 }}] [{}]\n",
+        rows.len(),
+        rows.join(", ")
+    ));
+    Ok(Some(out))
+}
+
+/// Bytes as an LLVM string body. Everything outside plain printable ASCII goes
+/// as `\XX`, which is the only form that survives a byte a text editor would
+/// otherwise eat.
+fn llvm_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\{b:02X}"));
+        }
+    }
+    out
 }
 
 fn default_output(input: &Path, target: Target) -> PathBuf {

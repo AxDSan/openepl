@@ -22,12 +22,18 @@ do not rely on one to keep an algorithm secret.
 is compiled without `-fPIC` and cannot go into a PIE, so a `gui` release says so
 and links without it. Console programs and libraries are unaffected.
 
+**No TLS, in either direction.** `net_http_get` refuses an `https://` URL
+rather than downgrading it, and the `httpserver` component does not terminate
+TLS — put a reverse proxy in front of it. See [Networking](./networking.md).
+
 **No debugger.** You get a program's output and its exit code in the console,
 not breakpoints, stepping or variable inspection.
 
 ## The language
 
-- No user-defined types, arrays or collections.
+- No user-defined types beyond `record`: there is no enum, no interface and
+  no way to attach a subroutine to a type.
+- A dictionary's keys are text, and only text.
 - One form per module.
 - Local variables are visible for the whole subroutine, not just the block
   they were declared in. A `for` loop's variable follows the same rule, so two
@@ -44,10 +50,11 @@ not breakpoints, stepping or variable inspection.
 
 ## The component library
 
-Eight components — see [Components](./reference-components.md). The toolbox
-lists a few more (list boxes, tab controls, timers) greyed out: they are part
-of the intended shape but are not implemented, and adding one tells you so
-rather than placing something that does not work.
+The components each library provides are listed in
+[Components](./reference-components.md). The designer's toolbox
+lists a few more (list boxes, tab controls) greyed out: they are part of the
+intended shape but are not implemented, and adding one tells you so rather
+than placing something that does not work.
 
 ## The IDE
 

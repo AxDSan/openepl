@@ -56,6 +56,18 @@ sub main
   # --- localhost always resolves, without touching the network ---
   call print_text(net_host_ip("127.0.0.1"))
 
+  # --- the serving side, with nothing served ---
+  # net_request() answers only inside an httpserver `request` handler; asking
+  # for one anywhere else is a failure, not an empty answer, because a program
+  # that got 0 back and carried on would be replying into nothing.
+  call print_int(net_request())
+  if last_error_code() = 10005
+    call print_text("no request outside a handler, as expected")
+  end
+  # And a handle that is not a request is refused rather than read.
+  call print_text(net_req_path(0))
+  call print_int(last_error_code())
+
   # --- a stale handle is detected, not dereferenced ---
   call print_int(net_tcp_close_all())
   if net_tcp_close(1)

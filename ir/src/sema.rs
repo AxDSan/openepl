@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Elem, Expr, Registry, Signature, Ty};
+use crate::{intern, Elem, Expr, Registry, Signature, Ty};
 
 /// Maps a form's component ids to their component type names. Component ids are
 /// module-scoped (they are not locals), so every subroutine can see them.
@@ -74,6 +74,13 @@ pub fn type_of_expr_hinted(
             _ => err(
                 "`[]` on its own does not say what it holds — declare the type, \
                  as in `var xs: text[] = []`",
+            ),
+        },
+        Expr::DictLit(pairs) if pairs.is_empty() => match hint {
+            Some(Ty::Dict(e)) => Ok(Ty::Dict(e)),
+            _ => err(
+                "`{}` on its own does not say what it holds — declare the type, \
+                 as in `var ages: int{} = {}`",
             ),
         },
         _ => type_of_expr_bare(expr, vars, reg, components),
@@ -180,6 +187,19 @@ fn type_of_expr_bare(
         Expr::Index { base, index } => {
             let bt = type_of_expr_bare(base, vars, reg, components)?;
             let it = type_of_expr_bare(index, vars, reg, components)?;
+            // A dictionary is subscripted by its key, and a key is text. This
+            // is `dict_get` spelled the way a subscript reads; a key that is
+            // not there answers the sentinel and sets the error slot, which
+            // `dict_has` is there to tell apart from a stored zero.
+            if let Ty::Dict(v) = bt {
+                if it != Ty::Text {
+                    return err(format!(
+                        "a dictionary is keyed by text, got {}",
+                        it.as_str()
+                    ));
+                }
+                return Ok(v.ty());
+            }
             if it != Ty::Int {
                 return err(format!(
                     "an index counts with `int` values, got {}",
@@ -212,10 +232,132 @@ fn type_of_expr_bare(
                 other => err(format!("{} is not something you can index", other.as_str())),
             }
         }
+        // `p.x` is a record field when `p` is a record and a component
+        // property otherwise. Variables win, because a local is the nearer
+        // name: a component id that a local shadows is unreachable either way,
+        // and the reverse rule would let adding a component to a form change
+        // what an existing subroutine's `p.x` means.
         Expr::GetProperty {
             component,
             property,
-        } => property_type(component, property, reg, components),
+        } => match vars.get(component).copied() {
+            Some(Ty::Record(rec)) => field_type(rec, property, reg),
+            Some(other) => err(format!(
+                "`{component}` is {} — only a record has fields",
+                other.as_str()
+            )),
+            None => property_type(component, property, reg, components),
+        },
+        Expr::Field { base, name } => {
+            let bt = type_of_expr_bare(base, vars, reg, components)?;
+            match bt {
+                Ty::Record(rec) => field_type(rec, name, reg),
+                other => err(format!(
+                    "`.{name}` reads a field, and {} has none",
+                    other.as_str()
+                )),
+            }
+        }
+        Expr::RecordLit { name, fields } => {
+            let Some(def) = reg.record(name).cloned() else {
+                let mut known: Vec<&str> = reg.record_names().collect();
+                known.sort_unstable();
+                return err(format!(
+                    "unknown record `{name}`{}",
+                    if known.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (known: {})", known.join(", "))
+                    }
+                ));
+            };
+            let mut given: Vec<&str> = Vec::new();
+            for (fname, value) in fields {
+                let Some((_, want)) = def.field(fname) else {
+                    let known: Vec<&str> =
+                        def.fields.iter().map(|(n, _)| n.as_str()).collect();
+                    return err(format!(
+                        "record `{name}` has no field `{fname}` (has: {})",
+                        known.join(", ")
+                    ));
+                };
+                if given.contains(&fname.as_str()) {
+                    return err(format!("`{name}` gives field `{fname}` twice"));
+                }
+                given.push(fname);
+                let got = type_of_expr_hinted(value, Some(want), vars, reg, components)?;
+                if got != want {
+                    return err(format!(
+                        "record `{name}` field `{fname}` is {}, got {}",
+                        want.as_str(),
+                        got.as_str()
+                    ));
+                }
+            }
+            // Every field, every time. A record with a field left out would
+            // have to be readable before it was written, and there is no value
+            // a field could hold in the meantime that is not a lie.
+            let missing: Vec<&str> = def
+                .fields
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .filter(|n| !given.contains(n))
+                .collect();
+            if !missing.is_empty() {
+                return err(format!(
+                    "`{name}` is missing field{} {}",
+                    if missing.len() == 1 { "" } else { "s" },
+                    missing
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            Ok(Ty::Record(intern(name)))
+        }
+        Expr::DictLit(pairs) => {
+            let mut value_ty: Option<Ty> = None;
+            for (i, (key, value)) in pairs.iter().enumerate() {
+                let kt = type_of_expr_bare(key, vars, reg, components)?;
+                if kt != Ty::Text {
+                    return err(format!(
+                        "a dictionary is keyed by text; key {} is {}",
+                        i + 1,
+                        kt.as_str()
+                    ));
+                }
+                let got = type_of_expr_bare(value, vars, reg, components)?;
+                match value_ty {
+                    None => {
+                        if Elem::from_ty(got).is_none() {
+                            return err(format!(
+                                "a dictionary cannot hold {} values",
+                                got.as_str()
+                            ));
+                        }
+                        value_ty = Some(got);
+                    }
+                    Some(first) if first != got => {
+                        return err(format!(
+                            "every value in a dictionary has one type: the first is {}, \
+                             value {} is {}",
+                            first.as_str(),
+                            i + 1,
+                            got.as_str()
+                        ))
+                    }
+                    Some(_) => {}
+                }
+            }
+            match value_ty.and_then(Elem::from_ty) {
+                Some(e) => Ok(Ty::Dict(e)),
+                None => err(
+                    "`{}` on its own does not say what it holds — declare the type, \
+                     as in `var ages: int{} = {}`",
+                ),
+            }
+        }
         Expr::BoolLit(_) => Ok(Ty::Bool),
         Expr::Cmp(op, l, r) => {
             let lt = type_of_expr_in(l, vars, reg, components)?;
@@ -280,6 +422,23 @@ pub fn callee(name: &str, reg: &Registry) -> Option<(&'static str, Signature)> {
         return Some(("command", c.sig.clone()));
     }
     reg.sub(name).map(|s| ("subroutine", s.clone()))
+}
+
+/// The declared type of one field of record type `rec`, or a diagnostic.
+pub fn field_type(rec: &str, field: &str, reg: &Registry) -> Result<Ty, SemaError> {
+    let Some(def) = reg.record(rec) else {
+        return err(format!("unknown record `{rec}`"));
+    };
+    match def.field(field) {
+        Some((_, t)) => Ok(t),
+        None => {
+            let known: Vec<&str> = def.fields.iter().map(|(n, _)| n.as_str()).collect();
+            err(format!(
+                "record `{rec}` has no field `{field}` (has: {})",
+                known.join(", ")
+            ))
+        }
+    }
 }
 
 /// The declared type of `component.property`, or a diagnostic.
@@ -378,18 +537,42 @@ pub fn check_call(
         ));
     }
     let mut arg_tys = Vec::with_capacity(args.len());
-    // What the array argument turned out to hold; every later `AnyElem` is
-    // measured against it, which is how mixing element types is caught.
+    // What the array or dictionary argument turned out to hold; every later
+    // `AnyElem` is measured against it, which is how mixing element types is
+    // caught.
     let mut elem: Option<Elem> = None;
+    // Which collection the element type came from, so the diagnostic names the
+    // thing the author wrote rather than a category.
+    let mut holder = "array";
     for (i, (a, expected)) in args.iter().zip(&sig.params).enumerate() {
         let hint = match expected {
-            Ty::AnyArray => None,
+            Ty::AnyArray | Ty::AnyDict => None,
             Ty::AnyElem => elem.map(Elem::ty),
             t => Some(*t),
         };
         let got = type_of_expr_hinted(a, hint, vars, reg, components)?;
         match expected {
             Ty::AnyArray => match got.elem() {
+                // A command declared over `AnyArray` sees its elements as 64
+                // raw bits and asks the array's tag what they mean. For a
+                // record that answer is "a pointer", which orders by address
+                // and prints as nonsense — so the four commands that read
+                // element VALUES are refused here rather than allowed to
+                // produce a confident wrong answer.
+                //
+                // Named, because the ABI has no "these elements can be
+                // compared" marker to test instead. The namespace is flat and a
+                // library may not redefine a core command, so these four names
+                // are these four commands.
+                Some(Elem::Record(rec))
+                    if matches!(cmd, "sort" | "join" | "contains" | "index_of") =>
+                {
+                    return err(format!(
+                        "`{cmd}` compares or prints what a list holds, and a `{rec}` \
+                         record has no order and no spelling — read the field you mean \
+                         into a list of its own"
+                    ))
+                }
                 Some(e) => elem = Some(e),
                 None => {
                     return err(format!(
@@ -399,16 +582,29 @@ pub fn check_call(
                     ))
                 }
             },
+            Ty::AnyDict => match got.value() {
+                Some(e) => {
+                    elem = Some(e);
+                    holder = "dictionary";
+                }
+                None => {
+                    return err(format!(
+                        "{what} `{cmd}` argument {} expects a dictionary, got {}",
+                        i + 1,
+                        got.as_str()
+                    ))
+                }
+            },
             Ty::AnyElem => {
                 let Some(e) = elem else {
                     return err(format!(
-                        "{what} `{cmd}` argument {} has no array to take its type from",
+                        "{what} `{cmd}` argument {} has no {holder} to take its type from",
                         i + 1
                     ));
                 };
                 if got != e.ty() {
                     return err(format!(
-                        "{what} `{cmd}` argument {} must match what the array holds \
+                        "{what} `{cmd}` argument {} must match what the {holder} holds \
                          ({}), got {}",
                         i + 1,
                         e.as_str(),
@@ -444,10 +640,12 @@ pub fn resolve_ret(sig: &Signature, arg_tys: &[Ty]) -> Option<Ty> {
         .zip(arg_tys)
         .find_map(|(p, a)| match p {
             Ty::AnyArray => a.elem(),
+            Ty::AnyDict => a.value(),
             _ => None,
         });
     Some(match (ret, elem) {
         (Ty::AnyArray, Some(e)) => Ty::Array(e),
+        (Ty::AnyDict, Some(e)) => Ty::Dict(e),
         (Ty::AnyElem, Some(e)) => e.ty(),
         (t, _) => t,
     })

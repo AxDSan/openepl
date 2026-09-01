@@ -25,6 +25,8 @@ pub enum SymKind {
     Component,
     /// A component *type* (`Button`), as opposed to an instance.
     ComponentType,
+    /// A record type declared with `record name … end`.
+    Record,
     /// Provided by a support library — defined in C, so it has no definition
     /// site in this file.
     Command,
@@ -65,12 +67,33 @@ fn ident_at(toks: &[Spanned], i: usize) -> Option<(String, &Spanned)> {
     }
 }
 
+/// The rest of a `sub` declaration line, from just past its name.
+///
+/// Read off the source line rather than reassembled from tokens: the tokens
+/// have no spelling, and a rendered signature that says `Int` where the author
+/// wrote `int` is a signature the author does not recognise as theirs.
+fn header_after(src: &str, line: usize, col: usize, name: &str) -> Option<String> {
+    let text = src.lines().nth(line.checked_sub(1)?)?;
+    let start = col.checked_sub(1)? + name.len();
+    let rest = text.get(start..)?.trim_end();
+    // Comments are not part of a signature.
+    let rest = rest.split('#').next().unwrap_or("").trim_end();
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
 /// Everything the server knows about the names in one document.
 #[derive(Debug, Default)]
 pub struct Index {
     pub occurrences: Vec<Occurrence>,
     /// Component id -> component type, for resolving `id.property`.
     pub component_types: HashMap<String, String>,
+    /// Subroutine name -> its header as written, `(a: int, b: int): int`.
+    ///
+    /// Kept as source text rather than as parsed types because that is what
+    /// signature help has to render, and because a header being edited is
+    /// frequently not yet a legal one — a half-typed parameter list still has
+    /// a useful shape to show.
+    pub sub_headers: HashMap<String, String>,
     /// Locals declared in each subroutine, so shadowing resolves correctly.
     locals_by_sub: HashMap<String, Vec<String>>,
 }
@@ -97,6 +120,9 @@ impl Index {
             match &toks[i].tok {
                 Tok::Sub => {
                     if let Some((name, sp)) = ident_at(&toks, i + 1) {
+                        if let Some(h) = header_after(src, sp.line, sp.col, &name) {
+                            ix.sub_headers.insert(name.clone(), h);
+                        }
                         ix.push(name.clone(), sp, true, SymKind::Sub, None);
                         scope = Some(name.clone());
                         i += 2;
@@ -182,6 +208,24 @@ impl Index {
                         }
                         ix.push(name, sp, true, kind, scope.clone());
                         i += 2;
+                        continue;
+                    }
+                }
+                // `record point ... end` declares a type. Its name is indexed
+                // as a type name so go-to-definition and rename reach it; the
+                // fields inside are skipped wholesale, because a field is not a
+                // variable and resolving `x: int` as one would send a rename of
+                // an unrelated `x` into the declaration.
+                Tok::Ident(w)
+                    if w == "record" && scope.is_none() && form_depth == 0 =>
+                {
+                    if let Some((name, sp)) = ident_at(&toks, i + 1) {
+                        ix.push(name, sp, true, SymKind::Record, None);
+                        i += 2;
+                        while i < toks.len() && toks[i].tok != Tok::End {
+                            i += 1;
+                        }
+                        i += 1; // past `end`
                         continue;
                     }
                 }
@@ -499,6 +543,57 @@ mod tests {
             ix.definition_of(use_n).unwrap().line,
             3,
             "resolves to the parameter, not the module variable on line 2"
+        );
+    }
+
+    /// Signature help and hover render a subroutine from its declaration line,
+    /// so that line has to be captured as the author wrote it.
+    #[test]
+    fn subroutine_headers_are_captured_as_written() {
+        let src = "module m\nsub greet(who: text, times: int): text  # says hello\n  return who\nend\n\
+                   sub main\nend\n";
+        let ix = Index::build(src);
+        assert_eq!(
+            ix.sub_headers.get("greet").map(String::as_str),
+            Some("(who: text, times: int): text"),
+            "the trailing comment is not part of the signature"
+        );
+        // A subroutine with no parameters has no header to show, and an empty
+        // one rendered as `main()` would claim a parameter list it does not have.
+        assert!(!ix.sub_headers.contains_key("main"));
+    }
+
+    /// A record declares a type name and nothing else. Its fields must not
+    /// enter the index as variables: `record point / x: int` and a local `x`
+    /// elsewhere are unrelated names, and a rename that confused them would
+    /// edit the declaration.
+    #[test]
+    fn a_record_declares_a_type_and_not_its_fields() {
+        let src = "module m\nrecord point\n  x: int\n  y: int\nend\n\
+                   sub main\n  let x: int = 1\nend\n";
+        let ix = Index::build(src);
+        assert!(
+            ix.occurrences
+                .iter()
+                .any(|o| o.name == "point" && o.is_definition),
+            "the record name must be a definition: {:?}",
+            ix.occurrences
+        );
+        let xs: Vec<&Occurrence> = ix
+            .occurrences
+            .iter()
+            .filter(|o| o.name == "x")
+            .collect();
+        assert_eq!(xs.len(), 1, "only the local `x` may be indexed: {xs:?}");
+        assert_eq!(xs[0].scope.as_deref(), Some("main"));
+        // The block must close cleanly, or every subroutine after it would be
+        // indexed as though it were still inside the record.
+        assert!(
+            ix.occurrences
+                .iter()
+                .any(|o| o.name == "main" && o.is_definition && o.scope.is_none()),
+            "{:?}",
+            ix.occurrences
         );
     }
 

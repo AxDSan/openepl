@@ -50,13 +50,16 @@ fn llvm_ty(t: Ty) -> &'static str {
         // Text, byte-sets and arrays are all one pointer to runtime-owned
         // storage; the aggregates cost the marshaling path nothing because a
         // pointer already fits the slot's 8-byte value.
-        Ty::Text | Ty::Bytes | Ty::Array(_) => "ptr",
+        // A record and a dictionary are runtime-owned aggregates held by
+        // pointer, exactly as an array is — which is why neither costs the
+        // marshaling path anything.
+        Ty::Text | Ty::Bytes | Ty::Array(_) | Ty::Record(_) | Ty::Dict(_) => "ptr",
         // Bool is int-sized, matching the ABI's BOOL: `icmp` yields i1, which we
         // widen immediately so slot marshaling has one less width to handle.
         Ty::Bool => "i32",
         // Signature-only types; `resolve_ret` replaces them with what the call
         // actually produced before any value carries one.
-        Ty::AnyArray | Ty::AnyElem => "ptr",
+        Ty::AnyArray | Ty::AnyElem | Ty::AnyDict => "ptr",
     }
 }
 
@@ -81,6 +84,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     // cannot change what any existing call means.
     let mut with_subs = reg.clone();
     with_subs.register_subs(m);
+    with_subs.register_records(m);
     let reg = &with_subs;
 
     let target = m.target();
@@ -112,6 +116,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         loops: Vec::new(),
         ret_ty: None,
         needs_notify: false,
+        exit_code: None,
     };
     for g in m.globals() {
         lo.globals.insert(g.name.clone(), g.ty);
@@ -320,6 +325,11 @@ struct Lowerer<'a> {
     /// Whether any lowered code aborts through `oe_notify`, which is declared
     /// only when it is actually called.
     needs_notify: bool,
+    /// The register holding what the event loop returned, once one has been
+    /// entered. `ECodeStart` gives it back as the program's exit status: a
+    /// `quit(1)` — or a server that could not bind and stopped the loop —
+    /// otherwise reports success to whatever ran the program.
+    exit_code: Option<String>,
 }
 
 impl Lowerer<'_> {
@@ -501,6 +511,7 @@ impl Lowerer<'_> {
         self.loop_used = true;
         let rc = self.fresh();
         writeln!(self.body, "  {rc} = call i32 @oe_loop_run()").unwrap();
+        self.exit_code = Some(rc);
     }
 
     /// Start the event loop and tear down. Emitted after start-up code.
@@ -508,6 +519,7 @@ impl Lowerer<'_> {
         self.ui_used.insert("oe_ui_run");
         let rc = self.fresh();
         writeln!(self.body, "  {rc} = call i32 @oe_ui_run()").unwrap();
+        self.exit_code = Some(rc);
         self.ui_used.insert("oe_ui_shutdown");
         writeln!(self.body, "  call void @oe_ui_shutdown()").unwrap();
     }
@@ -682,13 +694,41 @@ impl Lowerer<'_> {
             StmtKind::SetIndex { name, index, value } => {
                 let target = self.eval(&Expr::Var(name.clone()))?;
                 let i = self.eval(index)?;
-                if i.ty != Ty::Int {
+                // A position is an int and a key is text; which one this is
+                // depends on what is being subscripted, so the check belongs
+                // with each arm below rather than ahead of them.
+                if !matches!(target.ty, Ty::Dict(_)) && i.ty != Ty::Int {
                     return err(format!(
                         "an index counts with `int` values, got {}",
                         i.ty.as_str()
                     ));
                 }
                 match target.ty {
+                    Ty::Dict(value_ty) => {
+                        if i.ty != Ty::Text {
+                            return err(format!(
+                                "a dictionary is keyed by text, got {}",
+                                i.ty.as_str()
+                            ));
+                        }
+                        let v = self.eval_hinted(value, Some(value_ty.ty()))?;
+                        if v.ty != value_ty.ty() {
+                            return err(format!(
+                                "`{name}` holds {} values, cannot store {}",
+                                value_ty.as_str(),
+                                v.ty.as_str()
+                            ));
+                        }
+                        let raw = self.emit_arg_i64(&v);
+                        self.aggr_used.insert("oe_dict_put");
+                        writeln!(
+                            self.body,
+                            "  call void @oe_dict_put(ptr {}, ptr {}, i64 {raw})",
+                            target.operand, i.operand
+                        )
+                        .unwrap();
+                        Ok(())
+                    }
                     Ty::Bytes => {
                         let v = self.eval(value)?;
                         if v.ty != Ty::Int {
@@ -857,6 +897,32 @@ impl Lowerer<'_> {
                 property,
                 value,
             } => {
+                if let Some(Ty::Record(rec)) = self.var_ty(component) {
+                    let def = self.reg.record(rec).cloned().ok_or_else(|| LowerError {
+                        msg: format!("unknown record `{rec}`"),
+                    })?;
+                    let (pos, want) = def.field(property).ok_or_else(|| LowerError {
+                        msg: format!("record `{rec}` has no field `{property}`"),
+                    })?;
+                    let base = self.eval(&Expr::Var(component.clone()))?;
+                    let v = self.eval_hinted(value, Some(want))?;
+                    if v.ty != want {
+                        return err(format!(
+                            "`{component}.{property}` is {}, cannot store {}",
+                            want.as_str(),
+                            v.ty.as_str()
+                        ));
+                    }
+                    let raw = self.emit_arg_i64(&v);
+                    self.aggr_used.insert("oe_rec_set");
+                    writeln!(
+                        self.body,
+                        "  call void @oe_rec_set(ptr {}, i32 {pos}, i64 {raw})",
+                        base.operand
+                    )
+                    .unwrap();
+                    return Ok(());
+                }
                 let handle = self.handle_of(component)?;
                 let v = self.eval(value)?;
                 // The D10 boundary takes textual values, so convert first.
@@ -1105,7 +1171,141 @@ impl Lowerer<'_> {
             };
             return self.eval_array_lit(elem, items);
         }
+        if let Expr::DictLit(pairs) = e {
+            let value = match (pairs.first(), hint) {
+                (Some((_, first)), _) => {
+                    let v = self.eval(first)?;
+                    Elem::from_ty(v.ty).ok_or_else(|| LowerError {
+                        msg: format!("a dictionary cannot hold {} values", v.ty.as_str()),
+                    })?
+                }
+                (None, Some(Ty::Dict(value))) => value,
+                (None, _) => return err("`{}` here does not say what it holds"),
+            };
+            return self.eval_dict_lit(value, pairs);
+        }
         self.eval_inner(e)
+    }
+
+    /// `{"a": 1}` — one empty dictionary, then one store per pair, for the
+    /// reason an array literal is built the same way: a value may be any
+    /// expression, so there is nothing constant to initialise from.
+    fn eval_dict_lit(
+        &mut self,
+        value: Elem,
+        pairs: &[(Expr, Expr)],
+    ) -> Result<Val, LowerError> {
+        self.aggr_used.insert("oe_dict_new");
+        let d = self.fresh();
+        writeln!(
+            self.body,
+            "  {d} = call ptr @oe_dict_new(i32 {})",
+            value.ty().sdt_tag()
+        )
+        .unwrap();
+        for (key, val) in pairs {
+            let k = self.eval(key)?;
+            if k.ty != Ty::Text {
+                return err(format!(
+                    "a dictionary is keyed by text, got {}",
+                    k.ty.as_str()
+                ));
+            }
+            let v = self.eval_hinted(val, Some(value.ty()))?;
+            if v.ty != value.ty() {
+                return err(format!(
+                    "every value in a dictionary has one type: expected {}, got {}",
+                    value.as_str(),
+                    v.ty.as_str()
+                ));
+            }
+            let raw = self.emit_arg_i64(&v);
+            self.aggr_used.insert("oe_dict_put");
+            writeln!(
+                self.body,
+                "  call void @oe_dict_put(ptr {d}, ptr {}, i64 {raw})",
+                k.operand
+            )
+            .unwrap();
+        }
+        Ok(Val {
+            ty: Ty::Dict(value),
+            operand: d,
+        })
+    }
+
+    /// `point(x: 1, y: 2)` — one allocation of the declared width, then one
+    /// store per field. A field is written by POSITION: the declaration order
+    /// is the layout, so no field name reaches the shipped binary.
+    fn eval_record_lit(
+        &mut self,
+        name: &str,
+        fields: &[(String, Expr)],
+    ) -> Result<Val, LowerError> {
+        let def = self.reg.record(name).cloned().ok_or_else(|| LowerError {
+            msg: format!("unknown record `{name}`"),
+        })?;
+        self.aggr_used.insert("oe_rec_new");
+        let r = self.fresh();
+        writeln!(
+            self.body,
+            "  {r} = call ptr @oe_rec_new(i32 {})",
+            def.fields.len()
+        )
+        .unwrap();
+        for (fname, value) in fields {
+            let (pos, want) = def.field(fname).ok_or_else(|| LowerError {
+                msg: format!("record `{name}` has no field `{fname}`"),
+            })?;
+            let v = self.eval_hinted(value, Some(want))?;
+            if v.ty != want {
+                return err(format!(
+                    "record `{name}` field `{fname}` is {}, got {}",
+                    want.as_str(),
+                    v.ty.as_str()
+                ));
+            }
+            let raw = self.emit_arg_i64(&v);
+            self.aggr_used.insert("oe_rec_set");
+            writeln!(
+                self.body,
+                "  call void @oe_rec_set(ptr {r}, i32 {pos}, i64 {raw})"
+            )
+            .unwrap();
+        }
+        Ok(Val {
+            ty: Ty::Record(openepl_ir::intern(name)),
+            operand: r,
+        })
+    }
+
+    /// Read one field of an already-lowered record.
+    fn emit_field_read(&mut self, rec: &str, base: &Val, field: &str) -> Result<Val, LowerError> {
+        let def = self.reg.record(rec).cloned().ok_or_else(|| LowerError {
+            msg: format!("unknown record `{rec}`"),
+        })?;
+        let (pos, ty) = def.field(field).ok_or_else(|| LowerError {
+            msg: format!("record `{rec}` has no field `{field}`"),
+        })?;
+        self.aggr_used.insert("oe_rec_get");
+        let raw = self.fresh();
+        writeln!(
+            self.body,
+            "  {raw} = call i64 @oe_rec_get(ptr {}, i32 {pos})",
+            base.operand
+        )
+        .unwrap();
+        let res = self.emit_ret_from_i64(ty, &raw);
+        Ok(Val { ty, operand: res })
+    }
+
+    /// The declared type of a variable, local first then module-level — the
+    /// order the checker resolves a name in.
+    fn var_ty(&self, name: &str) -> Option<Ty> {
+        self.vars
+            .get(name)
+            .map(|(_, t)| *t)
+            .or_else(|| self.globals.get(name).copied())
     }
 
     /// `[a, b, c]` — one allocation of the right length, then one store per
@@ -1155,6 +1355,30 @@ impl Lowerer<'_> {
     fn eval_index(&mut self, base: &Expr, index: &Expr) -> Result<Val, LowerError> {
         let b = self.eval(base)?;
         let i = self.eval(index)?;
+        // A dictionary is subscripted by key. The miss is reported by the
+        // runtime through the error slot, so a lookup that finds nothing is
+        // still a value the caller can hold.
+        if let Ty::Dict(value) = b.ty {
+            if i.ty != Ty::Text {
+                return err(format!(
+                    "a dictionary is keyed by text, got {}",
+                    i.ty.as_str()
+                ));
+            }
+            self.aggr_used.insert("oe_dict_at");
+            let raw = self.fresh();
+            writeln!(
+                self.body,
+                "  {raw} = call i64 @oe_dict_at(ptr {}, ptr {})",
+                b.operand, i.operand
+            )
+            .unwrap();
+            let res = self.emit_ret_from_i64(value.ty(), &raw);
+            return Ok(Val {
+                ty: value.ty(),
+                operand: res,
+            });
+        }
         if i.ty != Ty::Int {
             return err(format!(
                 "an index counts with `int` values, got {}",
@@ -1199,6 +1423,18 @@ impl Lowerer<'_> {
         match e {
             // Intercepted by `eval_hinted`, which is the only caller.
             Expr::ArrayLit(_) => err("`[]` here does not say what it holds"),
+            Expr::DictLit(_) => err("`{}` here does not say what it holds"),
+            Expr::RecordLit { name, fields } => self.eval_record_lit(name, fields),
+            Expr::Field { base, name } => {
+                let b = self.eval(base)?;
+                match b.ty {
+                    Ty::Record(rec) => self.emit_field_read(rec, &b, name),
+                    other => err(format!(
+                        "`.{name}` reads a field, and {} has none",
+                        other.as_str()
+                    )),
+                }
+            }
             Expr::Index { base, index } => self.eval_index(base, index),
             Expr::IntLit(v) => {
                 if let Ok(v32) = i32::try_from(*v) {
@@ -1420,6 +1656,12 @@ impl Lowerer<'_> {
                 component,
                 property,
             } => {
+                // Variables first, then component ids — the order the checker
+                // resolved it in, or the two would lower different programs.
+                if let Some(Ty::Record(rec)) = self.var_ty(component) {
+                    let b = self.eval(&Expr::Var(component.clone()))?;
+                    return self.emit_field_read(rec, &b, property);
+                }
                 let handle = self.handle_of(component)?;
                 let n = self.cstr(property);
                 let ty = self.property_ty(component, property)?;
@@ -1607,7 +1849,7 @@ impl Lowerer<'_> {
         let mut elem: Option<Elem> = None;
         for (i, a) in args.iter().enumerate() {
             let want = match sig.params[i] {
-                Ty::AnyArray => None,
+                Ty::AnyArray | Ty::AnyDict => None,
                 Ty::AnyElem => elem.map(Elem::ty),
                 t => Some(t),
             };
@@ -1623,10 +1865,20 @@ impl Lowerer<'_> {
                         ))
                     }
                 },
+                Ty::AnyDict => match v.ty.value() {
+                    Some(e) => elem = Some(e),
+                    None => {
+                        return err(format!(
+                            "command `{cmd}` argument {} expects a dictionary, got {}",
+                            i + 1,
+                            v.ty.as_str()
+                        ))
+                    }
+                },
                 Ty::AnyElem => {
                     if Some(v.ty) != elem.map(Elem::ty) {
                         return err(format!(
-                            "command `{cmd}` argument {} does not match what the array holds",
+                            "command `{cmd}` argument {} does not match what the collection holds",
                             i + 1
                         ));
                     }
@@ -1827,6 +2079,12 @@ impl Lowerer<'_> {
                 "oe_ary_set" => "declare void @oe_ary_set(ptr, i32, i64)",
                 "oe_bin_at" => "declare i32 @oe_bin_at(ptr, i32)",
                 "oe_bin_set" => "declare void @oe_bin_set(ptr, i32, i32)",
+                "oe_rec_new" => "declare ptr @oe_rec_new(i32)",
+                "oe_rec_get" => "declare i64 @oe_rec_get(ptr, i32)",
+                "oe_rec_set" => "declare void @oe_rec_set(ptr, i32, i64)",
+                "oe_dict_new" => "declare ptr @oe_dict_new(i32)",
+                "oe_dict_at" => "declare i64 @oe_dict_at(ptr, ptr)",
+                "oe_dict_put" => "declare void @oe_dict_put(ptr, ptr, i64)",
                 other => panic!("undeclared aggregate symbol {other}"),
             };
             writeln!(out, "{decl}").unwrap();
@@ -1848,7 +2106,10 @@ impl Lowerer<'_> {
             writeln!(out, "entry:").unwrap();
             out.push_str(&self.allocas.join(""));
             out.push_str(&self.body);
-            writeln!(out, "  ret i32 0").unwrap();
+            match &self.exit_code {
+                Some(rc) => writeln!(out, "  ret i32 {rc}").unwrap(),
+                None => writeln!(out, "  ret i32 0").unwrap(),
+            }
             writeln!(out, "}}").unwrap();
         }
         out
@@ -2051,6 +2312,78 @@ mod tests {
         assert!(ll.contains("call i64 @oe_ary_get(ptr"), "{ll}");
         assert!(ll.contains("call void @oe_ary_set(ptr"), "{ll}");
         assert!(ll.contains("declare i64 @oe_ary_get(ptr, i32)"), "{ll}");
+    }
+
+    /// A field is reached by POSITION, counting from 1. No field name may
+    /// appear in the output: which record a value is, and where a field sits
+    /// inside it, are both compile-time facts.
+    #[test]
+    fn a_field_is_reached_by_position_and_never_by_name() {
+        let ll = lower(
+            "module m\nrecord point\n  x: int\n  y: int\nend\n\
+             sub main\n  var p: point = point(x: 7, y: 8)\n  p.y = p.x\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("call ptr @oe_rec_new(i32 2)"), "{ll}");
+        // `x` is field 1 and `y` is field 2, in declaration order.
+        assert!(ll.contains("@oe_rec_set(ptr %t0, i32 1,"), "{ll}");
+        assert!(ll.contains("@oe_rec_set(ptr %t0, i32 2,"), "{ll}");
+        // `p.y = p.x` reads field 1 and writes field 2.
+        assert!(ll.contains(", i32 1)\n"), "{ll}");
+        assert!(!ll.contains("\"x\\00\""), "a field name reached the output:\n{ll}");
+    }
+
+    /// Reading a field is a direct helper call, not a marshalled command —
+    /// the same bargain indexing already makes.
+    #[test]
+    fn a_field_read_does_not_go_through_the_slot_abi() {
+        let ll = lower(
+            "module m\nrecord point\n  x: int\nend\n\
+             sub main\n  let p: point = point(x: 1)\n  call print_int(p.x)\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("declare i64 @oe_rec_get(ptr, i32)"), "{ll}");
+        assert!(ll.contains("declare ptr @oe_rec_new(i32)"), "{ll}");
+    }
+
+    /// A record passed to a subroutine is one pointer, so a sub that takes one
+    /// and a sub that returns one need nothing the ABI did not already have.
+    #[test]
+    fn a_record_crosses_a_subroutine_boundary_as_a_pointer() {
+        let ll = lower(
+            "module m\nrecord point\n  x: int\nend\n\
+             sub bump(p: point): point\n  return point(x: p.x + 1)\nend\n\
+             sub main\n  let a: point = bump(point(x: 1))\n  call print_int(a.x)\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("define ptr @oe_user_bump(ptr %p0)"), "{ll}");
+    }
+
+    /// `d["k"]` and `d["k"] = v` are `dict_get`/`dict_set` spelled as a
+    /// subscript, and reach the same direct helpers indexing does.
+    #[test]
+    fn a_dictionary_subscript_calls_the_helper_directly() {
+        let ll = lower(
+            "module m\nsub main\n  var d: int{} = {\"a\": 1}\n               d[\"b\"] = d[\"a\"]\nend\n",
+        )
+        .unwrap();
+        // OE_SDT_DICT_OF(OE_SDT_INT) is not a tag: the value tag alone is what
+        // the dictionary is told to hold.
+        assert!(ll.contains("call ptr @oe_dict_new(i32 3)"), "{ll}");
+        assert!(ll.contains("call i64 @oe_dict_at(ptr"), "{ll}");
+        assert!(ll.contains("call void @oe_dict_put(ptr"), "{ll}");
+        assert!(ll.contains("declare i64 @oe_dict_at(ptr, ptr)"), "{ll}");
+    }
+
+    /// A dictionary reaches a command as a pointer with the dictionary flag
+    /// above its value tag — OE_SDT_DICT_FLAG | OE_SDT_INT.
+    #[test]
+    fn a_dictionary_marshals_as_a_pointer() {
+        let ll = lower(
+            "module m\nsub main\n  var d: int{} = {}\n               call print_int(dict_count(d))\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("store i32 515,"), "{ll}");
     }
 
     /// An array is a pointer in the slot's 8-byte value field, marshalled

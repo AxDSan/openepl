@@ -116,10 +116,12 @@ type, backed by the same language server any other editor can use.
 ### Editor support
 
 `openepl lsp` is a Language Server Protocol server: diagnostics, completion,
-hover, go-to-definition and find-references. Point any LSP-capable editor at
-it — [`docs/editors.md`](docs/editors.md) has ready-made configuration for
-Neovim, VS Code, Helix and Zed, and [`editors/vscode/`](editors/vscode) is a
-working extension with syntax highlighting.
+signature help, hover, go-to-definition and find-references. It resolves kits
+exactly as the compiler does, so an editor never underlines code that builds.
+Point any LSP-capable editor at it — [`docs/editors.md`](docs/editors.md) has
+ready-made configuration for Neovim, VS Code, Helix and Zed, and
+[`editors/vscode/`](editors/vscode) is a working extension with syntax
+highlighting.
 
 ## How it builds
 
@@ -163,10 +165,8 @@ model rather than something added later.
 OpenEPL is young, and honest about it:
 
 - **Linux x86-64 only.** Windows, macOS and arm64 are not supported yet.
-- **No hardened release profile yet.** Programs you build are ordinary native
-  binaries; stripped, non-decompilable output is still to come.
-- **No debugger.** You get a program's output and its exit code in the IDE
-  console, not breakpoints or stepping.
+- **No debugger for the programs you build.** `--release` optimises, hardens
+  and strips; what it cannot do is let you step through the result.
 - The component library is small, and the language is still growing.
 
 What does work, end to end: design a form, wire an event, build it, run it,

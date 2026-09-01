@@ -30,6 +30,12 @@ static const int32_t P_AT[]    = { OE_SDT_ANY_ARRAY, OE_SDT_TEXT };
 static const int32_t P_B[]     = { OE_SDT_BIN };
 static const int32_t P_BI[]    = { OE_SDT_BIN, OE_SDT_INT };
 static const int32_t P_BII[]   = { OE_SDT_BIN, OE_SDT_INT, OE_SDT_INT };
+/* Dictionaries: ANY_DICT/ANY_ELEM for the reason the arrays use their pair —
+ * the dictionary carries its value tag, and the compiler checks it against the
+ * value being stored. */
+static const int32_t P_K[]     = { OE_SDT_ANY_DICT };
+static const int32_t P_KT[]    = { OE_SDT_ANY_DICT, OE_SDT_TEXT };
+static const int32_t P_KTE[]   = { OE_SDT_ANY_DICT, OE_SDT_TEXT, OE_SDT_ANY_ELEM };
 
 #define CMD(name, sym, ret, argc, tags) \
     { name, #sym, ret, argc, tags }
@@ -110,6 +116,15 @@ static const OpenEPL_CommandDesc CORE_COMMANDS[] = {
     CMD("bytes_set",       oe_bin_put,       OE_SDT_NULL, 3, P_BII),
     CMD("bytes_from_text", oe_bin_from_text, OE_SDT_BIN,  1, P_T),
     CMD("text_from_bytes", oe_bin_to_text,   OE_SDT_TEXT, 1, P_B),
+    /* dictionaries — values found by name.  `dict_get` on a key that is not
+     * there answers the sentinel for its value type and sets the error slot;
+     * `dict_has` is the predicate that tells that apart from a stored 0. */
+    CMD("dict_count",  oe_dict_count,  OE_SDT_INT,      1, P_K),
+    CMD("dict_has",    oe_dict_has,    OE_SDT_BOOL,     2, P_KT),
+    CMD("dict_get",    oe_dict_lookup, OE_SDT_ANY_ELEM, 2, P_KT),
+    CMD("dict_set",    oe_dict_store,  OE_SDT_NULL,     3, P_KTE),
+    CMD("dict_remove", oe_dict_erase,  OE_SDT_BOOL,     2, P_KT),
+    CMD("dict_keys",   oe_dict_keys,   OE_SDT_ARRAY_OF(OE_SDT_TEXT), 1, P_K),
     /* event loop */
     CMD("quit",            oe_quit,          OE_SDT_NULL, 0, NULL),
 };

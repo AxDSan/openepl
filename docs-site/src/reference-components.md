@@ -2,9 +2,48 @@
 
 # Components
 
-The visual components the `ui` library provides. Place one in a form, set its
-properties, and bind its events to subroutines — from the designer, or by
-writing it out directly.
+A component has properties you set and events you bind to subroutines — from
+the designer, or by writing it out directly. Most draw a rectangle; some, like
+`timer` and `httpserver`, have no pixels at all and are declared at module
+level rather than inside a form.
+
+
+# Core
+
+## timer
+
+| Property | Type |
+| --- | --- |
+| `interval` | int |
+| `enabled` | bool |
+
+**Events:** `tick`
+
+
+# net
+
+## httpserver
+
+| Property | Type |
+| --- | --- |
+| `port` | int |
+| `bind` | text |
+
+**Events:** `request`
+
+
+# ui
+
+## action
+
+| Property | Type |
+| --- | --- |
+| `name` | text |
+| `text` | text |
+| `shortcut` | text |
+| `enabled` | bool |
+
+**Events:** `execute`
 
 ## button
 
@@ -18,6 +57,8 @@ writing it out directly.
 | `background_color` | text |
 | `color` | text |
 | `border_radius` | int |
+| `enabled` | bool |
+| `action` | text |
 
 **Events:** `click`
 
@@ -105,13 +146,4 @@ writing it out directly.
 | `height` | int |
 
 **Events:** none
-
-## timer
-
-| Property | Type |
-| --- | --- |
-| `interval` | int |
-| `enabled` | bool |
-
-**Events:** `tick`
 
