@@ -1,12 +1,24 @@
 # A shared library: no entry point. Every `sub` is exported under its own name,
 # and `__MODULE___init` initialises module variables when the host is ready.
+# The build writes `__MODULE__.h` beside the library — consumer.cpp includes it.
 module __MODULE__
 target sharedlib
+
+var greetings: int = 0
 
 sub greet
   call print_text("Hello from a shared library.")
 end
 
-sub farewell
-  call print_text("Goodbye.")
+sub add(a: int, b: int): int
+  return a + b
+end
+
+sub greeting(name: text): text
+  greetings = greetings + 1
+  return "Hello, " + name + "!"
+end
+
+sub greetings_so_far: int
+  return greetings
 end

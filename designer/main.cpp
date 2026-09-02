@@ -249,6 +249,10 @@ struct Designer {
     int complete_line = 0, complete_start = 0;
     int complete_index = 0;
     bool complete_open = false;
+    /// The component whose context menu is open, or empty. The menu's rows
+    /// carry the id themselves; this only says whether Escape has a menu to
+    /// close.
+    std::string ctx_id;
     /// Text the next textinput must not insert. The platform follows Return
     /// with a '\n' textinput and may follow Ctrl+Space with a ' ': when the
     /// key went to the popup, the character it carries must not go to the
@@ -611,6 +615,8 @@ void rebuild_tray();
 bool is_selected(const std::string& id);
 void update_tabs();
 void open_handler(const std::string& id, const std::string& event = "");
+void open_context_menu(const std::string& id, int x, int y);
+void close_context_menu();
 
 /// Record the model before a change, so it can be undone. Call BEFORE mutating.
 void push_undo() {
@@ -940,6 +946,23 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".citem.sel{background-color:#e8f0fe}";
     s << ".citem .clabel{font-family:'" << mono << "';color:" << TEXT << "}";
     s << ".citem .cdetail{color:" << TEXT_MUTED << ";margin-left:10px}";
+    // A component's context menu: its events, the way Delphi's offers them.
+    // Above the overlay and the selection anchors, which it opens over.
+    // Rows are 28px: 14px of text and 7px above and below.
+    s << "#ctxmenu{position:absolute;background-color:" << PANEL << ";border:1px " << BORDER
+      << ";border-radius:8px;padding:4px;z-index:90;min-width:200px;font-size:12px;"
+         "box-shadow:#0000001f 0 8px 16px 0px,#0000000a 0 2px 4px 0px}";
+    s << ".cxrow{display:block;height:14px;padding:7px 12px;border-radius:4px;white-space:nowrap;"
+         "color:" << TEXT << ";cursor:pointer}";
+    s << ".cxrow:hover{background-color:" << ACCENT << ";color:#fff}";
+    s << ".cxrow:hover .cxhandler{color:#fff}";
+    s << ".cxhandler{color:" << TEXT_MUTED << "}";
+    s << ".cxhead{display:block;height:14px;padding:7px 12px;white-space:nowrap;color:" << TEXT
+      << ";font-weight:bold}";
+    s << ".cxhead .cxtype{color:" << TEXT_MUTED << ";font-weight:normal;margin-left:6px}";
+    s << ".cxlabel{display:block;height:14px;padding:7px 12px;color:" << TEXT_MUTED
+      << ";font-size:11px}";
+    s << ".cxsep{height:1px;margin:4px 0;background-color:" << BORDER_SOFT << "}";
     // The hover tooltip: what the language server says about the name under
     // the pointer. Monospace, because the first line is a signature.
     s << "#tip{position:absolute;background-color:" << PANEL << ";border:1px " << BORDER
@@ -1209,7 +1232,8 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << "</div><div id='menupop' style='display:none'/>"
          "<div id='editpop' style='display:none'/>"
          "<div id='tip' style='display:none'/>"
-         "<div id='complete' style='display:none'/>";
+         "<div id='complete' style='display:none'/>"
+         "<div id='ctxmenu' style='display:none'/>";
 
     s << "<div id='toolbar'>"
          "<div class='tb' oe-action='save'>" + icon_img("save", 16, "tbi") + "Save</div>"
@@ -3764,6 +3788,69 @@ void open_handler(const std::string& id, const std::string& event) {
     if (line >= 0) jump_to(line + 1, 2);
 }
 
+/* --- the context menu ----------------------------------------------------- */
+
+/// Open the component's menu at the pointer: its name, one row per event the
+/// descriptor declares — with the handler it goes to, when it has one — and
+/// Delete. The rows carry what they do as attributes; the click handler reads
+/// them, so a row is activated through the same path a mouse takes. Every row
+/// also carries its label verbatim, which is what the test verbs read: a test
+/// that matched rendered text would silently pass against a wrong menu.
+void open_context_menu(const std::string& id, int x, int y) {
+    Rml::Element* pop = by_id("ctxmenu");
+    const Component* c = g.model.find(id);
+    if (!pop || !c) return;
+    const CatalogComponent* cc = g.catalog.find(c->type_name);
+    const bool is_form = id == g.model.form_name;
+    std::string html = "<div class='cxhead' oe-cxlabel='" + esc(id + " (" + c->type_name + ")") +
+                       "'>" + esc(id) + "<span class='cxtype'>(" + esc(c->type_name) +
+                       ")</span></div><div class='cxsep'/>"
+                       "<div class='cxlabel' oe-cxlabel='Events'>Events</div>";
+    if (!cc || cc->events.empty()) {
+        html += "<div class='cxlabel' oe-cxlabel='no events'>no events</div>";
+    }
+    for (const auto& ev : cc ? cc->events : std::vector<CatalogEvent>{}) {
+        std::string label = ev.name;
+        std::string inner = esc(ev.name);
+        if (const std::string* h = c->handler(ev.name)) {
+            // U+2192, the arrow, written out the way the tray writes its glyph.
+            label += " \xe2\x86\x92 " + *h;
+            inner += "<span class='cxhandler'> \xe2\x86\x92 " + esc(*h) + "</span>";
+        }
+        html += "<div class='cxrow' oe-cxlabel='" + esc(label) + "' oe-cxid='" + esc(id) +
+                "' oe-cxevent='" + esc(ev.name) + "'>" + inner + "</div>";
+    }
+    if (!is_form) {
+        html += "<div class='cxsep'/><div class='cxrow' oe-cxlabel='Delete' oe-cxdelete='1'>"
+                "Delete</div>";
+    }
+    pop->SetInnerRML(html);
+    pop->SetProperty("display", "block");
+    // Laid out once to learn its size, then placed: a menu near the right or
+    // bottom edge opens to the left of or above the pointer instead of off
+    // the window.
+    g.context->Update();
+    const auto size = pop->GetBox().GetSize(Rml::BoxArea::Border);
+    const auto dim = g.context->GetDimensions();
+    if (x + (int)size.x > dim.x) x -= (int)size.x;
+    if (y + (int)size.y > dim.y) y -= (int)size.y;
+    x = std::max(0, x);
+    y = std::max(0, y);
+    if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+        std::fprintf(stderr, "ctxmenu: %s at %d,%d size %dx%d window %dx%d\n", id.c_str(), x, y,
+                     (int)size.x, (int)size.y, dim.x, dim.y);
+    }
+    pop->SetProperty("left", Rml::String(std::to_string(x) + "px"));
+    pop->SetProperty("top", Rml::String(std::to_string(y) + "px"));
+    g.context->Update();
+    g.ctx_id = id;
+}
+
+void close_context_menu() {
+    g.ctx_id.clear();
+    if (Rml::Element* pop = by_id("ctxmenu")) pop->SetProperty("display", "none");
+}
+
 /* --- events --------------------------------------------------------------- */
 
 struct Listener : Rml::EventListener {
@@ -3898,6 +3985,13 @@ struct Listener : Rml::EventListener {
         }
 
         if (type == "keydown") {
+            // Escape closes the context menu from anywhere — an inspector
+            // field can still hold the focus when a right-click opens it.
+            if (!g.ctx_id.empty() &&
+                ev.GetParameter<int>("key_identifier", 0) == Rml::Input::KI_ESCAPE) {
+                close_context_menu();
+                return;
+            }
             // A key pressed inside a text control belongs to that control.
             // The editor's textarea stops every keydown before it bubbles
             // here today, but that is RmlUi's choice, not a contract: a
@@ -3941,6 +4035,30 @@ struct Listener : Rml::EventListener {
         }
 
         if (type == "click") {
+            // A row of the context menu does what it says; a click anywhere
+            // else closes the menu, and goes on to whatever it was for. The
+            // row's id and event are copied out before the menu closes and
+            // the handler opens, since either may rebuild the chrome.
+            if (!g.ctx_id.empty()) {
+                bool in_menu = false;
+                for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                    if (e->GetId() == "ctxmenu") in_menu = true;
+                    if (e->HasAttribute("oe-cxevent")) {
+                        const std::string id = e->GetAttribute<Rml::String>("oe-cxid", "");
+                        const std::string event = e->GetAttribute<Rml::String>("oe-cxevent", "");
+                        close_context_menu();
+                        open_handler(id, event);
+                        return;
+                    }
+                    if (e->HasAttribute("oe-cxdelete")) {
+                        close_context_menu();
+                        delete_selection();
+                        return;
+                    }
+                }
+                if (in_menu) return;   // the heading or a separator
+                close_context_menu();
+            }
             // A click anywhere dismisses an open menu, unless it opened one.
             bool opened_menu = false;
             for (Rml::Element* e = el; e; e = e->GetParentNode()) {
@@ -4122,6 +4240,36 @@ struct Listener : Rml::EventListener {
                     return;
                 }
                 close_completion();
+            }
+
+            // The right button (1, in RmlUi's numbering) opens a component's
+            // context menu and nothing else: no drag, no double-click
+            // bookkeeping, so a right press followed by a quick left press is
+            // not read as the handler gesture. The component is found the
+            // way a left press finds it — a composite's child, or the form
+            // through its window — and selected first, as Delphi selects what
+            // is right-clicked. A left press outside an open menu closes it;
+            // one on a row leaves it for the click that follows.
+            const int button = ev.GetParameter<int>("button", 0);
+            if (button == 1 || !g.ctx_id.empty()) {
+                std::string id;
+                bool in_menu = false;
+                for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                    if (e->GetId() == "ctxmenu") in_menu = true;
+                    if (e->HasAttribute("oe-jump")) break;
+                    if (e->HasAttribute("oe-id")) id = e->GetAttribute<Rml::String>("oe-id", "");
+                    else if (e->GetId() == "formwin") id = g.model.form_name;
+                    if (!id.empty()) break;
+                }
+                if (in_menu) return;
+                close_context_menu();   // a left press goes on to what it was for
+                if (button == 1) {
+                    if (!id.empty()) {
+                        if (!is_selected(id)) select(id);
+                        open_context_menu(id, mx, my);
+                    }
+                    return;
+                }
             }
 
             // Dock splitters.
@@ -4454,6 +4602,45 @@ void dump_to(const char* path) {
 
 void dump_frame() { dump_to(std::getenv("OPENEPL_DESIGNER_DUMP")); }
 
+/// The element a script verb names: by element id, in the About box, or —
+/// for a component on the canvas or in the tray — by the `oe-id` attribute
+/// it carries instead. `form` is the preview's title bar, which selects the
+/// form as a press on it does.
+Rml::Element* script_target(const std::string& arg) {
+    g.context->Update();
+    Rml::Element* e = by_id(arg == "form" ? "formtitle" : arg.c_str());
+    if (!e && g.about) e = g.about->GetElementById(arg);
+    if (e) return e;
+    for (const char* holder : {"canvas", "traylist"}) {
+        Rml::Element* box = by_id(holder);
+        for (int i = 0; box && i < box->GetNumChildren(); i++) {
+            if (box->GetChild(i)->GetAttribute<Rml::String>("oe-id", "") == arg) {
+                e = box->GetChild(i);
+            }
+        }
+    }
+    return e;
+}
+
+/// Press `button` at the element's centre, through the context: the same
+/// path a mouse takes, so whatever the listener does for the user's press it
+/// does here. A row far down the inspector is clipped by the grid's scroll,
+/// and a press at its centre would land on whatever is drawn there instead —
+/// so it is scrolled on screen first, as the user's scrolling would.
+void press_element(Rml::Element* e, int button, int times = 1) {
+    e->ScrollIntoView(false);
+    g.context->Update();
+    const auto at = e->GetAbsoluteOffset(Rml::BoxArea::Border);
+    const auto size = e->GetBox().GetSize(Rml::BoxArea::Border);
+    const int cx = (int)(at.x + size.x / 2), cy = (int)(at.y + size.y / 2);
+    for (int n = 0; n < times; n++) {
+        g.context->ProcessMouseMove(cx, cy, 0);
+        g.context->ProcessMouseButtonDown(button, 0);
+        g.context->ProcessMouseButtonUp(button, 0);
+        g.context->Update();
+    }
+}
+
 void run_script(const char* script) {
     std::string s(script);
     size_t i = 0;
@@ -4723,46 +4910,50 @@ void run_script(const char* script) {
                 }
             }
             else if (verb == "save") save();
-            else if (verb == "click" || verb == "dblclick") {
+            else if (verb == "click" || verb == "dblclick" || verb == "rclick") {
                 // A real press through the context, on the element with that
                 // id — the same path a mouse takes, so a click on the Code tab
                 // here runs set_view from inside the event listener exactly
                 // as the user's click does. Twice for a double-click, which is
-                // detected by the listener rather than the substrate.
-                g.context->Update();
-                Rml::Element* e = by_id(arg.c_str());
-                if (!e && g.about) e = g.about->GetElementById(arg);
-                if (!e) {
-                    // Components — on the canvas or in the tray — carry their
-                    // id as an attribute rather than as the element's id.
-                    for (const char* holder : {"canvas", "traylist"}) {
-                        Rml::Element* box = by_id(holder);
-                        for (int i = 0; box && i < box->GetNumChildren(); i++) {
-                            if (box->GetChild(i)->GetAttribute<Rml::String>("oe-id", "") == arg) {
-                                e = box->GetChild(i);
-                            }
-                        }
-                    }
-                }
-                if (e) {
-                    // A row far down the inspector is clipped by the grid's
-                    // scroll: a press at its centre would land on whatever is
-                    // drawn there instead. Bring it on screen first, as the
-                    // user's scrolling would.
-                    e->ScrollIntoView(false);
-                    g.context->Update();
-                    const auto at = e->GetAbsoluteOffset(Rml::BoxArea::Border);
-                    const auto size = e->GetBox().GetSize(Rml::BoxArea::Border);
-                    const int cx = (int)(at.x + size.x / 2), cy = (int)(at.y + size.y / 2);
-                    for (int n = 0; n < (verb == "dblclick" ? 2 : 1); n++) {
-                        g.context->ProcessMouseMove(cx, cy, 0);
-                        g.context->ProcessMouseButtonDown(0, 0);
-                        g.context->ProcessMouseButtonUp(0, 0);
-                        g.context->Update();
-                    }
+                // detected by the listener rather than the substrate; with the
+                // right button for rclick, which opens the context menu.
+                if (Rml::Element* e = script_target(arg)) {
+                    press_element(e, verb == "rclick" ? 1 : 0, verb == "dblclick" ? 2 : 1);
                     std::printf("%s: %s\n", verb.c_str(), arg.c_str());
                 } else {
                     std::printf("%s: %s NOT FOUND\n", verb.c_str(), arg.c_str());
+                }
+                std::fflush(stdout);
+            }
+            else if (verb == "menu" || verb == "menupick") {
+                // The context menu's rows, by the labels they carry; menupick
+                // presses the row with that label, as the mouse would.
+                g.context->Update();
+                Rml::Element* pop = by_id("ctxmenu");
+                std::vector<Rml::Element*> rows;
+                for (int i = 0; pop && !g.ctx_id.empty() && i < pop->GetNumChildren(); i++) {
+                    if (pop->GetChild(i)->HasAttribute("oe-cxlabel")) rows.push_back(pop->GetChild(i));
+                }
+                if (verb == "menu") {
+                    if (g.ctx_id.empty()) {
+                        std::printf("menu: closed\n");
+                    } else {
+                        std::printf("menu: open rows=%zu\n", rows.size());
+                        for (Rml::Element* r : rows) {
+                            std::printf("  %s\n", r->GetAttribute<Rml::String>("oe-cxlabel", "").c_str());
+                        }
+                    }
+                } else {
+                    Rml::Element* hit = nullptr;
+                    for (Rml::Element* r : rows) {
+                        if (r->GetAttribute<Rml::String>("oe-cxlabel", "") == arg) hit = r;
+                    }
+                    if (hit) {
+                        press_element(hit, 0);
+                        std::printf("menupick: %s\n", arg.c_str());
+                    } else {
+                        std::printf("menupick: %s NOT FOUND\n", arg.c_str());
+                    }
                 }
                 std::fflush(stdout);
             }

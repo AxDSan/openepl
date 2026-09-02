@@ -10,6 +10,8 @@ USAGE:
   openepl run   <in.oir> [-o <out>]   compile and run
   openepl build|run --release         …optimised, hardened and stripped
   openepl build --os windows          …for Windows x86-64 (needs mingw-w64)
+  openepl build --target sharedlib    …a library, with its C header beside it
+  [--header <path>]                 where the header goes (default <module>.h)
   openepl emit  <in.oir>              print generated LLVM IR
   openepl inspect <in.oir>            dump the form model (for the designer)
   openepl lsp                         language server over stdio (see docs/editors.md)

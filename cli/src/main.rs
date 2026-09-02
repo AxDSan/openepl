@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
+mod header;
 mod kit;
 mod libload;
 mod lsp;
@@ -140,6 +141,8 @@ fn usage() {
          openepl run   <in.oir> [-o <out>]   compile and run\n  \
          openepl build|run --release         …optimised, hardened and stripped\n  \
          openepl build --os windows          …for Windows x86-64 (needs mingw-w64)\n  \
+         openepl build --target sharedlib    …a library, with its C header beside it\n  \
+           [--header <path>]                 where the header goes (default <module>.h)\n  \
          openepl emit  <in.oir>              print generated LLVM IR\n  \
          openepl inspect <in.oir>            dump the form model (for the designer)\n  \
          openepl lsp                         language server over stdio (see docs/editors.md)\n  \
@@ -181,6 +184,9 @@ struct Io {
     release: bool,
     /// The operating system the output is for.
     os: Os,
+    /// Where a library build writes its C header; `None` is `<module>.h`
+    /// beside the artifact.
+    header: Option<PathBuf>,
     /// Where the output goes when the input came through a project file: the
     /// project's directory and name. Naming it after the entry would call
     /// every program `main`, and putting it in the working directory would
@@ -258,6 +264,7 @@ fn parse_io_args(rest: &[String]) -> Result<Io, String> {
     let mut target: Option<Target> = None;
     let mut release = false;
     let mut os = Os::host();
+    let mut header: Option<PathBuf> = None;
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -274,6 +281,11 @@ fn parse_io_args(rest: &[String]) -> Result<Io, String> {
                 })?);
             }
             "--release" => release = true,
+            "--header" => {
+                i += 1;
+                let v = rest.get(i).ok_or("`--header` needs a path")?;
+                header = Some(PathBuf::from(v));
+            }
             "--os" => {
                 i += 1;
                 let v = rest.get(i).ok_or("`--os` needs a name")?;
@@ -297,6 +309,7 @@ fn parse_io_args(rest: &[String]) -> Result<Io, String> {
         target,
         release,
         os,
+        header,
         project_output: None,
     })
 }
@@ -654,6 +667,23 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
         return code;
     }
     eprintln!("openepl: wrote {}", out_bin.display());
+
+    // A library is only usable with its prototypes, so they come out of the
+    // same IR the artifact did. Written after the link, so a failed build
+    // leaves no header claiming exports that were never produced.
+    if !target.is_executable() {
+        let header_path = io
+            .header
+            .unwrap_or_else(|| header::default_path(&out_bin, &module.name));
+        if let Err(e) = std::fs::write(&header_path, header::render(&module)) {
+            eprintln!("openepl: cannot write {}: {e}", header_path.display());
+            return 1;
+        }
+        eprintln!("openepl: wrote {}", header_path.display());
+        if io.os == Os::Windows && target == Target::SharedLib {
+            eprintln!("openepl: wrote {}", implib_path(&out_bin).display());
+        }
+    }
 
     if then_run {
         let status = Command::new(absolutize(&out_bin)).status();
@@ -1251,6 +1281,11 @@ fn mingw_link(
     cmd.arg("-lws2_32");
     if target == Target::SharedLib {
         cmd.arg("-shared");
+        // A Windows consumer links against `greet.lib`, never the DLL itself,
+        // so the import library comes out beside it under the name a
+        // `#pragma comment(lib, "greet.lib")` expects. ld writes it as part
+        // of the same link, from the same export table.
+        cmd.arg(format!("-Wl,--out-implib,{}", implib_path(out_bin).display()));
     } else {
         cmd.arg("-Wl,--gc-sections");
     }
@@ -1269,6 +1304,11 @@ fn mingw_link(
             Err(1)
         }
     }
+}
+
+/// The import library a Windows DLL is linked through: `greet.dll` → `greet.lib`.
+fn implib_path(dll: &Path) -> PathBuf {
+    dll.with_extension("lib")
 }
 
 /// The compile-time half of the Windows release profile: the same three the

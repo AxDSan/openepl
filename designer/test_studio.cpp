@@ -192,6 +192,55 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("a component with no events says so", has(out, "datasource has no events"));
     }
 
+    // The right-click menu: a component's events, the way Delphi offers them.
+    // A wired event says where it goes, and picking it goes there; an
+    // unwired one is wired through the same path a double-click takes.
+    {
+        const std::string out = session(designer, openepl, form,
+                                        "rclick:ok_button;menu;menupick:click \xe2\x86\x92 on_ok_click;menu;caret");
+        check("menu: right-click on a wired button lists its handler",
+              has(out, "menu: open rows=4\n  ok_button (button)\n  Events\n  click \xe2\x86\x92 on_ok_click\n  Delete\n"));
+        check("menu: picking the wired event goes to the code view", has(out, "designer: code view"));
+        check("menu: with the caret inside on_ok_click", has(out, "caret: 39,"));
+        check("menu: and nothing was wired", !has(out, "designer: wired"));
+        check("menu: the pick closed it", has(out, "menupick: click \xe2\x86\x92 on_ok_click\nmenu: closed\n"));
+    }
+    {
+        std::string path;
+        const std::string out = session(designer, openepl, form,
+                                        "add:button;rclick:button1;menu;menupick:click;caret", &path);
+        const std::string file = slurp(path);
+        check("menu: a fresh component's event reads plain", has(out, "  Events\n  click\n  Delete\n"));
+        check("menu: picking it wires the event", has(out, "wired button1.click to button1_click"));
+        check("menu: the handler line is in the component block", has(file, "    on click: button1_click\n"));
+        check("menu: and the stub is in the saved file", has(file, "\nsub button1_click\n  \nend\n"));
+        const long lines = std::count(file.begin(), file.end(), '\n');
+        check("menu: caret is inside the new sub", has(out, "caret: " + std::to_string(lines - 1) + ","));
+    }
+    {
+        const std::string out = session(designer, openepl, form,
+                                        "rclick:form;menu;key:escape;menu;rclick:greeting;menu;click:formtitle;menu");
+        check("menu: right-click on the form lists load, and no Delete",
+              has(out, "menu: open rows=3\n  main_window (form)\n  Events\n  load\n"));
+        check("menu: Escape closes it", has(out, "key: escape focus=body\nmenu: closed\n"));
+        check("menu: a right-click selects the component under it",
+              has(out, "rclick: greeting\nmenu: open rows=4\n  greeting (label)\n"));
+        check("menu: a click elsewhere closes it", has(out, "click: formtitle\nmenu: closed\n"));
+    }
+    {
+        std::string path;
+        const std::string out =
+            session(designer, openepl, form, "rclick:greeting;menupick:Delete;menu", &path);
+        check("menu: Delete removes the component", has(out, "deleted 1 component(s)") && !has(slurp(path), "greeting"));
+    }
+    {
+        const std::string out = session(designer, openepl, "examples/tcpchat.oir", "rclick:link;menu");
+        check("menu: a tray component lists its events",
+              has(out, "menu: open rows=7\n  link (tcpclient)\n  Events\n  connect \xe2\x86\x92 on_connect\n"
+                       "  disconnect \xe2\x86\x92 on_disconnect\n  receive \xe2\x86\x92 on_receive\n"
+                       "  error \xe2\x86\x92 on_error\n  Delete\n"));
+    }
+
     // Hover, definition and references through the language server.
     {
         const std::string out = session(designer, openepl, form, "hoverat:39,10");
