@@ -18,8 +18,8 @@ form main_window
     text = "Click the button."
     left = 40
     top = 50
-    width = 400
-    color = "#ffffff"
+    width = 200
+    height = 24
   end
 
   button ok_button

@@ -176,6 +176,9 @@ struct Designer {
     int toolbox_w = theme::TOOLBOX_W;
     int inspect_w = theme::INSPECT_W;
     int bottom_h = theme::BOTTOM_H;
+    /// The code preview's share of the bottom dock, in pixels; 0 until the
+    /// first layout, which gives it half.
+    int code_w = 0;
     std::string splitting;            // "left", "right", "bottom" or empty
     int split_x0 = 0, split_y0 = 0, split_v0 = 0;
 
@@ -470,7 +473,11 @@ void relayout() {
     place("splitright", g.toolbox_w + centre_w - 3, content_y, 6, content_h);
     place("splitbottom", g.toolbox_w, content_y + TABBAR_H + canvas_h - 3, centre_w, 6);
 
-    const int half = centre_w / 2;
+    if (g.code_w <= 0) g.code_w = centre_w / 2;
+    if (g.code_w > centre_w - 160) g.code_w = centre_w - 160;
+    if (g.code_w < 160) g.code_w = 160;
+    const int half = g.code_w;
+    place("splitmid", g.toolbox_w + half - 3, content_y + TABBAR_H + canvas_h, 6, g.bottom_h);
     if (Rml::Element* e = by_id("codepane")) {
         e->SetProperty("left", "0px");
         e->SetProperty("width", Rml::String(std::to_string(half) + "px"));
@@ -1176,6 +1183,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
 
     // ---- status bar -----------------------------------------------------
     s << ".split{position:absolute;background-color:#00000000}";
+    s << ".split.v{cursor:resize-ew}.split.h{cursor:resize-ns}";
     s << ".split:hover{background-color:" << ACCENT << "}";
     s << "#status{left:0;top:" << (WIN_H - STATUS_H) << "px;width:" << WIN_W << "px;height:"
       << STATUS_H << "px;background-color:" << CHROME << ";border-top:1px " << BORDER
@@ -1208,8 +1216,6 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div class='tb' oe-action='undo'>Undo</div>"
          "<div class='tb' oe-action='redo'>Redo</div>"
          "<div class='sep'/>"
-         "<div class='tb primary' id='btndesigner' oe-view='designer'>Designer</div>"
-         "<div class='tb ghost' id='btncode' oe-view='code'>Code</div>"
          // Activity indicator: an indeterminate bar while the toolchain works,
          // and a pulsing lamp for as long as an app is alive.
          "<div id='activity' style='display:none'><div id='activitylabel'/>"
@@ -1285,7 +1291,8 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // Splitters: thin draggable bars between the docks.
     s << "<div id='splitleft' class='split v'/>"
          "<div id='splitright' class='split v'/>"
-         "<div id='splitbottom' class='split h'/>";
+         "<div id='splitbottom' class='split h'/>"
+         "<div id='splitmid' class='split v'/>";
 
     s << "<div id='status'>Design it, wire it, run it  |  Native binaries, nothing to unpack"
          "<span class='right'><span id='statustext'>Ready</span>   "
@@ -2371,8 +2378,8 @@ void set_view(const std::string& view) {
         g.context->Update();
         refresh_highlight();
     }
-    // Keep the toolbar switcher and the document tabs in step.
-    for (const char* id : {"tabdesigner", "tabcode", "btndesigner", "btncode"}) {
+    // The document tabs show which view is up; there is no second switcher.
+    for (const char* id : {"tabdesigner", "tabcode"}) {
         if (Rml::Element* e = by_id(id)) {
             const bool is_code = std::string(id).find("code") != std::string::npos;
             const bool active = (is_code == code);
@@ -4115,14 +4122,17 @@ struct Listener : Rml::EventListener {
             // Dock splitters.
             {
                 const Rml::String id = el->GetId();
-                if (id == "splitleft" || id == "splitright" || id == "splitbottom") {
+                if (id == "splitleft" || id == "splitright" || id == "splitbottom" ||
+                    id == "splitmid") {
                     g.splitting = id == "splitleft"    ? "left"
                                   : id == "splitright" ? "right"
+                                  : id == "splitmid"   ? "mid"
                                                        : "bottom";
                     g.split_x0 = mx;
                     g.split_y0 = my;
                     g.split_v0 = g.splitting == "left"    ? g.toolbox_w
                                  : g.splitting == "right" ? g.inspect_w
+                                 : g.splitting == "mid"   ? g.code_w
                                                           : g.bottom_h;
                     return;
                 }
@@ -4222,11 +4232,15 @@ struct Listener : Rml::EventListener {
                 int v = g.split_v0;
                 if (g.splitting == "left") v = g.split_v0 + (mx - g.split_x0);
                 else if (g.splitting == "right") v = g.split_v0 - (mx - g.split_x0);
+                else if (g.splitting == "mid") v = g.split_v0 + (mx - g.split_x0);
                 else v = g.split_v0 - (my - g.split_y0);
-                if (v < 120) v = 120;
-                if (v > 640) v = 640;
+                if (g.splitting != "mid") {   // the middle one is clamped by relayout
+                    if (v < 120) v = 120;
+                    if (v > 640) v = 640;
+                }
                 if (g.splitting == "left") g.toolbox_w = v;
                 else if (g.splitting == "right") g.inspect_w = v;
+                else if (g.splitting == "mid") g.code_w = v;
                 else g.bottom_h = v;
                 relayout();
                 return;

@@ -401,7 +401,7 @@ inline std::string control_styles(const std::string& scope = "") {
          * and not on bare `div`, which under the designer's scope would become
          * `#canvas div` and outrank every sized thing the IDE draws inside its
          * own canvas. */
-        p + "div.oe-label { font-size: " + FONT + "; color: " + TEXT + "; }" +
+        p + "div.oe-label { font-size: " + FONT + "; color: " + TEXT + "; overflow: hidden; }" +
 
         /* --- push button -------------------------------------------------
          * The neutral ("secondary") look is the default because OpenEPL has no
