@@ -198,10 +198,10 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("hover on a command shows its signature", has(out, "tip=block") && has(out, "print_text(text)"));
     }
     {
-        const std::string out = session(designer, openepl, grid, "gotodef:104,20;refs:96,7");
-        check("F12 on a local jumps to its declaration", has(out, "definition: caret 102,7"));
+        const std::string out = session(designer, openepl, grid, "gotodef:103,20;refs:95,7");
+        check("F12 on a local jumps to its declaration", has(out, "definition: caret 101,7"));
         check("Shift+F12 lists the wiring line and the declaration",
-              has(out, "references: 2") && has(out, "line 49:18") && has(out, "line 96:5"));
+              has(out, "references: 2") && has(out, "line 49:18") && has(out, "line 95:5"));
     }
 
     // The designer writes only what the descriptor declares. Through a CLI
@@ -316,9 +316,9 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         session(designer, openepl, form, "add:button;click:button1;key:delete", &path);
         check("Delete on the canvas removes the selection", !has(slurp(path), "button1"));
         const std::string out =
-            session(designer, openepl, grid, "view:code;goto:104,20;focus;key:f12;waitdef");
+            session(designer, openepl, grid, "view:code;goto:103,20;focus;key:f12;waitdef");
         check("F12 pressed in the editor jumps to the declaration",
-              has(out, "definition: caret 102,7"));
+              has(out, "definition: caret 101,7"));
     }
 
     // Help > About: every way out closes it, a click inside does not, and a

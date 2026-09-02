@@ -77,9 +77,7 @@ form main_window
     left = 40
     top = 110
     width = 160
-    height = 44
-    background_color = "#4a86e8"
-    border_radius = 8
+    height = 32
     on click: on_ok_click
   end
 end

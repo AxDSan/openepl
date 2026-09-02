@@ -40,7 +40,6 @@ form win
     top = 56
     width = 130
     height = 34
-    background_color = "#1e60d5"
     color = "#ffffff"
     border_radius = 6
   end
@@ -51,7 +50,6 @@ form win
     top = 56
     width = 130
     height = 34
-    background_color = "#1e60d5"
     color = "#ffffff"
     border_radius = 6
   end

@@ -5839,7 +5839,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "designer: cannot load %s\n%s\n", path.c_str(), err.c_str());
         return 1;
     }
-    openepl::welcome::remember_recent(path);
+    // A scripted session is a test, not a person: it must not appear on the
+    // welcome screen the person sees next.
+    if (!std::getenv("OPENEPL_DESIGNER_SCRIPT") && !std::getenv("OPENEPL_DESIGNER_DUMP"))
+        openepl::welcome::remember_recent(path);
 
     // The language server, started on the project's directory so it finds the
     // runtime and the component library the same way the compiler does.

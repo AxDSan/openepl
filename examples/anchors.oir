@@ -19,7 +19,6 @@ form win
     top     = 230
     width   = 120
     height  = 36
-    background_color = "#4a86e8"
     color   = "#ffffff"
     anchors = "right,bottom"
     on click: on_ok

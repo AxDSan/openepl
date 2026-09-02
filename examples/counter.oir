@@ -27,7 +27,6 @@ form main_window
     top    = 110
     width  = 160
     height = 44
-    background_color = "#4a86e8"
     border_radius = 8
     on click: on_add
   end
