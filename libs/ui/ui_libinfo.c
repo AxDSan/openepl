@@ -37,6 +37,9 @@ static const OpenEPL_PropertyDesc LABEL_PROPS[] = {
     { "left",  OE_SDT_INT,  "0",       NULL },
     { "top",   OE_SDT_INT,  "0",       NULL },
     { "width", OE_SDT_INT,  "200",     NULL },
+    /* A label the designer can size only sideways is a label the designer
+     * writes a `height` into anyway, and the build then rejects. */
+    { "height", OE_SDT_INT, "24",      NULL },
     { "color", OE_SDT_TEXT, "#ffffff", "color" },
 };
 
@@ -57,6 +60,8 @@ static const OpenEPL_PropertyDesc CHECK_PROPS[] = {
     { "checked", OE_SDT_BOOL, "false",    NULL },
     { "left",    OE_SDT_INT,  "0",        NULL },
     { "top",     OE_SDT_INT,  "0",        NULL },
+    { "width",   OE_SDT_INT,  "140",      NULL },
+    { "height",  OE_SDT_INT,  "24",       NULL },
     { "color",   OE_SDT_TEXT, "#1f2328",  "color" },
 };
 static const OpenEPL_EventDesc CHECK_EVENTS[] = { { "change", 0, NULL } };
@@ -146,6 +151,8 @@ static const OpenEPL_PropertyDesc RADIO_PROPS[] = {
     { "checked", OE_SDT_BOOL, "false",   NULL },
     { "left",    OE_SDT_INT,  "0",       NULL },
     { "top",     OE_SDT_INT,  "0",       NULL },
+    { "width",   OE_SDT_INT,  "140",     NULL },
+    { "height",  OE_SDT_INT,  "24",      NULL },
     { "color",   OE_SDT_TEXT, "#1f2328", "color" },
 };
 static const OpenEPL_EventDesc RADIO_EVENTS[] = { { "change", 0, NULL } };

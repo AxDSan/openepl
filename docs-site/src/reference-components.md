@@ -72,6 +72,8 @@ list.
 | `checked` | bool |
 | `left` | int |
 | `top` | int |
+| `width` | int |
+| `height` | int |
 | `color` | text |
 
 **Events:** `change`
@@ -177,6 +179,7 @@ list.
 | `left` | int |
 | `top` | int |
 | `width` | int |
+| `height` | int |
 | `color` | text |
 
 **Events:** none
@@ -231,6 +234,8 @@ list.
 | `checked` | bool |
 | `left` | int |
 | `top` | int |
+| `width` | int |
+| `height` | int |
 | `color` | text |
 
 **Events:** `change`
