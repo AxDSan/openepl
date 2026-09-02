@@ -8,7 +8,9 @@
 <link rel="icon" href="assets/openepl-icon.png">
 <meta property="og:title" content="OpenEPL">
 <meta property="og:description" content="Draw an app. Wire an event. Ship a native binary.">
-<meta property="og:image" content="assets/screenshot-designer.png">
+<meta property="og:url" content="https://axdsan.github.io/openepl/">
+<meta property="og:image" content="https://axdsan.github.io/openepl/assets/screenshot-designer.png">
+<meta name="twitter:card" content="summary_large_image">
 <style>
 :root {
   --ink: #1f2328;
@@ -51,7 +53,7 @@ a:hover { text-decoration: underline; }
 .nav .brand { display: flex; align-items: center; gap: 9px; font-weight: 600; color: #fff; }
 .nav .brand img { width: 22px; height: 22px; }
 .nav .links { margin-left: auto; display: flex; gap: 22px; align-items: center; }
-.nav .links a { color: #c8cee0; font-size: 15px; }
+.nav .links a { color: #c8cee0; font-size: 15px; white-space: nowrap; flex-shrink: 0; }
 .nav .links a:hover { color: #fff; text-decoration: none; }
 .nav .cta {
   background: var(--accent); color: #fff !important;
@@ -114,7 +116,10 @@ h2 {
 }
 .lede { color: var(--muted); max-width: 620px; margin: 0 0 34px; }
 
-.cards { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+/* Two by two: "four things" should not read as three and a straggler,
+   which is what auto-fit produced at the page's own width. */
+.cards { display: grid; gap: 20px; grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 640px) { .cards { grid-template-columns: 1fr; } }
 .card {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 24px;
@@ -169,6 +174,8 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
      off the side of the screen. Keep the two that matter. */
   .nav .links .secondary { display: none; }
   .nav .links { gap: 14px; }
+  .nav .links a { font-size: 14px; }
+  .nav .cta { padding: 6px 12px; }
   .nav .wrap { gap: 12px; padding: 0 16px; }
   .hero { padding: 56px 0 72px; }
   .shot { margin-top: -36px; }
@@ -289,7 +296,8 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
   <span class="k">call</span> print_text(<span class="s">"Hello from OpenEPL."</span>)
 
   <span class="k">let</span> answer: <span class="k">int</span> = <span class="n">6</span> * <span class="n">7</span>
-  <span class="k">call</span> print_text(<span class="s">"six times seven is "</span> + int_to_text(answer))
+  <span class="k">let</span> shown: <span class="k">text</span> = int_to_text(answer)
+  <span class="k">call</span> print_text(<span class="s">"six times seven is "</span> + shown)
 <span class="k">end</span></pre>
   </div>
 </section>
@@ -321,12 +329,13 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
   <div class="wrap">
     <h2>Editing, with the compiler helping</h2>
     <p class="lede">
-      Syntax highlighting and live diagnostics in the IDE, backed by a language
-      server any editor can use — completion, signature help, hover,
-      go-to-definition and find-references in VS Code, Neovim, Helix and Zed.
-      A diagnostic underlines the name it is about and names the fix: the
-      <code>use</code> line to add, the name you probably meant, the handler
-      header to paste.
+      Studio completes what you type, shows a command's signature on hover,
+      jumps to a definition and lists every reference — and double-clicking a
+      control writes its handler. The same language server gives any editor
+      the same: completion, signature help, hover, go-to-definition and
+      find-references in VS Code, Neovim, Helix and Zed. A diagnostic
+      underlines the name it is about and names the fix: the <code>use</code>
+      line to add, the name you probably meant, the handler header to paste.
     </p>
     <img src="assets/screenshot-editor.png" alt="The OpenEPL code editor with syntax highlighting and a problems pane"
          style="width:100%;border-radius:12px;border:1px solid var(--line);box-shadow:0 10px 30px rgba(16,22,48,0.14)">
