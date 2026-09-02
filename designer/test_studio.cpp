@@ -357,7 +357,7 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("title bar: the form's own size is kept", has(out, "form=480x300"));
         check("title bar: a component at top=40 is drawn 40px below it",
               has(out, "greeting=40,40") && has(out, "ok_button=40,110"));
-        check("title bar: the client area starts under it", has(out, "title=32 client_top=33"));
+        check("title bar: the client area starts under it", has(out, "title=36 client_top=37"));
         check("title bar: no icon set falls back to the app's", has(out, "icon=openepl-icon-64.png"));
         check("a session that does nothing leaves the file byte-identical", slurp(path) == slurp(form));
     }
@@ -389,8 +389,8 @@ static void test_sessions(const std::string& openepl, const std::string& designe
     // into the handler.
     {
         const std::string out = session(designer, openepl, form, "badges;select:greeting;wiring;select:ok_button;wiring");
-        check("badge: a wired component shows event and handler, above it",
-              has(out, "badge: ok_button click\xe2\x86\x92on_ok_click at 40,86"));
+        check("badge: a wired component shows event and handler, centred above it",
+              has(out, "badge: ok_button click\xe2\x86\x92on_ok_click at 120,69"));
         check("badge: an unwired one shows none", !has(out, "badge: greeting"));
         check("wiring: an unwired component says how to wire it",
               has(out, "wiring: HANDLER WIRINGNot linked \xe2\x80\x94 double-click to create"));
@@ -522,6 +522,24 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("anchors: clicking it again removes it", has(out, " [right ] anchors=right\n"));
         check("anchors: a typed value lights its boxes", has(out, " [top bottom ] anchors=bottom, top\n"));
         check("anchors: the value is saved as text", has(slurp(path), "anchors = \"bottom, top\""));
+    }
+
+    // Typing in an inspector field: every keystroke used to rebuild the
+    // grid under the caret, so the field lost focus after one character —
+    // and a fast typist crashed Studio inside the text widget.
+    {
+        std::string path;
+        const std::string out = session(designer, openepl, form,
+                                        "clickform;focusprop:title;typein: hello there;focused;"
+                                        "select:ok_button;focusprop:text;typein:!!!!!!!!!!!!!!!!;focused",
+                                        &path);
+        check("typing: the title field keeps focus through a whole phrase",
+              has(out, "focused: title value=OpenEPL hello there"));
+        check("typing: a burst of keystrokes neither crashes nor loses the field",
+              has(out, "focused: text value=Click me!!!!!!!!!!!!!!!!"));
+        check("typing: what was typed reached the file",
+              has(slurp(path), "title = \"OpenEPL hello there\"") &&
+                  has(slurp(path), "text = \"Click me!!!!!!!!!!!!!!!!\""));
     }
 
     // The window's own frame: no window-manager frame over it, and the green

@@ -24,12 +24,25 @@ inline std::string write_dot_tile(const std::string& path, int spacing = 10) {
         32, 0x20 /* top-left origin */
     };
     std::fwrite(header, 1, sizeof header, f);
+    // One dot per tile, 1.5px across, in the border colour (#d0d7de),
+    // centred on a pixel so it reads as a dot of that colour with a faint
+    // rim rather than a pale square. Each pixel's alpha is the share of it
+    // the disc covers — sampled, not guessed. Straight alpha: the renderer's
+    // TGA loader premultiplies on the way in.
+    const double r = 0.75, cx = 0.5, cy = 0.5;
     for (int y = 0; y < spacing; y++) {
         for (int x = 0; x < spacing; x++) {
-            // One soft dot per tile, in the border colour (#d0d7de).
-            const bool dot = (x == 0 && y == 0);
-            const unsigned char px[4] = {0xde, 0xd7, 0xd0, (unsigned char)(dot ? 0xff : 0x00)};
-            std::fwrite(px, 1, 4, f);
+            int inside = 0;
+            const int n = 8;
+            for (int sy = 0; sy < n; sy++) {
+                for (int sx = 0; sx < n; sx++) {
+                    const double px = x + (sx + 0.5) / n, py = y + (sy + 0.5) / n;
+                    if ((px - cx) * (px - cx) + (py - cy) * (py - cy) <= r * r) inside++;
+                }
+            }
+            const double a = (double)inside / (n * n);
+            const unsigned char pix[4] = {0xde, 0xd7, 0xd0, (unsigned char)(0xff * a + 0.5)};
+            std::fwrite(pix, 1, 4, f);
         }
     }
     std::fclose(f);

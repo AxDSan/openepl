@@ -15,6 +15,7 @@
  */
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
+#include <RmlUi/Core/Elements/ElementFormControlInput.h>
 #include <RmlUi/Core/Elements/ElementFormControlTextArea.h>
 #include <cstdio>
 #include <cstdlib>
@@ -100,6 +101,9 @@ struct Designer {
     std::string openepl_bin = "./target/debug/openepl";
     std::string selected;
     std::string inspector_tab = "props";
+    /// The inspector needs rebuilding, but a field in it has focus. It is
+    /// rebuilt once focus leaves; see refresh_all().
+    bool inspector_stale = false;
     /// Every component the toolchain reports, with the section it files under.
     /// Built once at startup from `openepl kits` and `openepl commands`, so a
     /// kit installed after Studio was compiled still appears in the toolbox.
@@ -956,26 +960,33 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // element, not through CSS properties on the control itself.
     s << "#fullcode selection{background-color:#cfe3ff;color:" << TEXT << "}";
     s << "#canvasarea{left:0;top:" << TABBAR_H << "px;width:" << centre_w << "px;height:" << canvas_h
-      << "px;background-color:" << CANVAS << ";decorator:image(\"" << dot_tile << "\" repeat)}";
+      << "px;background-color:" << CANVAS_GRID << ";decorator:image(\"" << dot_tile << "\" repeat)}";
 
-    // The form preview, drawn as the window it will become. The title bar is
-    // the form's own colour with no rule under it, the way a current Windows
-    // window is; it is decoration only, and the client area under it is
-    // where the file's coordinates start.
-    s << "#formwin{left:60px;top:40px;border-radius:8px;border:1px #b9c0c8;background-color:#ffffff;"
-         "box-shadow:#0000002e 0 10px 30px 0px, #00000014 0 2px 6px 0px}";
-    s << "#formtitle{position:relative;height:" << FORM_TITLE_H
-      << "px;border-top-left-radius:7px;border-top-right-radius:7px;font-size:12px;"
-         "white-space:nowrap;overflow:hidden}";
-    s << "#formicon{position:absolute;left:10px;top:8px;width:16px;height:16px}";
-    s << "#formtitletext{position:absolute;left:34px;top:9px}";
-    // The three glyphs are the width a Windows caption button is, so the
-    // preview's proportions are the built window's. Only the close button
-    // takes a colour on hover: the other two are decoration that darkens.
-    s << ".wbtn{position:absolute;top:0;width:46px;height:" << FORM_TITLE_H
-      << "px;text-align:center;padding-top:8px;font-size:11px}";
-    s << ".wbtn:hover{background-color:#00000018}";
-    s << ".wbtn.close:hover{background-color:#c42b1c;color:#ffffff}";
+    // The form preview, drawn as the window it will become: a Windows 11
+    // frame — 8px corners, a hairline border, a soft drop shadow. The title
+    // bar is the form's own colour, seamless with the client area and parted
+    // from it by one rule; it is decoration only, and the client area under
+    // it is where the file's coordinates start.
+    s << "#formwin{left:60px;top:40px;border-radius:8px;border:1px " << BORDER
+      << ";background-color:#ffffff;"
+         "box-shadow:#0000001a 0 10px 25px -5px, #0000000d 0 8px 10px -6px}";
+    s << "#formtitle{position:relative;height:" << (FORM_TITLE_H - 1)
+      << "px;border-bottom:1px #e5e7eb;border-top-left-radius:7px;border-top-right-radius:7px;"
+         "font-size:13px;font-weight:bold;white-space:nowrap;overflow:hidden}";
+    s << "#formicon{position:absolute;left:14px;top:" << (FORM_TITLE_H / 2 - 8) << "px;width:16px;height:16px}";
+    s << "#formtitletext{position:absolute;left:38px;top:" << (FORM_TITLE_H / 2 - 8) << "px}";
+    // The caption buttons are glyphs alone — no plate behind them, on hover
+    // or otherwise — 10px across with 12px between, 14px in from the edge.
+    // Minimize and maximize are drawn, so they are exactly the shapes and
+    // sizes a caption shows; the close cross is the multiplication sign the
+    // loaded face has, in the same colour.
+    s << ".wbtn{position:absolute;top:0;width:22px;height:" << FORM_TITLE_H
+      << "px;text-align:center;padding-top:" << (FORM_TITLE_H / 2 - 8) << "px;font-size:13px;font-weight:normal}";
+    s << ".wbtn div{position:absolute;left:6px;box-sizing:border-box}";
+    // RCSS has no `currentcolor`: the drawn glyphs take the text colour by
+    // name here, and rebuild_canvas recolours them with the title's text.
+    s << ".wbtn .mini{top:" << (FORM_TITLE_H / 2) << "px;width:10px;height:1px;background-color:" << TEXT << "}";
+    s << ".wbtn .maxi{top:" << (FORM_TITLE_H / 2 - 5) << "px;width:10px;height:10px;border:1px " << TEXT << "}";
     // Components on the canvas get the SAME default styling as in the built
     // app, from the shared mapping — otherwise the preview lies.
     // SCOPED to the canvas: these rules include `div{position:absolute}`, which
@@ -995,7 +1006,10 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // whatever is above its component, and one that took every click would
     // make the component under it impossible to select.
     s << ".handle,.fgrip,.badge.live{pointer-events:auto}";
-    s << ".selbox{border:1px " << ACCENT << "}";
+    // The selection's box and anchors are sized as border boxes, so the
+    // numbers placing them are the numbers on screen.
+    s << ".selbox,.handle{box-sizing:border-box}";
+    s << ".selbox{border:1.5px " << SELECT << "}";
     // The anchors editor: a box a side, before the field, lit when set.
     s << ".anchbox{display:inline-block;width:88px;height:24px;vertical-align:top;margin-right:6px}";
     s << ".anch{display:inline-block;width:18px;height:18px;margin:2px 2px 0 0;text-align:center;"
@@ -1004,13 +1018,12 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".anch:hover{border:1px " << ACCENT << "}";
     s << ".anch.on{background-color:" << ACCENT << ";border:1px " << ACCENT << ";color:#ffffff}";
     s << ".prow input.withanch{display:inline-block;width:" << (INSPECT_W - 40 - 94) << "px}";
-    s << ".selbox.alt{border:1px #9db8ea}";
+    s << ".selbox.alt{border:1.5px #8fc0f5}";
     s << ".guide{background-color:#ff4d9a}";
     s << ".fgrip{background-color:#00000000}";
-    s << ".fgrip:hover{background-color:" << ACCENT << "}";
-    s << ".fgrip.corner{background-color:" << BORDER << ";border-radius:2px}";
-    s << ".fgrip.corner:hover{background-color:" << ACCENT << "}";
-    s << ".handle{width:7px;height:7px;background-color:#ffffff;border:1px " << ACCENT << "}";
+    s << ".fgrip:hover{background-color:" << SELECT << "}";
+    s << ".fgrip.corner{border-radius:2px}";
+    s << ".handle{width:6px;height:6px;background-color:" << SELECT << ";border:1px #ffffff}";
     // Cursor per anchor, so the resize direction is obvious before clicking.
     s << ".handle.nw,.handle.se{cursor:resize-nwse}";
     s << ".handle.ne,.handle.sw{cursor:resize-nesw}";
@@ -1018,19 +1031,23 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".handle.e,.handle.w{cursor:resize-ew}";
     s << ".fgrip.e{cursor:resize-ew}.fgrip.s{cursor:resize-ns}";
     s << ".fgrip.corner{cursor:resize-nwse}";
-    s << ".badge{background-color:" << ACCENT << ";color:#fff;font-size:11px;padding:3px 8px 3px 7px;"
-         "border-radius:4px;white-space:nowrap;cursor:pointer}";
-    s << ".badge:hover{background-color:#174ead}";
+    // A faint pill, the selection's blue on white, centred over the
+    // component it wires: `left` is the component's middle and the badge
+    // is shifted back by half its own width, whatever that turns out to be.
+    s << ".badge{box-sizing:border-box;height:" << BADGE_H << "px;background-color:#ffffffe6;color:"
+      << SELECT << ";font-size:11px;padding:2px 8px 0 7px;border:1px " << SELECT
+      << ";border-radius:10px;white-space:nowrap;cursor:pointer;transform:translateX(-50%)}";
+    s << ".badge:hover{background-color:#ddf4ff}";
     // The link glyph is drawn, not typed: no face the IDE loads has one, and
     // a character the font lacks renders as nothing at all.
     // Selected by id as well as class: the canvas's own rule makes every div
     // in it absolute, and the glyph has to hold its place in the line.
     s << "#overlay .chain{display:inline-block;position:relative;width:15px;height:10px;"
          "margin-right:5px;vertical-align:-1px}";
-    s << "#overlay .chain div{position:absolute;width:6px;height:4px;border:1px #ffffff;"
+    s << "#overlay .chain div{position:absolute;width:6px;height:4px;border:1px " << SELECT << ";"
          "border-radius:3px}";
     s << "#overlay .chain .a{left:0;top:0}#overlay .chain .b{left:6px;top:3px}";
-    s << ".badge .ev{color:#d6e4ff;margin-right:4px}.badge .arrow{margin:0 5px 0 1px}";
+    s << ".badge .ev{margin-right:4px}.badge .arrow{margin:0 5px 0 1px}";
 
     // ---- non-visual component tray --------------------------------------
     s << "#tray{position:absolute;left:0;top:" << (canvas_h - TRAY_H) << "px;width:" << centre_w
@@ -1223,13 +1240,13 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div id='codehl'/><textarea id='fullcode' wrap='nowrap'/></div>"
          "<div id='canvasarea'>"
          "<div id='formwin'>"
-         // Glyphs the loaded faces have: a box-drawing dash, a ballot box
-         // and a multiplication cross. The Windows caption glyphs proper are
+         // Minimize and maximize are drawn; close is the multiplication
+         // cross the loaded face has. The Windows caption glyphs proper are
          // in a private font nothing here can load.
          "<div id='formtitle'><img id='formicon'/><span id='formtitletext'>Form</span>"
-         "<div class='wbtn' style='right:92px'>\xe2\x94\x80</div>"
-         "<div class='wbtn' style='right:46px'>\xe2\x98\x90</div>"
-         "<div class='wbtn close' style='right:0'>\xe2\x9c\x95</div></div>"
+         "<div class='wbtn' style='right:52px'><div class='mini'/></div>"
+         "<div class='wbtn' style='right:30px'><div class='maxi'/></div>"
+         "<div class='wbtn close' style='right:8px'>\xe2\x9c\x95</div></div>"
          "<div id='canvas'><div id='overlay'/></div></div>"
          // The tray. A timer, an action or a server has properties to edit and
          // no rectangle to click, so it needs a place that is not the canvas —
@@ -1391,6 +1408,7 @@ static void announce_window_size(SDL_Window* win, int w, int h) {
 }
 
 void rebuild_canvas() {
+    using theme::SEL_GAP; using theme::HANDLE_PX; using theme::BADGE_H; using theme::BADGE_GAP;
     Rml::Element* formwin = by_id("formwin");
     Rml::Element* canvas = by_id("canvas");
     Rml::Element* overlay = by_id("overlay");
@@ -1407,8 +1425,20 @@ void rebuild_canvas() {
     const std::string form_bg = bg && is_hex_colour(*bg) ? *bg : "#ffffff";
     canvas->SetProperty("background-color", form_bg);
     if (Rml::Element* t = by_id("formtitle")) {
+        const bool dark = dark_colour(form_bg);
+        const char* ink = dark ? "#ffffff" : theme::TEXT;
         t->SetProperty("background-color", form_bg);
-        t->SetProperty("color", dark_colour(form_bg) ? "#ffffff" : theme::TEXT);
+        t->SetProperty("color", ink);
+        // The rule under the title bar parts it from the client area; on a
+        // dark form it is a lighter line, on a light one a darker.
+        t->SetProperty("border-bottom-color", dark ? "#ffffff2e" : "#e5e7eb");
+        // The drawn caption glyphs carry no text to inherit the colour.
+        Rml::ElementList glyphs;
+        t->GetElementsByClassName(glyphs, "mini");
+        for (Rml::Element* e : glyphs) e->SetProperty("background-color", ink);
+        glyphs.clear();
+        t->GetElementsByClassName(glyphs, "maxi");
+        for (Rml::Element* e : glyphs) e->SetProperty("border-color", ink);
     }
     if (Rml::Element* t = by_id("formtitletext")) {
         const std::string* title = g.model.form.property("title");
@@ -1555,10 +1585,10 @@ void rebuild_canvas() {
         Rml::Element* d = overlay->AppendChild(g.doc->CreateElement("div"));
         d->SetProperty("position", "absolute");
         d->SetAttribute("class", Rml::String("selbox alt"));
-        d->SetProperty("left", Rml::String(std::to_string(sx - 1) + "px"));
-        d->SetProperty("top", Rml::String(std::to_string(sy - 1) + "px"));
-        d->SetProperty("width", Rml::String(std::to_string(sw + 2) + "px"));
-        d->SetProperty("height", Rml::String(std::to_string(sh + 2) + "px"));
+        d->SetProperty("left", Rml::String(std::to_string(sx - SEL_GAP) + "px"));
+        d->SetProperty("top", Rml::String(std::to_string(sy - SEL_GAP) + "px"));
+        d->SetProperty("width", Rml::String(std::to_string(sw + 2 * SEL_GAP) + "px"));
+        d->SetProperty("height", Rml::String(std::to_string(sh + 2 * SEL_GAP) + "px"));
     }
 
     // The form itself, selected: its frame takes the accent, and a box just
@@ -1566,7 +1596,7 @@ void rebuild_canvas() {
     // around it would not be seen. No anchors: the form is resized by its own
     // grips, and it has no position on the canvas to drag.
     const bool form_selected = !g.selected.empty() && g.selected == g.model.form_name;
-    formwin->SetProperty("border-color", form_selected ? theme::ACCENT : "#b9c0c8");
+    formwin->SetProperty("border-color", form_selected ? theme::SELECT : theme::BORDER);
     if (form_selected) {
         Rml::Element* d = overlay->AppendChild(g.doc->CreateElement("div"));
         d->SetId("formsel");
@@ -1574,8 +1604,8 @@ void rebuild_canvas() {
         d->SetAttribute("class", Rml::String("selbox"));
         d->SetProperty("left", "0px");
         d->SetProperty("top", "0px");
-        d->SetProperty("width", Rml::String(std::to_string(fw - 2) + "px"));
-        d->SetProperty("height", Rml::String(std::to_string(fh - 2) + "px"));
+        d->SetProperty("width", Rml::String(std::to_string(fw) + "px"));
+        d->SetProperty("height", Rml::String(std::to_string(fh) + "px"));
     }
 
     // Selection chrome lives in an overlay so it never perturbs the components
@@ -1605,9 +1635,12 @@ void rebuild_canvas() {
             if (ph) d->SetProperty("height", Rml::String(std::to_string(ph) + "px"));
             return d;
         };
-        place("selbox", ox + x - 1, oy + y - 1, w + 2, h + 2);
-        const int hx[3] = {ox + x - 4, ox + x + w / 2 - 4, ox + x + w - 4};
-        const int hy[3] = {oy + y - 4, oy + y + h / 2 - 4, oy + y + h - 4};
+        // The box sits SEL_GAP outside the component; each anchor is centred
+        // on the box's edge.
+        place("selbox", ox + x - SEL_GAP, oy + y - SEL_GAP, w + 2 * SEL_GAP, h + 2 * SEL_GAP);
+        const int hs = HANDLE_PX / 2;
+        const int hx[3] = {ox + x - SEL_GAP - hs, ox + x + w / 2 - hs, ox + x + w + SEL_GAP - hs};
+        const int hy[3] = {oy + y - SEL_GAP - hs, oy + y + h / 2 - hs, oy + y + h + SEL_GAP - hs};
         static const char* EDGE[3][3] = {{"nw", "w", "sw"}, {"n", "", "s"}, {"ne", "e", "se"}};
         // Only the anchors whose drag can be written. A handle that resizes
         // vertically on a component with no `height` offers a gesture whose
@@ -1632,9 +1665,9 @@ void rebuild_canvas() {
 
     // The wiring, on the canvas: every component with a handler carries a
     // badge naming the event and the subroutine, and the badge is a way into
-    // that subroutine. Above the component, or below it when the component
-    // sits too close to the top — the client area clips what it holds, and
-    // a badge clipped to nothing is wiring the user cannot see.
+    // that subroutine. Centred above the component, or below it when the
+    // component sits too close to the top — the client area clips what it
+    // holds, and a badge clipped to nothing is wiring the user cannot see.
     for (const auto& comp : g.model.children) {
         const std::pair<std::string, std::string>* hnd = nullptr;
         for (const auto& h : comp.handlers) {
@@ -1648,8 +1681,9 @@ void rebuild_canvas() {
         b->SetAttribute("class", Rml::String(comp.id == g.selected ? "badge live" : "badge"));
         b->SetAttribute("oe-jump", comp.id);
         b->SetAttribute("oe-event", hnd->first);
-        b->SetProperty("left", Rml::String(std::to_string(x) + "px"));
-        b->SetProperty("top", Rml::String(std::to_string(y >= 24 ? y - 24 : y + h + 4) + "px"));
+        const int above = y - SEL_GAP - BADGE_GAP - BADGE_H;
+        b->SetProperty("left", Rml::String(std::to_string(x + w / 2) + "px"));
+        b->SetProperty("top", Rml::String(std::to_string(above >= 0 ? above : y + h + SEL_GAP + BADGE_GAP) + "px"));
         b->SetInnerRML("<div class='chain'><div class='a'/><div class='b'/></div><span class='ev'>" +
                        esc(hnd->first) + "</span><span class='arrow'>\xe2\x86\x92</span>" +
                        esc(hnd->second));
@@ -2317,10 +2351,54 @@ void set_view(const std::string& view) {
     set_status(code ? "code view" : "designer view");
 }
 
+/// Is the keyboard focus inside the inspector's property grid?
+bool focus_in_grid() {
+    if (!g.context) return false;
+    for (Rml::Element* e = g.context->GetFocusElement(); e; e = e->GetParentNode()) {
+        if (e->GetId() == "grid") return true;
+    }
+    return false;
+}
+
+/// Rebuild the inspector that refresh_all() put off, and give the caret back
+/// to the field it was in, where it was — so typing `left,right` into the
+/// anchors field lights the boxes as it goes without the caret jumping.
+void flush_inspector() {
+    if (!g.inspector_stale) return;
+    g.inspector_stale = false;
+    std::string name;
+    int s0 = 0, s1 = 0;
+    if (focus_in_grid()) {
+        Rml::Element* f = g.context->GetFocusElement();
+        name = f->GetAttribute<Rml::String>("name", "");
+        if (auto* in = dynamic_cast<Rml::ElementFormControlInput*>(f)) {
+            Rml::String sel;
+            in->GetSelection(&s0, &s1, &sel);
+        }
+    }
+    rebuild_inspector();
+    if (name.empty()) return;
+    Rml::Element* grid = by_id("grid");
+    Rml::ElementList inputs;
+    if (grid) grid->GetElementsByTagName(inputs, "input");
+    for (Rml::Element* e : inputs) {
+        if (e->GetAttribute<Rml::String>("name", "") != name) continue;
+        e->Focus();
+        if (auto* in = dynamic_cast<Rml::ElementFormControlInput*>(e)) in->SetSelectionRange(s0, s1);
+        break;
+    }
+}
+
 void refresh_all() {
     rebuild_canvas();
     rebuild_tray();
-    rebuild_inspector();
+    // Not the inspector while the user is typing in it: rebuilding the grid
+    // destroys the input RmlUi is still delivering the keystroke to — the
+    // caret lost after one character at best, a use-after-free inside the
+    // text widget at worst (a SIGSEGV in WidgetTextInput::MoveToCursor).
+    // The frame loop rebuilds it once focus has left the grid.
+    if (focus_in_grid()) g.inspector_stale = true;
+    else rebuild_inspector();
     rebuild_code();
 }
 
@@ -3746,6 +3824,15 @@ struct Listener : Rml::EventListener {
                 push_undo();
                 comp->set_property(name, value);
                 mark_dirty();
+                // The swatch beside a colour field follows the text at once,
+                // since the grid itself is not rebuilt under the caret.
+                if (Rml::Element* row = src->GetParentNode()) {
+                    for (int i = 0; i < row->GetNumChildren(); i++) {
+                        Rml::Element* c = row->GetChild(i);
+                        if (c->GetAttribute<Rml::String>("oe-swatch", "") == name)
+                            c->SetAttribute("style", Rml::String(swatch_style(value)));
+                    }
+                }
                 refresh_all();
             }
             return;
@@ -4304,6 +4391,7 @@ void run_script(const char* script) {
             const size_t colon = cmd.find(':');
             const std::string verb = cmd.substr(0, colon);
             const std::string arg = colon == std::string::npos ? "" : cmd.substr(colon + 1);
+            flush_inspector();   // what the frame loop would have done by now
             if (verb == "add") add_component(arg);
             else if (verb == "select") select(arg);
             else if (verb == "rename") {
@@ -5115,6 +5203,38 @@ void run_script(const char* script) {
                 if (Rml::Element* e = by_id("fullcode")) e->Focus();
                 g.context->Update();
             }
+            else if (verb == "focusprop") {
+                // Put the caret in an inspector field, as a click there would.
+                Rml::Element* grid = by_id("grid");
+                Rml::ElementList inputs;
+                if (grid) grid->GetElementsByTagName(inputs, "input");
+                bool found = false;
+                for (Rml::Element* e : inputs) {
+                    if (e->GetAttribute<Rml::String>("name", "") == arg) {
+                        e->Focus();
+                        if (auto* in = dynamic_cast<Rml::ElementFormControlInput*>(e)) {
+                            const int n = (int)in->GetValue().size();
+                            in->SetSelectionRange(n, n);   // a click past the text
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                g.context->Update();
+                std::printf("focusprop: %s %s\n", arg.c_str(), found ? "focused" : "missing");
+                std::fflush(stdout);
+            }
+            else if (verb == "focused") {
+                // Which field holds the caret now, and what it reads — after
+                // typing, both must still be the field the user was in.
+                g.context->Update();
+                Rml::Element* f = g.context->GetFocusElement();
+                auto* ctl = dynamic_cast<Rml::ElementFormControl*>(f);
+                std::printf("focused: %s value=%s\n",
+                            f ? f->GetAttribute<Rml::String>("name", f->GetId()).c_str() : "none",
+                            ctl ? ctl->GetValue().c_str() : "");
+                std::fflush(stdout);
+            }
             else if (verb == "logscroll") {
                 g.context->Update();
                 size_output_pane();
@@ -5835,6 +5955,7 @@ int main(int argc, char** argv) {
         hover_tick();
         poll_answers();
         update_tabs();
+        flush_inspector();
         // Follow the OS window. The backend resizes the context; the layout has
         // to follow or everything past the old size is left unpainted.
         const auto dim = g.context->GetDimensions();

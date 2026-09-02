@@ -25,12 +25,17 @@ constexpr int CODE_PAD_Y = 8;
 
 constexpr const char* ACCENT        = "#1e60d5";
 constexpr const char* ACCENT_TEXT   = "#ffffff";
+/// The selection on the canvas: its box, its anchors, its wiring badge and
+/// the frame of a selected form. GitHub's link blue, not the IDE's accent.
+constexpr const char* SELECT        = "#0969da";
 
 // Backgrounds
 constexpr const char* PANEL         = "#ffffff";
 constexpr const char* CHROME        = "#f3f3f3";
 constexpr const char* CHROME_ALT    = "#f8f9fa";
 constexpr const char* CANVAS        = "#fafafa";
+/// The designer's workspace behind the form preview: the dot grid's ground.
+constexpr const char* CANVAS_GRID   = "#f8f9fa";
 
 // Text
 constexpr const char* TEXT          = "#1f2328";
@@ -65,7 +70,14 @@ constexpr int BOTTOM_H   = 220;
 constexpr int TRAY_H     = 104;
 /// The form preview's own title bar: decoration above the client area, which
 /// is the only thing the file's coordinates describe.
-constexpr int FORM_TITLE_H = 32;
+constexpr int FORM_TITLE_H = 36;
+/// The selection box's distance outside the component it frames, the size
+/// of a resize anchor, and the wiring badge: its height and how far above
+/// the selection box it floats.
+constexpr int SEL_GAP    = 3;
+constexpr int HANDLE_PX  = 6;
+constexpr int BADGE_H    = 20;
+constexpr int BADGE_GAP  = 18;
 /// The wiring box pinned to the foot of the inspector, so it is on screen
 /// however long the property list above it grows.
 constexpr int WIRE_H     = 84;
