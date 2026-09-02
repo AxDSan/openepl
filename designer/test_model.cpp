@@ -25,6 +25,7 @@ static std::string slurp(const std::string& p) {
 static void test_json();
 static void test_module_components(const std::string& openepl, const NeedsQuotes& quoted);
 static void test_multiline(const std::string& openepl);
+static void test_round_trip(const std::string& openepl, const NeedsQuotes& quoted);
 
 int main(int argc, char** argv) {
     const std::string openepl = argc > 1 ? argv[1] : "./target/debug/openepl";
@@ -158,6 +159,7 @@ int main(int argc, char** argv) {
 
     test_multiline(openepl);
     test_module_components(openepl, quoted);
+    test_round_trip(openepl, quoted);
     test_json();
 
 
@@ -167,9 +169,10 @@ int main(int argc, char** argv) {
 
 /* --- multi-line property values ----------------------------------------- *
  *
- * `inspect` writes a value raw, so a memo's text arrives as several lines.
- * Read naively, the save that follows truncates it to the first line — which
- * is a user losing a paragraph without being told.
+ * `inspect` keeps a value on its one line by escaping it, and the reader
+ * reverses that. Before the escape a memo's text arrived as several lines
+ * only the first of which was labelled, and the save that followed truncated
+ * it to that line — a user losing a paragraph without being told.
  */
 
 static void test_multiline(const std::string& openepl) {
@@ -275,6 +278,67 @@ static void test_module_components(const std::string& openepl, const NeedsQuotes
     bad.module_components[0].first_line = 1;
     bad.module_components[0].last_line = 9999;
     check("out-of-range span is refused", !save_model(bad, {}, quoted, err));
+}
+
+/* --- the round trip ----------------------------------------------------- *
+ *
+ * Everything above is mechanism for this: a file with a form, a memo holding
+ * two lines, and a timer declared at module level BELOW a hand-written sub,
+ * opened and saved with no edit, comes back byte for byte. The timer sits
+ * after the sub so that a span off by one line shows up as a corrupted sub
+ * rather than a pass.
+ */
+
+static void test_round_trip(const std::string& openepl, const NeedsQuotes& quoted) {
+    const std::string fixture = "/tmp/openepl_designer_rtfixture.oir";
+    const char* source =
+        "module rtfixture\n"
+        "use ui\n"
+        "\n"
+        "form win\n"
+        "  title = \"Round trip\"\n"
+        "  width = 300\n"
+        "\n"
+        "  memo notes\n"
+        "    text = \"first line\\nsecond line\"\n"
+        "    left = 10\n"
+        "  end\n"
+        "end\n"
+        "\n"
+        "sub on_tick\n"
+        "  # A comment the designer must not touch.\n"
+        "  call print_text(\"tick\")\n"
+        "end\n"
+        "\n"
+        "timer ticker\n"
+        "  interval = 500\n"
+        "  on tick: on_tick\n"
+        "end\n";
+    { std::ofstream f(fixture, std::ios::trunc); f << source; }
+
+    Model m;
+    std::string err;
+    check("round-trip fixture loads", load_model(openepl, fixture, m, err));
+    if (!err.empty()) std::printf("    error: %s\n", err.c_str());
+    check("timer arrived as a module component, not a child",
+          m.module_components.size() == 1 && m.children.size() == 1 &&
+              m.module_components[0].id == "ticker");
+    check("timer span reported",
+          m.module_components.size() == 1 && m.module_components[0].first_line == 19 &&
+              m.module_components[0].last_line == 22);
+    check("timer handler read back",
+          m.find("ticker") && m.find("ticker")->handler("tick") &&
+              *m.find("ticker")->handler("tick") == "on_tick");
+    check("memo holds both lines",
+          m.find("notes") && *m.find("notes")->property("text") == "first line\nsecond line");
+
+    check("save with no edits", save_model(m, {}, quoted, err));
+    check("file is byte-identical after the round trip", slurp(fixture) == source);
+
+    // And once more through the same model, since the save just rewrote the
+    // spans it will splice at next time.
+    check("save again", save_model(m, {}, quoted, err));
+    check("still byte-identical after a second save", slurp(fixture) == source);
 }
 
 /* --- JSON: the LSP wire format ------------------------------------------ */

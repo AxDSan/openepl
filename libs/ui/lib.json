@@ -8,6 +8,7 @@
     "ui_libinfo.c"
   ],
   "impl_sources": [
+    "ui_data.c",
     "ui_rmlui.cpp",
     "a11y_model.cpp",
     "a11y_accesskit.cpp"

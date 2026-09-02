@@ -31,6 +31,7 @@
 #include "openepl_abi.h"   /* oe_malloc — runtime-owned allocation (D4) */
 #include "a11y_bridge.h"
 #include "ui_mapping.h"
+#include "ui_data.h"
 #include "a11y_model.h"
 #include "openepl_ui.h"
 
@@ -632,6 +633,208 @@ struct SpinStep : Rml::EventListener {
 };
 std::vector<SpinStep*> g_spin_steps;   /* owned; freed at shutdown */
 
+/* --- grid --------------------------------------------------------------- *
+ *
+ * The rows live in a UiTable (ui_data.h), never in the element: a program
+ * reads `count` and `grid_cell` from the table, which exists before the first
+ * frame and is the same table a bound datasource hands to every grid on it.
+ * The element is a picture of the table, redrawn when the table's version
+ * moves — so a row added from `main`, from a handler, or into a datasource
+ * three grids share reaches the screen through one path, with nothing having
+ * to be told.
+ *
+ * `select` and `activate` hand over the row, so the handler pointer is called
+ * through the signature the compiler emitted the thunk with, the same way
+ * `tick` is in runtime/oe_component.c.
+ */
+typedef void (*RowFn)(int32_t);
+
+struct Grid {
+    UiEntry*        entry = nullptr;
+    int             wanted = 0;          /* `selected` as written; 0 = none */
+    const UiTable*  drawn_table = nullptr;
+    int32_t         drawn_version = -1;
+    int             drawn_selected = -1;
+    OpenEPL_EventFn on_select = nullptr;
+    OpenEPL_EventFn on_activate = nullptr;
+    /* One listener per row position, kept across redraws: a grid refilled
+     * every tick must not grow a listener per row per frame. */
+    std::vector<struct GridRowEvent*> rows;
+    int             scroll_to = 0;       /* a row to bring into view after layout */
+};
+std::unordered_map<uint64_t, Grid> g_grids;
+
+/* A wish for a row past the end is kept, not clamped: rows routinely arrive
+ * after `selected = 2` in the form, and after them the wish comes true. */
+int grid_selected(OpenEPL_Widget w) {
+    auto it = g_grids.find(w);
+    if (it == g_grids.end()) return 0;
+    const int rows = ui_table_row_count(ui_entry_table(it->second.entry));
+    return it->second.wanted >= 1 && it->second.wanted <= rows ? it->second.wanted : 0;
+}
+
+void grid_fire(OpenEPL_EventFn fn, int row) {
+    if (fn) ((RowFn)fn)(row);
+}
+
+void grid_select(OpenEPL_Widget w, int n, bool announce) {
+    auto it = g_grids.find(w);
+    if (it == g_grids.end()) return;
+    it->second.wanted = n;
+    if (announce) grid_fire(it->second.on_select, grid_selected(w));
+}
+
+struct GridRowEvent : Rml::EventListener {
+    OpenEPL_Widget grid;
+    int            index;   /* counts from 1 */
+    GridRowEvent(OpenEPL_Widget g, int i) : grid(g), index(i) {}
+    void ProcessEvent(Rml::Event& ev) override {
+        if (widget_disabled(grid)) return;
+        if (ev.GetType() == "click") {
+            /* Keyboard handling is on the document and asks who has focus,
+             * so a clicked grid must take it. */
+            if (Rml::Element* e = resolve(grid)) e->Focus();
+            grid_select(grid, index, true);
+        } else if (ev.GetType() == "dblclick") {
+            grid_select(grid, index, false);
+            grid_fire(g_grids[grid].on_activate, index);
+        }
+    }
+};
+/* Redraw a grid whose table or selection moved since it was last drawn. */
+void grid_sync(OpenEPL_Widget w, Grid& gr) {
+    Rml::Element* e = resolve(w);
+    if (!e) return;
+    const UiTable* t = ui_entry_table(gr.entry);
+    const int sel = grid_selected(w);
+    if (t == gr.drawn_table && ui_table_version(t) == gr.drawn_version && sel == gr.drawn_selected)
+        return;
+    gr.drawn_table = t;
+    gr.drawn_version = ui_table_version(t);
+    gr.drawn_selected = sel;
+
+    /* Released once drawn: these are runtime-owned copies, and a grid a timer
+     * refills every tick would otherwise keep every text it ever drew. */
+    char* columns = ui_table_columns(t);
+    char* rows = ui_table_rows(t);
+    e->SetInnerRML(openepl::ui::grid_markup(columns ? columns : "", rows ? rows : "", sel));
+    oe_mfree(columns);
+    oe_mfree(rows);
+
+    Rml::Element* table = e->GetNumChildren() ? e->GetChild(0) : nullptr;
+    if (!table) return;
+    int index = 0;
+    for (int i = 0; i < table->GetNumChildren(); i++) {
+        Rml::Element* row = table->GetChild(i);
+        if (!row->IsClassSet("oe-row")) continue;
+        if ((int)gr.rows.size() < ++index) gr.rows.push_back(new GridRowEvent(w, index));
+        row->AddEventListener("click", gr.rows[(size_t)index - 1]);
+        row->AddEventListener("dblclick", gr.rows[(size_t)index - 1]);
+    }
+    /* Selection made from code or the keyboard may land outside the box, and
+     * the row is what the person wants to see — but where it is will only be
+     * known once the new rows are laid out, so the scroll waits for that. */
+    gr.scroll_to = sel;
+}
+
+/* After layout: scroll each grid to the row its last redraw selected. Answers
+ * whether anything moved, since a scroll changes what the next layout shows. */
+bool scroll_grids() {
+    bool moved = false;
+    for (auto& kv : g_grids) {
+        Grid& gr = kv.second;
+        if (!gr.scroll_to) continue;
+        Rml::Element* e = resolve((OpenEPL_Widget)kv.first);
+        Rml::Element* table = e && e->GetNumChildren() ? e->GetChild(0) : nullptr;
+        int index = 0;
+        for (int i = 0; table && i < table->GetNumChildren(); i++) {
+            Rml::Element* row = table->GetChild(i);
+            if (!row->IsClassSet("oe-row") || ++index != gr.scroll_to) continue;
+            row->ScrollIntoView(false);
+            moved = true;
+            break;
+        }
+        gr.scroll_to = 0;
+    }
+    return moved;
+}
+
+void sync_grids() {
+    for (auto& kv : g_grids) grid_sync((OpenEPL_Widget)kv.first, kv.second);
+}
+
+/* The grid holding the focus, or 0. Focus may sit on the grid itself or on a
+ * row inside it, so the search walks up. */
+OpenEPL_Widget focused_grid() {
+    Rml::Element* f = g.context ? g.context->GetFocusElement() : nullptr;
+    for (; f; f = f->GetParentNode()) {
+        for (const auto& kv : g_grids) {
+            if (resolve((OpenEPL_Widget)kv.first) == f) return (OpenEPL_Widget)kv.first;
+        }
+    }
+    return 0;
+}
+
+/* On the document, like shortcuts, because a keydown dispatched to the
+ * document does not descend to the grid — and neither does the one the test
+ * hook sends. */
+struct GridKeys : Rml::EventListener {
+    void ProcessEvent(Rml::Event& ev) override {
+        const OpenEPL_Widget w = focused_grid();
+        if (!w || widget_disabled(w)) return;
+        const int key = ev.GetParameter<int>("key_identifier", 0);
+        const int sel = grid_selected(w);
+        const int rows = ui_table_row_count(ui_entry_table(g_grids[w].entry));
+        if (key == Rml::Input::KI_RETURN) {
+            if (sel) grid_fire(g_grids[w].on_activate, sel);
+        } else if (key == Rml::Input::KI_DOWN) {
+            if (sel < rows) grid_select(w, sel + 1, true);
+        } else if (key == Rml::Input::KI_UP) {
+            if (sel > 1) grid_select(w, sel - 1, true);
+        } else {
+            return;
+        }
+        ev.StopPropagation();
+    }
+};
+GridKeys g_grid_keys;
+
+/* --- datasource --------------------------------------------------------- *
+ *
+ * Rows with no rectangle. The entry lives in ui_data.c; all that is here is
+ * the handle the compiler numbered, which shares the widget sequence for the
+ * reason `action` states. */
+std::unordered_map<uint64_t, UiEntry*> g_datasources;
+
+UiEntry* entry_of(OpenEPL_Widget w) {
+    auto g_it = g_grids.find(w);
+    if (g_it != g_grids.end()) return g_it->second.entry;
+    auto d_it = g_datasources.find(w);
+    return d_it == g_datasources.end() ? nullptr : d_it->second;
+}
+
+/* The properties a grid and a datasource share: what a table holds. Returns
+ * false for a property that is not one of them. */
+bool table_set(OpenEPL_Widget w, const char* prop, const char* value) {
+    UiEntry* e = entry_of(w);
+    if (!e) return false;
+    if (std::strcmp(prop, "name") == 0)         { ui_entry_set_name(e, value); return true; }
+    if (std::strcmp(prop, "columns") == 0)      { ui_table_set_columns(ui_entry_table(e), value); return true; }
+    if (std::strcmp(prop, "rows") == 0)         { ui_table_set_rows(ui_entry_table(e), value); return true; }
+    if (std::strcmp(prop, "count") == 0)        return true;   /* read-only; swallowed as elsewhere */
+    return false;
+}
+
+bool table_get(OpenEPL_Widget w, const char* prop, std::string* out) {
+    UiEntry* e = entry_of(w);
+    if (!e) return false;
+    if (std::strcmp(prop, "name") == 0)    { *out = ui_entry_name(e); return true; }
+    if (std::strcmp(prop, "columns") == 0) { const char* c = ui_table_columns(ui_entry_table(e)); *out = c ? c : ""; return true; }
+    if (std::strcmp(prop, "rows") == 0)    { const char* r = ui_table_rows(ui_entry_table(e)); *out = r ? r : ""; return true; }
+    if (std::strcmp(prop, "count") == 0)   { *out = std::to_string(ui_table_row_count(ui_entry_table(e))); return true; }
+    return false;
+}
+
 /* Handle a property that belongs to one of the controls above. Returns false
  * when the property is nobody's special case and the generic attribute/RCSS
  * path below should have it. */
@@ -651,6 +854,11 @@ bool control_set(const std::string& type, OpenEPL_Widget w, const char* prop, co
         if (std::strcmp(prop, "items") == 0)    { list_set_items(w, value); return true; }
         if (std::strcmp(prop, "selected") == 0) { list_select(w, n); return true; }
         return false;
+    }
+    if (type == "grid") {
+        if (std::strcmp(prop, "selected") == 0) { grid_select(w, n, false); return true; }
+        if (std::strcmp(prop, "bind") == 0)     { ui_entry_set_bind(entry_of(w), value); return true; }
+        return table_set(w, prop, value);
     }
     if (type == "memo" && std::strcmp(prop, "text") == 0) {
         if (auto* ta = rmlui_dynamic_cast<Rml::ElementFormControlTextArea*>(resolve(w))) {
@@ -702,6 +910,11 @@ bool control_get(const std::string& type, OpenEPL_Widget w, const char* prop, st
             return true;
         }
         return false;
+    }
+    if (type == "grid") {
+        if (std::strcmp(prop, "selected") == 0) { *out = std::to_string(grid_selected(w)); return true; }
+        if (std::strcmp(prop, "bind") == 0)     { *out = ui_entry_bind(entry_of(w)); return true; }
+        return table_get(w, prop, out);
     }
     if (type == "listbox") {
         if (std::strcmp(prop, "items") == 0)    { *out = list_items(w); return true; }
@@ -789,6 +1002,7 @@ int oe_ui_init(const char* title, int width, int height) {
     g.widgets.clear();
     publish(g.document);          // handle 1 == the form root
     g.document->AddEventListener("keydown", &g_shortcuts);
+    g.document->AddEventListener("keydown", &g_grid_keys);
     g.initialised = true;
     return 0;
 }
@@ -836,6 +1050,13 @@ OpenEPL_Widget oe_ui_create(OpenEPL_Widget parent, const char* type_name) {
     if (std::strcmp(type_name, "radiobutton") == 0) {
         if (Rml::Element* box = child_with_tag(raw, "input"))
             box->SetAttribute("name", Rml::String("default"));
+    }
+    if (std::strcmp(type_name, "grid") == 0) {
+        Grid gr;
+        gr.entry = ui_entry_new(UI_ENTRY_GRID);
+        g_grids[h] = gr;
+        /* A focused grid is what the arrow keys and Enter act on. */
+        raw->SetProperty("tab-index", "auto");
     }
     // RmlUi's <progress> defaults to max=1, which makes any percentage look
     // full; OpenEPL's `value` is a percentage.
@@ -983,6 +1204,12 @@ int32_t oe_ui_get_int(OpenEPL_Widget w, const char* property) {
 int oe_ui_on(OpenEPL_Widget w, const char* event, OpenEPL_EventFn handler) {
     Rml::Element* e = resolve(w);
     if (!e || !event || !handler) return 1;
+    /* A grid's events carry the row, so they are raised by this file with the
+     * argument rather than by the substrate through a void bridge. */
+    if (auto it = g_grids.find(w); it != g_grids.end()) {
+        if (std::strcmp(event, "select") == 0)   { it->second.on_select = handler; return 0; }
+        if (std::strcmp(event, "activate") == 0) { it->second.on_activate = handler; return 0; }
+    }
     auto* bridge = new HandlerBridge(handler, w);
     g_bridges.push_back(bridge);
     e->AddEventListener(event, bridge);
@@ -991,11 +1218,17 @@ int oe_ui_on(OpenEPL_Widget w, const char* event, OpenEPL_EventFn handler) {
 
 /* --- the library's non-visual components (abi/openepl_abi.h) ------------
  *
- * `action` is the only one, and it is addressed through these rather than
- * through the widget interface because it has no rectangle. The five entry
- * points are the same five `timer` implements in runtime/oe_component.c.
+ * `action` and `datasource`, addressed through these rather than through the
+ * widget interface because neither has a rectangle. The five entry points
+ * are the same five `timer` implements in runtime/oe_component.c.
  */
 int64_t oe_ui_component_create(const char* type_name) {
+    if (type_name && std::strcmp(type_name, "datasource") == 0) {
+        const OpenEPL_Widget h = publish(nullptr);
+        g_datasources[h] = ui_entry_new(UI_ENTRY_DATASOURCE);
+        oe_error_clear();
+        return (int64_t)h;
+    }
     if (!type_name || std::strcmp(type_name, "action") != 0) {
         oe_error_set(OE_ERR_INVALID_ARG, "ui declares no such non-visual component");
         return 0;
@@ -1010,6 +1243,8 @@ int64_t oe_ui_component_create(const char* type_name) {
 }
 
 int32_t oe_ui_component_set(int64_t h, const char* prop, const char* value) {
+    if (prop && value && g_datasources.count((uint64_t)h))
+        return table_set((OpenEPL_Widget)h, prop, value) ? 0 : 1;
     auto it = g_actions.find((uint64_t)h);
     if (it == g_actions.end() || !prop || !value) return 1;
     Action& a = it->second;
@@ -1028,10 +1263,16 @@ int32_t oe_ui_component_set(int64_t h, const char* prop, const char* value) {
 }
 
 const char* oe_ui_component_get(int64_t h, const char* prop) {
+    std::string v;
+    if (prop && g_datasources.count((uint64_t)h)) {
+        if (!table_get((OpenEPL_Widget)h, prop, &v)) return nullptr;
+        char* out = (char*)oe_malloc((long)v.size() + 1);
+        if (out) std::memcpy(out, v.c_str(), v.size() + 1);
+        return out;
+    }
     auto it = g_actions.find((uint64_t)h);
     if (it == g_actions.end() || !prop) return nullptr;
     const Action& a = it->second;
-    std::string v;
     if (std::strcmp(prop, "name") == 0)          v = a.name;
     else if (std::strcmp(prop, "text") == 0)     v = a.text;
     else if (std::strcmp(prop, "shortcut") == 0) v = a.shortcut;
@@ -1044,6 +1285,10 @@ const char* oe_ui_component_get(int64_t h, const char* prop) {
 }
 
 int32_t oe_ui_component_get_int(int64_t h, const char* prop) {
+    if (prop && g_datasources.count((uint64_t)h)) {
+        std::string v;
+        return table_get((OpenEPL_Widget)h, prop, &v) ? (int32_t)std::strtol(v.c_str(), nullptr, 10) : 0;
+    }
     auto it = g_actions.find((uint64_t)h);
     if (it == g_actions.end() || !prop) return 0;
     if (std::strcmp(prop, "enabled") == 0) return it->second.enabled ? 1 : 0;
@@ -1093,7 +1338,9 @@ static int32_t ui_pump(void *) {
         oe_loop_quit(0);
         return 1;
     }
+    sync_grids();
     g.context->Update();
+    if (scroll_grids()) g.context->Update();
 
     /* Refresh accessible bounds from the laid-out widgets, then publish.
      * Cheap: update_if_active does nothing until an AT connects. */
@@ -1165,21 +1412,30 @@ int oe_ui_run(void) {
         /* Targets a widget HANDLE, not an element id — component ids are
          * compile-time only and never reach the binary (G8), so the test hook
          * must not depend on them. */
+        /* Grids draw their rows on the first frame; a click aimed at a row
+         * before that would find nothing. */
+        sync_grids();
         g.context->Update();
         char* after = nullptr;
         OpenEPL_Widget target = (OpenEPL_Widget)std::strtoull(synth_click, &after, 10);
         Rml::Element* e = resolve(target);
         /* `5.3` clicks the third part of widget 5 — a listbox row, a spinner
-         * arrow. A control assembled from several elements is only exercised by
-         * hitting one of them, and its parts have no handles of their own: a
-         * part is not a component, so it must not become addressable from a
-         * program just to be testable from a test. */
-        if (e && after && *after == '.') {
-            const int nth = std::atoi(after + 1);
+         * arrow — and `5.1.3` the third part of that part, which is how a grid
+         * row is reached through the table holding it (with `columns` set the
+         * header is part 1 and row N is `.1.N+1`; without, row N is `.1.N`).
+         * A control assembled from several elements is
+         * only exercised by hitting one of them, and its parts have no handles
+         * of their own: a part is not a component, so it must not become
+         * addressable from a program just to be testable from a test. */
+        while (e && after && *after == '.') {
+            const int nth = (int)std::strtol(after + 1, &after, 10);
             e = (nth >= 1 && nth <= e->GetNumChildren()) ? e->GetChild(nth - 1) : nullptr;
         }
+        /* `OPENEPL_UI_SYNTH_EVENT` names what is dispatched, for the events a
+         * click cannot stand in for — a grid's double-click. */
+        const char* synth_event = std::getenv("OPENEPL_UI_SYNTH_EVENT");
         if (e)
-            e->DispatchEvent("click", Rml::Dictionary());
+            e->DispatchEvent(synth_event ? synth_event : "click", Rml::Dictionary());
         else
             std::fprintf(stderr, "openepl-ui: no widget handle %s to click\n", synth_click);
     }
@@ -1245,6 +1501,11 @@ void oe_ui_shutdown(void) {
     g_item_clicks.clear();
     for (auto* st : g_spin_steps) delete st;
     g_spin_steps.clear();
+    for (auto& kv : g_grids) {
+        for (auto* r : kv.second.rows) delete r;
+    }
+    g_grids.clear();
+    g_datasources.clear();
     g_wanted_selection.clear();
     g_ranges.clear();
     g_spins.clear();

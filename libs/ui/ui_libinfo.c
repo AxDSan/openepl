@@ -223,7 +223,83 @@ static const OpenEPL_PropertyDesc ACTION_PROPS[] = {
 };
 static const OpenEPL_EventDesc ACTION_EVENTS[] = { { "execute", 0, NULL } };
 
+/* --- grid / datasource ------------------------------------------------ *
+ *
+ * A grid's data is the property that most wants to be a `text[][]`, and it
+ * cannot be one for the two reasons `items` above cannot: a property value is
+ * a literal, and a bare component id is not an expression.  So `rows` is ONE
+ * text — a newline between rows, a tab between cells — and `columns` is the
+ * header, tab-separated.  A cell can hold neither character, and there is no
+ * escape for them: an escape the inspector shows and a program must spell is
+ * worse than a stated limit.
+ *
+ * The commands are what make that representation bearable.  `grid_add_row`
+ * and `grid_set_cell` put real data in from a subroutine with no string
+ * building, and `grid_cell` reads one back.  They take the grid's `name` —
+ * the same answer `action` gives to the same problem — because nothing else
+ * a program can write names a component.
+ *
+ * `bind` names a datasource.  While one by that name exists the grid shows
+ * ITS rows, and every grid bound to it shows the same rows; the grid's own
+ * `rows` are what it falls back to.  A grid's commands reach whichever table
+ * it is showing, so a program written against an unbound grid keeps working
+ * when a datasource is wired in.  This is the shape that lets a `database`
+ * kit hand a query result to a datasource and have it on screen with no code
+ * between.
+ *
+ * `selected` counts from 1 and is 0 for no row; `select` hands the handler
+ * that position, and `activate` — a double-click, or Enter on the selected
+ * row — hands it the same.  `count` is read-only.
+ */
+static const OpenEPL_PropertyDesc GRID_PROPS[] = {
+    { "name",     OE_SDT_TEXT, "",     NULL },
+    { "bind",     OE_SDT_TEXT, "",     NULL },
+    { "columns",  OE_SDT_TEXT, "",     NULL },
+    { "rows",     OE_SDT_TEXT, "",     "multiline" },
+    { "selected", OE_SDT_INT,  "0",    NULL },
+    { "count",    OE_SDT_INT,  "0",    NULL },
+    { "left",     OE_SDT_INT,  "0",    NULL },
+    { "top",      OE_SDT_INT,  "0",    NULL },
+    { "width",    OE_SDT_INT,  "320",  NULL },
+    { "height",   OE_SDT_INT,  "160",  NULL },
+    { "enabled",  OE_SDT_BOOL, "true", NULL },
+};
+static const int32_t ROW_PARAM[] = { OE_SDT_INT };
+static const OpenEPL_EventDesc GRID_EVENTS[] = {
+    { "select",   1, ROW_PARAM },
+    { "activate", 1, ROW_PARAM },
+};
+
+/* A datasource is rows with no rectangle: filled once, shown by every grid
+ * that binds it.  It has no events — the grids watch it, not the program. */
+static const OpenEPL_PropertyDesc DATASOURCE_PROPS[] = {
+    { "name",    OE_SDT_TEXT, "", NULL },
+    { "columns", OE_SDT_TEXT, "", NULL },
+    { "rows",    OE_SDT_TEXT, "", "multiline" },
+    { "count",   OE_SDT_INT,  "0", NULL },
+};
+
 #define N(a) (int32_t)(sizeof(a) / sizeof((a)[0]))
+
+/* One signature table per shape; the grid and datasource families share
+ * them, and differ only in which component the name is looked up among. */
+static const int32_t A_NAME[]          = { OE_SDT_TEXT };
+static const int32_t A_NAME_ROW[]      = { OE_SDT_TEXT, OE_SDT_TEXT };
+static const int32_t A_NAME_CELL[]     = { OE_SDT_TEXT, OE_SDT_INT, OE_SDT_INT };
+static const int32_t A_NAME_CELL_VAL[] = { OE_SDT_TEXT, OE_SDT_INT, OE_SDT_INT, OE_SDT_TEXT };
+
+static const OpenEPL_CommandDesc UI_COMMANDS[] = {
+    { "grid_clear",           "ui_grid_clear",           OE_SDT_BOOL, 1, A_NAME },
+    { "grid_add_row",         "ui_grid_add_row",         OE_SDT_INT,  2, A_NAME_ROW },
+    { "grid_cell",            "ui_grid_cell",            OE_SDT_TEXT, 3, A_NAME_CELL },
+    { "grid_set_cell",        "ui_grid_set_cell",        OE_SDT_BOOL, 4, A_NAME_CELL_VAL },
+    { "grid_row_count",       "ui_grid_row_count",       OE_SDT_INT,  1, A_NAME },
+    { "datasource_clear",     "ui_datasource_clear",     OE_SDT_BOOL, 1, A_NAME },
+    { "datasource_add_row",   "ui_datasource_add_row",   OE_SDT_INT,  2, A_NAME_ROW },
+    { "datasource_cell",      "ui_datasource_cell",      OE_SDT_TEXT, 3, A_NAME_CELL },
+    { "datasource_set_cell",  "ui_datasource_set_cell",  OE_SDT_BOOL, 4, A_NAME_CELL_VAL },
+    { "datasource_row_count", "ui_datasource_row_count", OE_SDT_INT,  1, A_NAME },
+};
 #define VISUAL OE_COMPONENT_VISUAL
 #define NONVISUAL OE_COMPONENT_NONVISUAL
 
@@ -246,6 +322,10 @@ static const OpenEPL_ComponentDesc UI_COMPONENTS[] = {
     { "slider", OE_ROLE_UNKNOWN, N(SLIDER_PROPS), SLIDER_PROPS, N(SLIDER_EVENTS), SLIDER_EVENTS, VISUAL },
     { "spinner", OE_ROLE_TEXTBOX, N(SPIN_PROPS), SPIN_PROPS, N(SPIN_EVENTS), SPIN_EVENTS, VISUAL },
     { "action", OE_ROLE_UNKNOWN, N(ACTION_PROPS), ACTION_PROPS, N(ACTION_EVENTS), ACTION_EVENTS, NONVISUAL },
+    /* No table role exists in abi/openepl_abi.h; a list of rows is the
+     * nearest true one, and a reader stepping through rows is served by it. */
+    { "grid", OE_ROLE_LIST, N(GRID_PROPS), GRID_PROPS, N(GRID_EVENTS), GRID_EVENTS, VISUAL },
+    { "datasource", OE_ROLE_UNKNOWN, N(DATASOURCE_PROPS), DATASOURCE_PROPS, 0, 0, NONVISUAL },
 };
 
 static const OpenEPL_LibInfo UI_INFO = {
@@ -253,7 +333,7 @@ static const OpenEPL_LibInfo UI_INFO = {
     "ui",
     "openepl-ui-0000-0000-0000-000000000003",
     0, 1, 0,
-    0, 0,                                  /* no commands yet */
+    N(UI_COMMANDS), UI_COMMANDS,
     N(UI_COMPONENTS), UI_COMPONENTS,
 };
 

@@ -89,6 +89,17 @@ level rather than inside a form.
 
 **Events:** `change`
 
+## datasource
+
+| Property | Type |
+| --- | --- |
+| `name` | text |
+| `columns` | text |
+| `rows` | text |
+| `count` | int |
+
+**Events:** none
+
 ## editbox
 
 | Property | Type |
@@ -112,6 +123,24 @@ level rather than inside a form.
 | `background_color` | text |
 
 **Events:** `load`
+
+## grid
+
+| Property | Type |
+| --- | --- |
+| `name` | text |
+| `bind` | text |
+| `columns` | text |
+| `rows` | text |
+| `selected` | int |
+| `count` | int |
+| `left` | int |
+| `top` | int |
+| `width` | int |
+| `height` | int |
+| `enabled` | bool |
+
+**Events:** `select`,`activate`
 
 ## groupbox
 

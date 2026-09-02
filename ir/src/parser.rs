@@ -27,8 +27,8 @@
 
 use crate::lexer::{lex, Spanned, Tok};
 use crate::{
-    intern, BinOp, CmpOp, Component, Elem, Expr, Form, GlobalVar, Item, LogicalOp, Module,
-    RecordDef, Stmt, StmtKind, Sub, Target, Ty,
+    intern, BinOp, CmpOp, Component, Elem, Expr, Form, GlobalVar, Ident, Item, LogicalOp,
+    Module, RecordDef, Span, Stmt, StmtKind, Sub, Target, Ty,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +63,38 @@ impl Parser {
     }
     fn line(&self) -> usize {
         self.toks[self.pos].line
+    }
+    /// The span of the token at `pos`.
+    fn span_at(&self, pos: usize) -> Span {
+        let t = &self.toks[pos.min(self.toks.len() - 1)];
+        Span::new(t.line, t.col, t.end_col)
+    }
+    /// A statement whose header began at token `start`: its span runs to the
+    /// end of that line, and its identifiers are the ones on it. The body of
+    /// an `if` or a loop is not part of the header — each statement in it
+    /// answers for itself.
+    fn finish(&self, kind: StmtKind, start: usize) -> Stmt {
+        let first = self.span_at(start);
+        let mut span = first;
+        let mut idents = Vec::new();
+        for t in &self.toks[start..] {
+            if matches!(t.tok, Tok::Newline | Tok::Eof) {
+                break;
+            }
+            span.end_col = t.end_col;
+            if let Tok::Ident(name) = &t.tok {
+                idents.push(Ident {
+                    name: name.clone(),
+                    span: Span::new(t.line, t.col, t.end_col),
+                });
+            }
+        }
+        Stmt {
+            kind,
+            line: first.line,
+            span,
+            idents,
+        }
     }
     /// The token `n` places past the cursor, saturating at the final `Eof`.
     fn peek_at(&self, n: usize) -> &Tok {
@@ -193,6 +225,7 @@ impl Parser {
     fn sub(&mut self) -> Result<Sub, ParseError> {
         let sub_line = self.line();
         self.expect(&Tok::Sub, "`sub`")?;
+        let name_span = self.span_at(self.pos);
         let name = self.ident("subroutine name")?;
 
         // `sub name(a: int, b: text)`; `sub name()` is the same as `sub name`.
@@ -268,6 +301,7 @@ impl Parser {
             params,
             ret,
             line: sub_line,
+            name_span,
             body,
         })
     }
@@ -290,6 +324,8 @@ impl Parser {
             line_span: (first_line, first_line),
             properties: Vec::new(),
             handlers: Vec::new(),
+            property_spans: Vec::new(),
+            handler_spans: Vec::new(),
             children: Vec::new(),
         };
         loop {
@@ -301,16 +337,19 @@ impl Parser {
                     break;
                 }
                 Tok::On => {
-                    let (event, handler) = self.binding()?;
+                    let (event, handler, span) = self.binding()?;
                     form.handlers.push((event, handler));
+                    form.handler_spans.push(span);
                 }
                 Tok::Ident(first) => {
+                    let span = self.span_at(self.pos);
                     self.bump();
                     if matches!(self.peek(), Tok::Eq) {
                         self.bump();
                         let value = self.expr()?;
                         self.expect(&Tok::Newline, "newline after property")?;
                         form.properties.push((first, value));
+                        form.property_spans.push(span);
                     } else {
                         form.children.push(self.component(first)?);
                     }
@@ -392,6 +431,8 @@ impl Parser {
             id,
             properties: Vec::new(),
             handlers: Vec::new(),
+            property_spans: Vec::new(),
+            handler_spans: Vec::new(),
         };
         loop {
             self.skip_newlines();
@@ -401,15 +442,18 @@ impl Parser {
                     break;
                 }
                 Tok::On => {
-                    let (event, handler) = self.binding()?;
+                    let (event, handler, span) = self.binding()?;
                     c.handlers.push((event, handler));
+                    c.handler_spans.push(span);
                 }
                 Tok::Ident(name) => {
+                    let span = self.span_at(self.pos);
                     self.bump();
                     self.expect(&Tok::Eq, "`=` after property name")?;
                     let value = self.expr()?;
                     self.expect(&Tok::Newline, "newline after property")?;
                     c.properties.push((name, value));
+                    c.property_spans.push(span);
                 }
                 Tok::Eof => {
                     return self.err("unexpected end of file inside component (missing `end`)")
@@ -427,14 +471,16 @@ impl Parser {
         Ok(c)
     }
 
-    /// `on <event>: <subroutine>`
-    fn binding(&mut self) -> Result<(String, String), ParseError> {
+    /// `on <event>: <subroutine>`, and the span of the event name — the part
+    /// of the line a diagnostic about the binding points at.
+    fn binding(&mut self) -> Result<(String, String, Span), ParseError> {
         self.expect(&Tok::On, "`on`")?;
+        let span = self.span_at(self.pos);
         let event = self.ident("event name")?;
         self.expect(&Tok::Colon, "`:` after event name")?;
         let handler = self.ident("handler subroutine name")?;
         self.expect(&Tok::Newline, "newline after event binding")?;
-        Ok((event, handler))
+        Ok((event, handler, span))
     }
 
     /// A module-level `var NAME: TY = EXPR`.
@@ -493,7 +539,7 @@ impl Parser {
 
     /// A statement starting with an identifier: assignment or property-set.
     fn stmt_ident(&mut self) -> Result<Stmt, ParseError> {
-        let stmt_line = self.line();
+        let start = self.pos;
         let name = self.ident("variable or component name")?;
         match self.peek() {
             Tok::LBracket => {
@@ -503,16 +549,16 @@ impl Parser {
                 self.expect(&Tok::Eq, "`=` in an element assignment")?;
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "newline after assignment")?;
-                Ok(Stmt::new(
+                Ok(self.finish(
                     StmtKind::SetIndex { name, index, value },
-                    stmt_line,
+                    start,
                 ))
             }
             Tok::Eq => {
                 self.bump();
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "newline after assignment")?;
-                Ok(Stmt::new(StmtKind::Assign { name, value }, stmt_line))
+                Ok(self.finish(StmtKind::Assign { name, value }, start))
             }
             Tok::Dot => {
                 self.bump();
@@ -520,11 +566,11 @@ impl Parser {
                 self.expect(&Tok::Eq, "`=` in property assignment")?;
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "newline after property assignment")?;
-                Ok(Stmt::new(StmtKind::SetProperty {
+                Ok(self.finish(StmtKind::SetProperty {
                     component: name,
                     property,
                     value,
-                }, stmt_line))
+                }, start))
             }
             other => self.err(format!(
                 "expected `=` (assignment), `[` (element) or `.` (property) after `{name}`, \
@@ -534,7 +580,7 @@ impl Parser {
     }
 
     fn stmt_let(&mut self, mutable: bool) -> Result<Stmt, ParseError> {
-        let stmt_line = self.line();
+        let start = self.pos;
         self.expect(
             if mutable { &Tok::Var } else { &Tok::Let },
             "`let` or `var`",
@@ -545,12 +591,12 @@ impl Parser {
         self.expect(&Tok::Eq, "`=`")?;
         let value = self.expr()?;
         self.expect(&Tok::Newline, "newline after `let`")?;
-        Ok(Stmt::new(StmtKind::Let {
+        Ok(self.finish(StmtKind::Let {
             name,
             ty,
             value,
             mutable,
-        }, stmt_line))
+        }, start))
     }
 
     /// Statements until one of `terminators`, which is not consumed.
@@ -582,7 +628,7 @@ impl Parser {
 
     /// `if COND NEWLINE ... (else if COND NEWLINE ...)* (else NEWLINE ...)? end`
     fn stmt_if(&mut self) -> Result<Stmt, ParseError> {
-        let stmt_line = self.line();
+        let start = self.pos;
         self.expect(&Tok::If, "`if`")?;
         let mut arms = Vec::new();
         let mut otherwise = None;
@@ -614,12 +660,12 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline) {
             self.bump();
         }
-        Ok(Stmt::new(StmtKind::If { arms, otherwise }, stmt_line))
+        Ok(self.finish(StmtKind::If { arms, otherwise }, start))
     }
 
     /// `while COND NEWLINE ... end`
     fn stmt_while(&mut self) -> Result<Stmt, ParseError> {
-        let stmt_line = self.line();
+        let start = self.pos;
         self.expect(&Tok::While, "`while`")?;
         let cond = self.expr()?;
         self.expect(&Tok::Newline, "newline after the condition")?;
@@ -628,7 +674,7 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline) {
             self.bump();
         }
-        Ok(Stmt::new(StmtKind::While { cond, body }, stmt_line))
+        Ok(self.finish(StmtKind::While { cond, body }, start))
     }
 
     /// ```text
@@ -639,7 +685,7 @@ impl Parser {
     /// two positions only — reserving them would steal two ordinary words from
     /// every variable and property name in the language.
     fn stmt_for(&mut self) -> Result<Stmt, ParseError> {
-        let stmt_line = self.line();
+        let head = self.pos;
         self.expect(&Tok::For, "`for`")?;
         let var = self.ident("loop variable name")?;
         self.expect(&Tok::Eq, "`=` after the loop variable")?;
@@ -683,7 +729,7 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline) {
             self.bump();
         }
-        Ok(Stmt::new(
+        Ok(self.finish(
             StmtKind::For {
                 var,
                 start,
@@ -691,31 +737,31 @@ impl Parser {
                 step,
                 body,
             },
-            stmt_line,
+            head,
         ))
     }
 
     /// `break` / `continue`.
     fn stmt_jump(&mut self, is_break: bool) -> Result<Stmt, ParseError> {
-        let stmt_line = self.line();
+        let start = self.pos;
         self.bump();
         if matches!(self.peek(), Tok::Newline) {
             self.bump();
         }
-        Ok(Stmt::new(
+        Ok(self.finish(
             if is_break {
                 StmtKind::Break
             } else {
                 StmtKind::Continue
             },
-            stmt_line,
+            start,
         ))
     }
 
     /// `return` or `return EXPR`. A bare `return` is the one that leaves a sub
     /// with no return type early; anything else on the line is the value.
     fn stmt_return(&mut self) -> Result<Stmt, ParseError> {
-        let stmt_line = self.line();
+        let start = self.pos;
         self.expect(&Tok::Return, "`return`")?;
         let value = if matches!(self.peek(), Tok::Newline | Tok::Eof) {
             None
@@ -725,17 +771,17 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline) {
             self.bump();
         }
-        Ok(Stmt::new(StmtKind::Return { value }, stmt_line))
+        Ok(self.finish(StmtKind::Return { value }, start))
     }
 
     fn stmt_call(&mut self) -> Result<Stmt, ParseError> {
-        let stmt_line = self.line();
+        let start = self.pos;
         self.expect(&Tok::Call, "`call`")?;
         let cmd = self.ident("command name")?;
         self.expect(&Tok::LParen, "`(`")?;
         let args = self.arg_list()?;
         self.expect(&Tok::Newline, "newline after call")?;
-        Ok(Stmt::new(StmtKind::Call { cmd, args }, stmt_line))
+        Ok(self.finish(StmtKind::Call { cmd, args }, start))
     }
 
     /// Parse a comma-separated argument list, assuming the opening `(` has been

@@ -418,6 +418,16 @@ false with code `0` is a genuine no, false with a non-zero code is a failure.
 
 | Command | Parameters | Returns |
 | --- | --- | --- |
+| `datasource_add_row` | text, text | int |
+| `datasource_cell` | text, int, int | text |
+| `datasource_clear` | text | bool |
+| `datasource_row_count` | text | int |
+| `datasource_set_cell` | text, int, int, text | bool |
+| `grid_add_row` | text, text | int |
+| `grid_cell` | text, int, int | text |
+| `grid_clear` | text | bool |
+| `grid_row_count` | text | int |
+| `grid_set_cell` | text, int, int, text | bool |
 
 ## units
 

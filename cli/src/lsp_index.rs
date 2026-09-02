@@ -81,12 +81,27 @@ fn header_after(src: &str, line: usize, col: usize, name: &str) -> Option<String
     (!rest.is_empty()).then(|| rest.to_string())
 }
 
+/// One `type id … end` block (or the `form … end` around them): what it
+/// declares and which lines it spans, so a request from inside it can be
+/// answered with that component's own properties and events.
+#[derive(Debug, Clone)]
+pub struct Block {
+    pub id: String,
+    pub type_name: String,
+    pub start_line: usize,
+    /// The line of its `end`; `usize::MAX` while unclosed, which mid-edit it
+    /// usually is.
+    pub end_line: usize,
+}
+
 /// Everything the server knows about the names in one document.
 #[derive(Debug, Default)]
 pub struct Index {
     pub occurrences: Vec<Occurrence>,
     /// Component id -> component type, for resolving `id.property`.
     pub component_types: HashMap<String, String>,
+    /// Component and form blocks, in source order.
+    pub blocks: Vec<Block>,
     /// Subroutine name -> its header as written, `(a: int, b: int): int`.
     ///
     /// Kept as source text rather than as parsed types because that is what
@@ -164,6 +179,10 @@ impl Index {
                 Tok::End => {
                     if form_depth > 0 {
                         form_depth -= 1;
+                        // The innermost open block is the one this closes.
+                        if let Some(b) = ix.blocks.iter_mut().rev().find(|b| b.end_line == usize::MAX) {
+                            b.end_line = toks[i].line;
+                        }
                     } else {
                         scope = None;
                     }
@@ -171,7 +190,13 @@ impl Index {
                 Tok::Form => {
                     form_depth = 1;
                     if let Some((name, sp)) = ident_at(&toks, i + 1) {
-                        ix.push(name, sp, true, SymKind::Component, None);
+                        ix.push(name.clone(), sp, true, SymKind::Component, None);
+                        ix.blocks.push(Block {
+                            id: name,
+                            type_name: "form".into(),
+                            start_line: sp.line,
+                            end_line: usize::MAX,
+                        });
                         i += 2;
                         continue;
                     }
@@ -242,6 +267,12 @@ impl Index {
                         if let Some((id, id_sp)) = ident_at(&toks, i + 1) {
                             ix.push(name.clone(), sp, false, SymKind::ComponentType, None);
                             ix.component_types.insert(id.clone(), name.clone());
+                            ix.blocks.push(Block {
+                                id: id.clone(),
+                                type_name: name.clone(),
+                                start_line: id_sp.line,
+                                end_line: usize::MAX,
+                            });
                             ix.push(id, id_sp, true, SymKind::Component, None);
                             form_depth += 1;
                             i += 2;
@@ -362,6 +393,17 @@ impl Index {
             }
         }
         out
+    }
+
+    /// The innermost component (or form) block containing `line`.
+    ///
+    /// Innermost, so that inside `button ok` the answer is the button and not
+    /// the form around it — the events on offer are the button's.
+    pub fn block_at_line(&self, line: usize) -> Option<&Block> {
+        self.blocks
+            .iter()
+            .filter(|b| b.start_line <= line && line <= b.end_line)
+            .max_by_key(|b| b.start_line)
     }
 
     /// Which subroutine contains `line`, for scoping completion.
@@ -595,6 +637,25 @@ mod tests {
             "{:?}",
             ix.occurrences
         );
+    }
+
+    /// `on ` completion asks which component the caret is inside, and the
+    /// answer has to be the innermost block — the button, not the form.
+    #[test]
+    fn blocks_are_the_innermost_component_around_a_line() {
+        //          1        2          3          4          5      6      7
+        let src = "module m\nform Main\n  button ok\n    on \n  end\nend\nsub go\nend\n";
+        let ix = Index::build(src);
+        let b = ix.block_at_line(4).expect("inside the button");
+        assert_eq!((b.id.as_str(), b.type_name.as_str()), ("ok", "button"));
+        assert_eq!((b.start_line, b.end_line), (3, 5));
+        let f = ix.block_at_line(6).expect("the form's own end line");
+        assert_eq!(f.type_name, "form");
+        assert!(ix.block_at_line(7).is_none(), "a subroutine is not a block");
+        // While the block is still being typed it has no `end`; it is still
+        // the block the caret is in.
+        let ix = Index::build("module m\ntimer t\n  on ");
+        assert_eq!(ix.block_at_line(3).map(|b| b.type_name.as_str()), Some("timer"));
     }
 
     /// An unparseable file still lexes, and the index must still work — this is

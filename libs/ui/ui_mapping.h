@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace openepl::ui {
 
@@ -35,7 +36,7 @@ inline const char* tag_for(const char* type_name) {
     if (std::strcmp(type_name, "progressbar") == 0) return "progress";
     // A listbox and a spinner are assembled from plain elements: RmlUi has no
     // always-visible list, and no <input> that carries its own step buttons.
-    return "div";   // label, groupbox, form, listbox, spinner
+    return "div";   // label, groupbox, form, listbox, spinner, grid
 }
 
 /// The class an OpenEPL component wears, or nullptr when it needs none.
@@ -51,6 +52,7 @@ inline const char* class_for(const char* type_name) {
     if (std::strcmp(type_name, "radiobutton") == 0) return "oe-radio";
     if (std::strcmp(type_name, "listbox") == 0)     return "oe-listbox";
     if (std::strcmp(type_name, "spinner") == 0)     return "oe-spinner";
+    if (std::strcmp(type_name, "grid") == 0)        return "oe-grid";
     return nullptr;
 }
 
@@ -135,7 +137,87 @@ inline bool is_control_value(const char* type_name, const char* property) {
         return std::strcmp(property, "items") == 0 || std::strcmp(property, "selected") == 0;
     if (std::strcmp(type_name, "spinner") == 0)
         return std::strcmp(property, "value") == 0 || std::strcmp(property, "step") == 0;
+    if (std::strcmp(type_name, "grid") == 0)
+        return std::strcmp(property, "name") == 0 || std::strcmp(property, "bind") == 0 ||
+               std::strcmp(property, "columns") == 0 || std::strcmp(property, "rows") == 0 ||
+               std::strcmp(property, "selected") == 0;
     return false;
+}
+
+/// Text into an element's content: three characters would otherwise be read
+/// as markup. A cell holding `<none>` must show `<none>`.
+inline std::string rml_escape(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (char c : text) {
+        if (c == '&')      out += "&amp;";
+        else if (c == '<') out += "&lt;";
+        else if (c == '>') out += "&gt;";
+        else               out += c;
+    }
+    return out;
+}
+
+/// The inner markup of a grid: a header row and a row per line, each a run of
+/// cells, laid out as a table so the columns line up whatever is in them.
+///
+/// `columns` is the header, tab-separated; `rows` has a newline between rows
+/// and a tab between cells; `selected` counts from 1 and 0 marks none. It is
+/// built here rather than in the runtime alone so a designer canvas can show
+/// the same rows at design time from the same source — a grid that draws its
+/// header one way in Studio and another way in the built app is the WYSIWYG
+/// drift this header exists to prevent.
+///
+/// The header is a row like any other so that its cells share the data rows'
+/// column widths; the class is what draws it differently — which is also why
+/// it scrolls away with them, there being no sticky positioning to pin it.
+/// The table itself is nested in the grid's box rather than being it, because
+/// a table grows to hold its rows while the box has the height the form gave
+/// it — and the box is what scrolls and clips.
+inline std::string grid_markup(const std::string& columns, const std::string& rows, int selected) {
+    auto split = [](const std::string& text, char sep) {
+        std::vector<std::string> out;
+        std::string cur;
+        for (char c : text) {
+            if (c == sep) { out.push_back(cur); cur.clear(); }
+            else          cur += c;
+        }
+        // A trailing separator ends the last field rather than opening an
+        // empty one, matching ui_data.c; a trailing tab in a row therefore
+        // means a blank last cell only through the padding below.
+        if (!cur.empty()) out.push_back(cur);
+        return out;
+    };
+    const std::vector<std::string> head = split(columns, '\t');
+    std::vector<std::vector<std::string>> body;
+    for (const std::string& line : split(rows, '\n')) body.push_back(split(line, '\t'));
+
+    // The substrate fixes the column count from the first row and DROPS any
+    // cell past it, so every row is written with exactly the table's count:
+    // the header's when there is one, else the widest row's. A short row is
+    // padded, a long one under a header loses what the header has no column
+    // for — the same rule ui_table_column_count states for the data.
+    size_t width = head.size();
+    if (width == 0) {
+        for (const auto& row : body) width = row.size() > width ? row.size() : width;
+    }
+    auto cells = [&](const std::vector<std::string>& row) {
+        std::string out;
+        for (size_t i = 0; i < width; i++) {
+            out += "<div class='oe-cell'>";
+            if (i < row.size()) out += rml_escape(row[i]);
+            out += "</div>";
+        }
+        return out;
+    };
+    std::string out = "<div class='oe-table'>";
+    if (!head.empty()) out += "<div class='oe-head'>" + cells(head) + "</div>";
+    for (size_t n = 0; n < body.size(); n++) {
+        out += (int)n + 1 == selected ? "<div class='oe-row oe-selected'>" : "<div class='oe-row'>";
+        out += cells(body[n]) + "</div>";
+    }
+    out += "</div>";
+    return out;
 }
 
 /// OpenEPL property names use underscores (`background_color`) to match the rest
@@ -290,7 +372,38 @@ inline std::string control_styles(const std::string& scope = "") {
             " text-align: center; font-size: 12px; line-height: 12px; }" +
         p + "div.oe-spinner button.oe-step:hover { background-color: #dbe1e8; }" +
         p + "div.oe-spinner button.oe-up { top: 0; border-radius: 0 4px 0 0; }" +
-        p + "div.oe-spinner button.oe-down { top: 50%; border-radius: 0 0 4px 0; }";
+        p + "div.oe-spinner button.oe-down { top: 50%; border-radius: 0 0 4px 0; }" +
+
+        /* The rows are a real table so the columns align on their widest
+         * cell. Everything inside it is `position: relative` explicitly: the
+         * seed's `div { position: absolute }` would otherwise stack every row
+         * and every cell on the same point.
+         *
+         * The outer box scrolls, which the listbox could not afford: its bare
+         * rows had nothing definite to resolve their width against inside a
+         * scrolling container and collapsed to their padding. These rows are
+         * `table-row`s inside a `display: table; width: 100%` element, and
+         * take their width from the table — so `auto` is safe here and only
+         * here. Sideways stays hidden; a row wider than the box is clipped,
+         * not scrolled. */
+        p + "div.oe-grid { background-color: #ffffff; border: 1px #d0d7de; border-radius: 4px;"
+            " color: #1f2328; overflow-x: hidden; overflow-y: auto; }" +
+        p + "div.oe-grid scrollbarvertical { width: 10px; background-color: #f0f2f5; }" +
+        p + "div.oe-grid scrollbarvertical sliderbar { background-color: #c4cad3;"
+            " border-radius: 5px; margin: 0 2px 0 2px; }" +
+        p + "div.oe-grid scrollbarvertical sliderarrowdec, "
+          + p + "div.oe-grid scrollbarvertical sliderarrowinc { width: 0; height: 0; }" +
+        p + "div.oe-grid div.oe-table { display: table; position: relative; width: 100%;"
+            " box-sizing: border-box; }" +
+        p + "div.oe-grid div.oe-head, " + p + "div.oe-grid div.oe-row { display: table-row;"
+            " position: relative; }" +
+        p + "div.oe-grid div.oe-cell { display: table-cell; position: relative;"
+            " padding: 4px 8px 4px 8px; white-space: nowrap; overflow: hidden; }" +
+        p + "div.oe-grid div.oe-head { background-color: #eaeef2; }" +
+        p + "div.oe-grid div.oe-head div.oe-cell { font-weight: bold;"
+            " border-bottom: 1px #d0d7de; }" +
+        p + "div.oe-grid div.oe-row:hover { background-color: #dbe6f7; }" +
+        p + "div.oe-grid div.oe-selected { background-color: #1e60d5; color: #ffffff; }";
 }
 
 /// The seed document every OpenEPL form is built into.

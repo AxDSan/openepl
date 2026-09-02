@@ -210,3 +210,56 @@ fn an_unknown_template_names_the_ones_that_exist() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("console-app"), "must list the real ids: {err}");
 }
+
+/// The compiler's own output names the fix too: a typo says which command was
+/// meant, at the line it is on. The `line N:` shape is what Studio parses.
+#[test]
+fn a_typo_in_a_command_names_the_nearest_one() {
+    let home = scratch("typo_home");
+    let root = scratch("typo_root");
+    let src = root.join("main.oir");
+    std::fs::write(&src, "module m\nsub main\n  call prnt_text(\"hi\")\nend\n").unwrap();
+    let out = openepl(&root, &home, &["emit", src.to_str().unwrap()]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("line 3: in `main`: unknown command `prnt_text` — did you mean `print_text`?"),
+        "{err}"
+    );
+}
+
+/// A windowed program that reaches for `sys_sleep_ms` is refused at build
+/// time and pointed at `timer` — the event loop, taught at the moment it has
+/// to be learned. `emit` runs the same validation as `build` without needing
+/// the UI stack to be linkable.
+#[test]
+fn a_windowed_program_is_refused_sleep_and_pointed_at_timer() {
+    let home = scratch("sleep_home");
+    let root = scratch("sleep_root");
+    let src = root.join("main.oir");
+    std::fs::write(
+        &src,
+        //  1         2       3           4         5      6         7                        8
+        "module m\nuse ui\nuse system\nform win\nend\nsub main\n  call sys_sleep_ms(500)\nend\n",
+    )
+    .unwrap();
+    let out = openepl(&root, &home, &["emit", src.to_str().unwrap()]);
+    assert!(!out.status.success(), "a sleep in a windowed program must not build");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(
+            "line 7: in `main`: `sys_sleep_ms` would freeze the window — a windowed program \
+             does not wait, it declares a `timer` and does the work in its `on tick` handler"
+        ),
+        "{err}"
+    );
+
+    // The same call in a console program is fine: there is no window to freeze.
+    std::fs::write(
+        &src,
+        "module m\nuse system\nsub main\n  call sys_sleep_ms(1)\nend\n",
+    )
+    .unwrap();
+    let out = openepl(&root, &home, &["emit", src.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}

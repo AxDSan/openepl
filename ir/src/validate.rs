@@ -9,8 +9,13 @@
 //!
 //! Collects *all* errors rather than stopping at the first.
 //!
-//! Every diagnostic carries the source line of the statement it came from, so
-//! an editor (and the language server) can put the squiggle in the right place.
+//! Every diagnostic carries a position — the line, and where it can be known
+//! the columns of the name it is about — so an editor can put the squiggle
+//! under the mistake rather than under the line it sits on. And where the
+//! registry can tell what the author meant, the diagnostic says so: a command
+//! that lives in a library the module has not used, a name one typo away from
+//! a real one. A diagnostic that ends the confusion is the point; one that
+//! starts it is a stack trace with better manners.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,7 +25,8 @@ use crate::sema::{
 };
 use crate::registry::ComponentKind;
 use crate::{
-    Component, Elem, Expr, Item, Module, RecordDef, Registry, Stmt, StmtKind, Sub, Target, Ty,
+    Component, Elem, Expr, Item, Module, RecordDef, Registry, Span, Stmt, StmtKind, Sub, Target,
+    Ty,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,12 +35,23 @@ pub struct ValidateError {
     /// 1-based source line; 0 when the position is not known. An editor needs
     /// this to put the squiggle in the right place.
     pub line: usize,
+    /// 1-based byte columns of the offending name, `end_col` one past its last
+    /// byte; both 0 when only the line is known. Bytes, not characters — the
+    /// language server converts at its edge.
+    pub col: usize,
+    pub end_col: usize,
+}
+impl ValidateError {
+    pub fn span(&self) -> Span {
+        Span::new(self.line, self.col, self.end_col)
+    }
 }
 impl std::fmt::Display for ValidateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Prefix the position when we know it, so a plain `{e}` in the CLI reads
-        // the way a compiler diagnostic should. Consumers that want the parts
-        // separately (the language server) use the fields.
+        // Prefix the line when we know it, so a plain `{e}` in the CLI reads
+        // the way a compiler diagnostic should. The column stays in the fields:
+        // `line N:` is what the tests and Studio parse, and a consumer that
+        // wants the range (the language server) reads it there.
         if self.line > 0 {
             write!(f, "line {}: {}", self.line, self.msg)
         } else {
@@ -43,13 +60,40 @@ impl std::fmt::Display for ValidateError {
     }
 }
 
+/// What the validator can be told beyond the registry.
+///
+/// The registry holds the commands of the libraries the module `use`s — which
+/// is exactly what it cannot say anything about when the author calls one from
+/// a library they forgot to `use`. The caller that can see every library (the
+/// language server, the CLI) fills this in; `validate` without it still names
+/// every fix that needs no more than the registry.
+#[derive(Debug, Clone, Default)]
+pub struct Hints {
+    /// Command name -> the library that declares it, for commands the module
+    /// cannot see.
+    pub elsewhere: HashMap<String, String>,
+}
+
 /// Validate a whole module.  `Ok(())` means the backend may assume well-formed,
 /// well-typed IR.
 pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
+    validate_with(m, reg, &Hints::default())
+}
+
+/// `validate`, with what the caller knows about libraries the module has not
+/// used — see [`Hints`].
+pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Vec<ValidateError>> {
     let mut errs: Vec<ValidateError> = Vec::new();
-    // Every diagnostic carries a line (0 when the position is not known), so an
-    // editor can put the squiggle where the problem is.
-    let mut push = |msg: String, line: usize| errs.push(ValidateError { msg, line });
+    // Every diagnostic carries a position (all zero when it is not known), so
+    // an editor can put the squiggle where the problem is.
+    let mut push = |msg: String, at: Span| {
+        errs.push(ValidateError {
+            msg,
+            line: at.line,
+            col: at.col,
+            end_col: at.end_col,
+        })
+    };
 
     let subs: Vec<_> = m.subs().collect();
     let forms: Vec<_> = m.forms().collect();
@@ -68,7 +112,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                 "subroutine `{name}` has the same name as a library command — \
                  rename the subroutine"
             ),
-            line,
+            Span::line(line),
         );
     }
     for name in with_subs.register_records(m) {
@@ -81,7 +125,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                 "record `{name}` has the same name as a library command, a subroutine, \
                  or another record — rename the record"
             ),
-            line,
+            Span::line(line),
         );
     }
     let reg = &with_subs;
@@ -93,7 +137,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
             if let Some(bad) = undeclared_type(*fty, reg) {
                 push(
                     format!("record `{}` field `{fname}`: unknown type `{bad}`", rec.name),
-                    rec.line,
+                    Span::line(rec.line),
                 );
             }
         }
@@ -107,16 +151,16 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     let target = m.target();
     if target.is_executable() {
         if forms.is_empty() && !sub_names.contains("main") {
-            push("module has no `main` subroutine and no `form` (nothing to run)".into(), 0);
+            push("module has no `main` subroutine and no `form` (nothing to run)".into(), Span::default());
         }
         if target == Target::Console && !forms.is_empty() {
             push(
                 "`target console` but the module declares a form — use `target gui`".into(),
-                0,
+                Span::default(),
             );
         }
         if target == Target::Gui && forms.is_empty() {
-            push("`target gui` but the module declares no form".into(), 0);
+            push("`target gui` but the module declares no form".into(), Span::default());
         }
     } else {
         if subs.is_empty() {
@@ -125,7 +169,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                     "`target {}` exports nothing — a library needs at least one subroutine",
                     target.as_str()
                 ),
-                0,
+                Span::default(),
             );
         }
         if !forms.is_empty() {
@@ -134,7 +178,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                     "`target {}` cannot declare a form — build a GUI module as `target gui`",
                     target.as_str()
                 ),
-                0,
+                Span::default(),
             );
         }
     }
@@ -142,7 +186,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         push(format!(
             "v0.2 supports one form per module, found {}",
             forms.len()
-        ), 0);
+        ), Span::default());
     }
 
     // --- duplicate names -------------------------------------------------
@@ -152,7 +196,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     }
     for (name, n) in seen {
         if n > 1 {
-            push(format!("subroutine `{name}` is defined {n} times"), 0);
+            push(format!("subroutine `{name}` is defined {n} times"), Span::default());
         }
     }
 
@@ -166,7 +210,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
             push(
                 "`main` is the program entry: it takes no parameters and returns nothing"
                     .into(),
-                main.line,
+                main.name_span,
             );
         }
     }
@@ -179,7 +223,9 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
             "form",
             &form.name,
             &form.properties,
+            &form.property_spans,
             &form.handlers,
+            &form.handler_spans,
             &by_name,
             &mut push,
         );
@@ -188,7 +234,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                 push(format!(
                     "form `{}`: duplicate component id `{}`",
                     form.name, child.id
-                ), 0);
+                ), Span::default());
             }
             check_component(reg, form.name.as_str(), child, &by_name, &mut push);
             // A form is a place to draw things. A timer inside one would have
@@ -200,7 +246,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                         "form `{}`: `{}` is not a visual component — declare it at \
                          module level, outside the form",
                         form.name, child.type_name
-                    ), 0);
+                    ), Span::default());
                 }
             }
         }
@@ -214,7 +260,9 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
             &c.type_name,
             &c.id,
             &c.properties,
+            &c.property_spans,
             &c.handlers,
+            &c.handler_spans,
             &by_name,
             &mut push,
         );
@@ -223,7 +271,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                 push(format!(
                     "`{}`: `{}` is a visual component — it has to live inside a form",
                     c.id, c.type_name
-                ), 0);
+                ), Span::default());
             }
         }
     }
@@ -237,7 +285,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     }
     for c in &module_components {
         if components.insert(c.id.clone(), c.type_name.clone()).is_some() {
-            push(format!("duplicate component id `{}`", c.id), 0);
+            push(format!("duplicate component id `{}`", c.id), Span::default());
         }
     }
 
@@ -246,13 +294,13 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
     let mut global_types: HashMap<String, Ty> = HashMap::new();
     for g in &globals {
         if let Some(bad) = undeclared_type(g.ty, reg) {
-            push(format!("`var {}`: unknown type `{bad}`", g.name), 0);
+            push(format!("`var {}`: unknown type `{bad}`", g.name), Span::default());
         }
         // A global's initializer may call commands but must not read another
         // global: order-dependent global initialisation is a swamp, and a clear
         // error now beats a subtle one later.
         if let Err(e) = check_initializer(&g.value, &global_types, reg) {
-            push(format!("in initializer of `{}`: {e}", g.name), 0);
+            push(format!("in initializer of `{}`: {e}", g.name), Span::default());
         }
         match type_of_expr_hinted(&g.value, Some(g.ty), &HashMap::new(), reg, &components) {
             Ok(got) if got == g.ty => {}
@@ -261,14 +309,14 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                 g.name,
                 g.ty.as_str(),
                 got.as_str()
-            ), 0),
-            Err(e) => push(format!("in initializer of `{}`: {e}", g.name), 0),
+            ), Span::default()),
+            Err(e) => push(format!("in initializer of `{}`: {e}", g.name), Span::default()),
         }
         if global_types.insert(g.name.clone(), g.ty).is_some() {
             push(format!(
                 "module variable `{}` is declared more than once",
                 g.name
-            ), 0);
+            ), Span::default());
         }
     }
 
@@ -279,17 +327,17 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         if components.contains_key(name) {
             push(format!(
                 "`{name}` is both a module variable and a component id"
-            ), 0);
+            ), Span::default());
         }
         if sub_names.contains(name.as_str()) {
             push(format!(
                 "`{name}` is both a module variable and a subroutine"
-            ), 0);
+            ), Span::default());
         }
     }
     for id in components.keys() {
         if sub_names.contains(id.as_str()) {
-            push(format!("`{id}` is both a component id and a subroutine"), 0);
+            push(format!("`{id}` is both a component id and a subroutine"), Span::default());
         }
     }
     // A record is written in expression position, so its name is in the same
@@ -298,13 +346,13 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         if components.contains_key(&rec.name) {
             push(
                 format!("`{}` is both a record and a component id", rec.name),
-                rec.line,
+                Span::line(rec.line),
             );
         }
         if global_types.contains_key(&rec.name) {
             push(
                 format!("`{}` is both a record and a module variable", rec.name),
-                rec.line,
+                Span::line(rec.line),
             );
         }
     }
@@ -331,7 +379,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
         if let Some(bad) = sub.ret.and_then(|t| undeclared_type(t, reg)) {
             push(
                 format!("`{}` returns unknown type `{bad}`", sub.name),
-                sub.line,
+                sub.name_span,
             );
         }
         for (pname, pty) in &sub.params {
@@ -341,7 +389,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                         "in `{}`: parameter `{pname}` has unknown type `{bad}`",
                         sub.name
                     ),
-                    sub.line,
+                    sub.name_span,
                 );
             }
             if vars.insert(pname.clone(), *pty).is_some() {
@@ -350,7 +398,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                         "in `{}`: parameter `{pname}` has the same name as a module variable",
                         sub.name
                     ),
-                    sub.line,
+                    sub.name_span,
                 );
             }
             local_names.insert(pname.clone());
@@ -372,7 +420,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                         if let Some(bad) = undeclared_type(*ty, reg) {
                             push(
                                 format!("in `{}`: `{name}` has unknown type `{bad}`", sub.name),
-                                stmt.line,
+                                stmt.span,
                             );
                         }
                         match type_of_expr_hinted(value, Some(*ty), &vars, reg, &components) {
@@ -382,14 +430,14 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                 sub.name,
                                 ty.as_str(),
                                 got.as_str()
-                            ), stmt.line),
-                            Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                            ), stmt.span),
+                            Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                         }
                         if vars.insert(name.clone(), *ty).is_some() {
                             push(format!(
                                 "in `{}`: variable `{name}` is defined more than once",
                                 sub.name
-                            ), stmt.line);
+                            ), stmt.span);
                         }
                         local_names.insert(name.clone());
                         if *mutable {
@@ -403,10 +451,15 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                             .copied()
                             .or_else(|| global_types.get(name).copied());
                         match target {
-                            None => push(format!(
-                                "in `{}`: assignment to undefined variable `{name}`",
-                                sub.name
-                            ), stmt.line),
+                            None => report(
+                                &sub.name,
+                                stmt,
+                                format!("assignment to undefined variable `{name}`"),
+                                reg,
+                                hints,
+                                &vars,
+                                &mut push,
+                            ),
                             Some(expected) => {
                                 let is_local = local_names.contains(name);
                                 let is_mutable = if is_local {
@@ -419,17 +472,17 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                         push(format!(
                                             "in `{}`: `{name}` is the loop variable of a `for` and cannot be assigned to",
                                             sub.name
-                                        ), stmt.line);
+                                        ), stmt.span);
                                     } else if param_names.contains(name) {
                                         push(format!(
                                             "in `{}`: `{name}` is a parameter and cannot be assigned to",
                                             sub.name
-                                        ), stmt.line);
+                                        ), stmt.span);
                                     } else {
                                         push(format!(
                                         "in `{}`: `{name}` is immutable — declare it with `var` instead of `let` to allow assignment",
                                         sub.name
-                                    ), stmt.line);
+                                    ), stmt.span);
                                     }
                                 }
                                 match type_of_expr_hinted(
@@ -441,27 +494,46 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                         sub.name,
                                         expected.as_str(),
                                         got.as_str()
-                                    ), stmt.line),
-                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                    ), stmt.span),
+                                    Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                                 }
                             }
                         }
                     }
                     // `call` reaches commands and user subroutines alike; the
                     // two are resolved in one namespace, commands first.
+                    // A window is drawn by the event loop, and `sys_sleep_ms`
+                    // holds the loop's thread: the program is "waiting" and the
+                    // window is a frozen rectangle. Refusing it here, with the
+                    // alternative named, teaches the loop at the moment it has
+                    // to be learned — a run-time freeze teaches nothing.
+                    StmtKind::Call { cmd, .. } if cmd == "sys_sleep_ms" && !forms.is_empty() => {
+                        push(
+                            format!("in `{}`: {}", sub.name, SLEEP_IN_A_WINDOW),
+                            stmt.ident_span(cmd).unwrap_or(stmt.span),
+                        );
+                    }
                     StmtKind::Call { cmd, args } => match callee(cmd, reg) {
-                        None => push(format!("in `{}`: unknown command `{cmd}`", sub.name), stmt.line),
+                        None => report(
+                            &sub.name,
+                            stmt,
+                            format!("unknown command `{cmd}`"),
+                            reg,
+                            hints,
+                            &vars,
+                            &mut push,
+                        ),
                         Some((what, sig)) => {
                             if let Err(e) = check_args_labeled(
                                 what, cmd, &sig.params, args, &vars, reg, &components,
                             ) {
-                                push(format!("in `{}`: {}", sub.name, e), stmt.line);
+                                report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push);
                             }
                         }
                     },
                     StmtKind::If { arms, otherwise } => {
                         for (cond, body) in arms {
-                            check_condition(cond, &vars, reg, &components, &sub.name, stmt.line, &mut push);
+                            check_condition(cond, &vars, reg, hints, &components, &sub.name, stmt, &mut push);
                             stack.push(body);
                         }
                         if let Some(body) = otherwise {
@@ -469,7 +541,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                         }
                     }
                     StmtKind::While { cond, body } => {
-                        check_condition(cond, &vars, reg, &components, &sub.name, stmt.line, &mut push);
+                        check_condition(cond, &vars, reg, hints, &components, &sub.name, stmt, &mut push);
                         stack.push(body);
                     }
                     StmtKind::For {
@@ -486,15 +558,15 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                     "in `{}`: a `for` counts with `int` values — its {what} value is {}",
                                     sub.name,
                                     other.as_str()
-                                ), stmt.line),
-                                Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                ), stmt.span),
+                                Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                             }
                         }
                         if vars.insert(var.clone(), Ty::Int).is_some() {
                             push(format!(
                                 "in `{}`: variable `{var}` is defined more than once",
                                 sub.name
-                            ), stmt.line);
+                            ), stmt.span);
                         }
                         local_names.insert(var.clone());
                         loop_vars.insert(var.clone());
@@ -510,11 +582,11 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                             sub.name,
                             sub.name,
                             want.as_str()
-                        ), stmt.line),
+                        ), stmt.span),
                         (Some(_), None) => push(format!(
                             "in `{}`: `{}` declares no return type, so `return` cannot carry a value",
                             sub.name, sub.name
-                        ), stmt.line),
+                        ), stmt.span),
                         (Some(e), Some(want)) => {
                             match type_of_expr_hinted(e, Some(want), &vars, reg, &components) {
                                 Ok(got) if got == want => {}
@@ -524,8 +596,8 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                     sub.name,
                                     want.as_str(),
                                     got.as_str()
-                                ), stmt.line),
-                                Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                ), stmt.span),
+                                Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                             }
                         }
                     },
@@ -534,10 +606,15 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                     StmtKind::SetIndex { name, index, value } => {
                         let target = vars.get(name).copied();
                         match target {
-                            None => push(format!(
-                                "in `{}`: assignment to undefined variable `{name}`",
-                                sub.name
-                            ), stmt.line),
+                            None => report(
+                                &sub.name,
+                                stmt,
+                                format!("assignment to undefined variable `{name}`"),
+                                reg,
+                                hints,
+                                &vars,
+                                &mut push,
+                            ),
                             // `d["k"] = v` is `dict_set` spelled as a
                             // subscript. It stores under a key rather than at a
                             // position, so it is the one subscript assignment
@@ -550,8 +627,8 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                         "in `{}`: a dictionary is keyed by text, got {}",
                                         sub.name,
                                         other.as_str()
-                                    ), stmt.line),
-                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                    ), stmt.span),
+                                    Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                                 }
                                 match type_of_expr_hinted(
                                     value, Some(v.ty()), &vars, reg, &components,
@@ -562,8 +639,8 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                         sub.name,
                                         v.as_str(),
                                         got.as_str()
-                                    ), stmt.line),
-                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                    ), stmt.span),
+                                    Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                                 }
                             }
                             Some(Ty::Array(_)) | Some(Ty::Bytes) => {
@@ -587,7 +664,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                                     "in `{}`: index {v} is before the start of `{name}` — \
                                                      positions count from 1",
                                                     sub.name
-                                                ), stmt.line);
+                                                ), stmt.span);
                                             }
                                         }
                                     }
@@ -595,8 +672,8 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                         "in `{}`: an index counts with `int` values, got {}",
                                         sub.name,
                                         other.as_str()
-                                    ), stmt.line),
-                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                    ), stmt.span),
+                                    Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                                 }
                                 match type_of_expr_hinted(
                                     value, Some(expected), &vars, reg, &components,
@@ -607,8 +684,8 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                         sub.name,
                                         expected.as_str(),
                                         got.as_str()
-                                    ), stmt.line),
-                                    Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                    ), stmt.span),
+                                    Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                                 }
                             }
                             Some(other) => push(format!(
@@ -616,7 +693,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                  dictionary has elements",
                                 sub.name,
                                 other.as_str()
-                            ), stmt.line),
+                            ), stmt.span),
                         }
                     }
                     // `p.x = 5` writes a record field when `p` is a record and
@@ -631,7 +708,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                             unreachable!("guarded above")
                         };
                         match field_type(rec, property, reg) {
-                            Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                            Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                             Ok(expected) => match type_of_expr_hinted(
                                 value, Some(expected), &vars, reg, &components,
                             ) {
@@ -641,8 +718,8 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                     sub.name,
                                     expected.as_str(),
                                     got.as_str()
-                                ), stmt.line),
-                                Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                                ), stmt.span),
+                                Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                             },
                         }
                     }
@@ -651,7 +728,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                         property,
                         value,
                     } => match property_type(component, property, reg, &components) {
-                        Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                        Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                         Ok(expected) => match type_of_expr_in(value, &vars, reg, &components) {
                             Ok(got) if got == expected => {}
                             Ok(got) => push(format!(
@@ -659,8 +736,8 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                                 sub.name,
                                 expected.as_str(),
                                 got.as_str()
-                            ), stmt.line),
-                            Err(e) => push(format!("in `{}`: {}", sub.name, e), stmt.line),
+                            ), stmt.span),
+                            Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                         },
                     },
                 }
@@ -680,7 +757,7 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
                         sub.name,
                         want.as_str()
                     ),
-                    sub.line,
+                    sub.name_span,
                 );
             }
         }
@@ -717,7 +794,7 @@ fn check_loop_control(
     body: &[Stmt],
     in_loop: bool,
     sub: &str,
-    push: &mut impl FnMut(String, usize),
+    push: &mut impl FnMut(String, Span),
 ) {
     for stmt in body {
         match &stmt.kind {
@@ -729,7 +806,7 @@ fn check_loop_control(
                 };
                 push(
                     format!("in `{sub}`: `{word}` is only meaningful inside a `while` or `for`"),
-                    stmt.line,
+                    stmt.span,
                 );
             }
             StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
@@ -753,19 +830,146 @@ fn check_condition(
     cond: &Expr,
     vars: &HashMap<String, Ty>,
     reg: &Registry,
+    hints: &Hints,
     components: &Components,
     sub: &str,
-    line: usize,
-    push: &mut impl FnMut(String, usize),
+    stmt: &Stmt,
+    push: &mut impl FnMut(String, Span),
 ) {
     match type_of_expr_in(cond, vars, reg, components) {
         Ok(Ty::Bool) => {}
         Ok(other) => push(
             format!("in `{sub}`: condition must be a truth value, found {}", other.as_str()),
-            line,
+            stmt.span,
         ),
-        Err(e) => push(format!("in `{sub}`: {e}"), line),
+        Err(e) => report(sub, stmt, e.to_string(), reg, hints, vars, push),
     }
+}
+
+/// The refusal a windowed program meets when it reaches for `sys_sleep_ms`.
+const SLEEP_IN_A_WINDOW: &str = "`sys_sleep_ms` would freeze the window — a windowed program \
+does not wait, it declares a `timer` and does the work in its `on tick` handler";
+
+/// A diagnostic about a statement, placed on the name it is about and finished
+/// with the fix when one can be named.
+///
+/// The type checker's errors are plain text with no position, so the name is
+/// read back out of the message: the first backticked word is, by convention
+/// throughout `sema`, the thing the sentence is about. When the statement's
+/// header does not contain it the whole header is underlined, which is what
+/// every diagnostic used to get.
+fn report(
+    sub: &str,
+    stmt: &Stmt,
+    msg: String,
+    reg: &Registry,
+    hints: &Hints,
+    vars: &HashMap<String, Ty>,
+    push: &mut impl FnMut(String, Span),
+) {
+    let at = backticked(&msg)
+        .and_then(|name| stmt.ident_span(name))
+        .unwrap_or(stmt.span);
+    let msg = name_the_fix(msg, reg, hints, vars);
+    push(format!("in `{sub}`: {msg}"), at);
+}
+
+/// The first `` `word` `` in a message.
+fn backticked(msg: &str) -> Option<&str> {
+    let rest = &msg[msg.find('`')? + 1..];
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+/// Append the fix to a diagnostic whose fix the registry can name.
+///
+/// Two cases are worth the special handling. A command the module cannot see
+/// because it never `use`d the library is the mistake every newcomer makes
+/// once per library, and the registry of every library knows the answer. A
+/// name one typo away from a real one is the other, and the only thing the
+/// message can do about it is say which real one.
+fn name_the_fix(msg: String, reg: &Registry, hints: &Hints, vars: &HashMap<String, Ty>) -> String {
+    if let Some(name) = msg.strip_prefix("unknown command `").and_then(backtick_end) {
+        if let Some(lib) = hints.elsewhere.get(name) {
+            return format!("{msg} — it is in the `{lib}` library: add `use {lib}` to the module");
+        }
+        let callables = reg.names().chain(reg.sub_names()).chain(reg.record_names());
+        return match closest(name, callables) {
+            Some(c) => format!("{msg} — did you mean `{c}`?"),
+            None => msg,
+        };
+    }
+    for prefix in [
+        "use of undefined variable `",
+        "assignment to undefined variable `",
+    ] {
+        if let Some(name) = msg.strip_prefix(prefix).and_then(backtick_end) {
+            return match closest(name, vars.keys().map(String::as_str)) {
+                Some(c) => format!("{msg} — did you mean `{c}`?"),
+                None => msg,
+            };
+        }
+    }
+    msg
+}
+
+/// `name` of `` name`... ``: the rest of a message after a name's opening
+/// backtick, cut at the closing one.
+fn backtick_end(rest: &str) -> Option<&str> {
+    rest.find('`').map(|end| &rest[..end])
+}
+
+/// The candidate closest to `name` by edit distance, if any is close enough
+/// to be a plausible typo rather than a different word.
+///
+/// Compared case-insensitively, so `Print_text` finds `print_text` at distance
+/// zero. The allowance grows with the length: one edit in a short name is a
+/// different name, two in a long one is still a slip.
+fn closest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let allowance = if name.len() <= 4 { 1 } else { 2 };
+    let lower = name.to_ascii_lowercase();
+    let mut best: Option<(usize, &str)> = None;
+    for c in candidates {
+        if c == name {
+            continue;
+        }
+        let d = edit_distance(&lower, &c.to_ascii_lowercase());
+        if d > allowance {
+            continue;
+        }
+        // Ties fall to the alphabetically first, so the answer does not depend
+        // on hash-map order.
+        let better = match best {
+            None => true,
+            Some((bd, bc)) => d < bd || (d == bd && c < bc),
+        };
+        if better {
+            best = Some((d, c));
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
+/// Levenshtein distance over bytes, with an adjacent transposition counted as
+/// one edit — `teh` is one slip away from `the`, not two.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut prev2: Vec<usize> = Vec::new();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut cur = vec![i; b.len() + 1];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                cur[j] = cur[j].min(prev2[j - 2] + 1);
+            }
+        }
+        prev2 = prev;
+        prev = cur;
+    }
+    prev[b.len()]
 }
 
 /// A module variable's initializer may call commands but must not read another
@@ -863,7 +1067,7 @@ fn undeclared_type(ty: Ty, reg: &Registry) -> Option<&'static str> {
 /// The walk is an explicit stack, not recursion: the graph being checked is
 /// the one that might contain a cycle, so the checker must not be the thing
 /// that follows it forever.
-fn check_record_cycles(records: &[&RecordDef], push: &mut impl FnMut(String, usize)) {
+fn check_record_cycles(records: &[&RecordDef], push: &mut impl FnMut(String, Span)) {
     let by_name: HashMap<&str, &RecordDef> =
         records.iter().map(|r| (r.name.as_str(), *r)).collect();
     for rec in records {
@@ -897,7 +1101,7 @@ fn check_record_cycles(records: &[&RecordDef], push: &mut impl FnMut(String, usi
                      (`{}[]`) can.",
                     rec.name, rec.name
                 ),
-                rec.line,
+                Span::line(rec.line),
             );
         }
     }
@@ -917,31 +1121,38 @@ fn check_component(
     form: &str,
     c: &Component,
     subs: &HashMap<&str, &Sub>,
-    push: &mut impl FnMut(String, usize),
+    push: &mut impl FnMut(String, Span),
 ) {
     let where_ = format!("{}.{}", form, c.id);
-    check_component_like(
-        reg,
-        &c.type_name,
-        &where_,
-        &c.properties,
-        &c.handlers,
-        subs,
-        push,
-    );
+    check_component_like(reg, &c.type_name, &where_, c.properties.as_slice(), &c.property_spans, &c.handlers, &c.handler_spans, subs, push);
+}
+
+/// ` — did you mean `x`?`, or nothing.
+fn did_you_mean<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> String {
+    match closest(name, candidates) {
+        Some(c) => format!(" — did you mean `{c}`?"),
+        None => String::new(),
+    }
 }
 
 /// Shared checking for a form root or a child component: the type must exist,
 /// every property must be declared by that type with a matching value type, and
 /// every event must exist and bind to a real subroutine.
+///
+/// `property_spans` and `handler_spans` run parallel to `properties` and
+/// `handlers`; a missing entry (a component built by hand rather than parsed)
+/// falls back to no position.
+#[allow(clippy::too_many_arguments)]
 fn check_component_like(
     reg: &Registry,
     type_name: &str,
     where_: &str,
     properties: &[(String, Expr)],
+    property_spans: &[Span],
     handlers: &[(String, String)],
+    handler_spans: &[Span],
     subs: &HashMap<&str, &Sub>,
-    push: &mut impl FnMut(String, usize),
+    push: &mut impl FnMut(String, Span),
 ) {
     let Some(desc) = reg.component(type_name) else {
         let mut known: Vec<&str> = reg.component_names().collect();
@@ -951,21 +1162,24 @@ fn check_component_like(
             if known.is_empty() {
                 " (no component library is in scope — add `use ui`)".to_string()
             } else {
-                format!(" (known: {})", known.join(", "))
+                let hint = did_you_mean(type_name, known.iter().copied());
+                format!("{hint} (known: {})", known.join(", "))
             }
-        ), 0);
+        ), Span::default());
         return;
     };
 
     let empty = HashMap::new();
-    for (name, value) in properties {
+    for (i, (name, value)) in properties.iter().enumerate() {
+        let at = property_spans.get(i).copied().unwrap_or_default();
         let Some(prop) = desc.property(name) else {
             let mut known: Vec<&str> = desc.properties.iter().map(|p| p.name.as_str()).collect();
             known.sort_unstable();
             push(format!(
-                "`{where_}`: component `{type_name}` has no property `{name}` (has: {})",
+                "`{where_}`: component `{type_name}` has no property `{name}`{} (has: {})",
+                did_you_mean(name, known.iter().copied()),
                 known.join(", ")
-            ), 0);
+            ), at);
             continue;
         };
         match type_of_expr_in(value, &empty, reg, &Components::new()) {
@@ -974,33 +1188,36 @@ fn check_component_like(
                 "`{where_}`: property `{name}` expects {}, got {}",
                 prop.ty.as_str(),
                 got.as_str()
-            ), 0),
-            Err(e) => push(format!("`{where_}`: property `{name}`: {e}"), 0),
+            ), at),
+            Err(e) => push(format!("`{where_}`: property `{name}`: {e}"), at),
         }
     }
 
-    for (event, handler) in handlers {
+    for (i, (event, handler)) in handlers.iter().enumerate() {
+        let at = handler_spans.get(i).copied().unwrap_or_default();
         if !desc.has_event(event) {
             let known = desc.events.join(", ");
             push(format!(
-                "`{where_}`: component `{type_name}` has no event `{event}`{}",
+                "`{where_}`: component `{type_name}` has no event `{event}`{}{}",
+                did_you_mean(event, desc.events.iter().map(String::as_str)),
                 if known.is_empty() {
                     String::new()
                 } else {
                     format!(" (has: {known})")
                 }
-            ), 0);
+            ), at);
         }
         let wants = reg.event_params(type_name, event);
         match subs.get(handler.as_str()) {
             None => push(format!(
-                "`{where_}`: event `{event}` is bound to `{handler}`, which is not a subroutine in this module"
-            ), 0),
+                "`{where_}`: event `{event}` is bound to `{handler}`, which is not a subroutine in this module{}",
+                did_you_mean(handler, subs.keys().copied()),
+            ), at),
             // Nothing calls a handler for its answer, so a return type is
             // wrong whatever the event hands over.
             Some(sub) if sub.ret.is_some() => push(format!(
                 "`{where_}`: event `{event}` is bound to `{handler}`, which returns a value — an event handler returns nothing"
-            ), sub.line),
+            ), sub.name_span),
             // Either the handler asks for what the event hands it, or it asks
             // for nothing. Taking nothing is not a concession to old code: an
             // event that reports something a handler does not need should not
@@ -1009,13 +1226,41 @@ fn check_component_like(
             Some(sub)
                 if sub.params.len() == wants.len()
                     && sub.params.iter().zip(wants).all(|((_, got), w)| got == w) => {}
+            // Both signatures, in the shape each is written: the event's as
+            // the parameter list a handler would declare, the handler's as it
+            // was declared. The fix is in the subroutine, so that is what the
+            // position points at.
             Some(sub) => push(format!(
-                "`{where_}`: event `{event}` hands a handler ({}), but `{handler}` takes ({}) — take exactly those, or none",
+                "`{where_}`: event `{event}` hands a handler ({}), but `{handler}` takes ({}) — take exactly those, or none: `sub {handler}({})`",
                 type_list(wants),
                 type_list(&sub.params.iter().map(|(_, t)| *t).collect::<Vec<_>>()),
-            ), sub.line),
+                param_list(wants),
+            ), sub.name_span),
         }
     }
+}
+
+/// `n: int, s: text` — a parameter list a handler could paste. Events carry
+/// types only, so the names are made up from the types; the author renames
+/// them in the same keystroke they would have spent typing them.
+pub fn param_list(types: &[Ty]) -> String {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut out = Vec::new();
+    for t in types {
+        let stem = match t {
+            Ty::Int | Ty::Int64 => "n",
+            Ty::Double => "x",
+            Ty::Text => "s",
+            Ty::Bool => "flag",
+            Ty::Bytes => "data",
+            _ => "value",
+        };
+        let seen = counts.entry(stem).or_insert(0);
+        *seen += 1;
+        let name = if *seen == 1 { stem.to_string() } else { format!("{stem}{seen}") };
+        out.push(format!("{name}: {}", t.as_str()));
+    }
+    out.join(", ")
 }
 
 #[cfg(test)]
@@ -1676,6 +1921,148 @@ mod tests {
         });
         let m = buzzer_module("sub h(n: int)\n  call print_int(n)\nend\n");
         assert!(validate(&m, &r).is_err());
+    }
+
+    // --- diagnostics that name the fix, and where -------------------------
+
+    /// A diagnostic underlines the name it is about, not the line it sits on:
+    /// with two calls on one line, "something here is wrong" is not a
+    /// diagnostic.
+    #[test]
+    fn a_diagnostic_carries_the_columns_of_the_name_it_is_about() {
+        //                     1         2
+        //            123456789012345678901234567890
+        let src = "module m\nsub main\n  call print_int(nope(1))\nend\n";
+        let e = errors(src);
+        let bad = e.iter().find(|e| e.msg.contains("unknown command `nope`")).unwrap();
+        assert_eq!((bad.line, bad.col, bad.end_col), (3, 18, 22), "{bad:?}");
+        // The rendered form is unchanged: the CLI and Studio parse `line N:`.
+        assert!(bad.to_string().starts_with("line 3: "), "{bad}");
+
+        // A message about a name the header does not contain still gets the
+        // header, which is what every diagnostic used to get.
+        let e = errors("module m\nsub main\n  if 5\n    call print_int(1)\n  end\nend\n");
+        let bad = e.iter().find(|e| e.msg.contains("truth value")).unwrap();
+        assert_eq!((bad.line, bad.col, bad.end_col), (3, 3, 7), "{bad:?}");
+    }
+
+    #[test]
+    fn an_unknown_command_suggests_the_nearest_real_one() {
+        let e = errors("module m\nsub main\n  call prnt_text(\"hi\")\nend\n");
+        let bad = e.iter().find(|e| e.msg.contains("unknown command")).unwrap();
+        assert_eq!(
+            bad.msg,
+            "in `main`: unknown command `prnt_text` — did you mean `print_text`?"
+        );
+        // Subroutines are candidates too, and a wholly different word is not.
+        let e = errors("module m\nsub greet\nend\nsub main\n  call gret()\n  call frobnicate()\nend\n");
+        assert!(e.iter().any(|e| e.msg.ends_with("did you mean `greet`?")), "{e:?}");
+        let far = e.iter().find(|e| e.msg.contains("frobnicate")).unwrap();
+        assert!(!far.msg.contains("did you mean"), "{far:?}");
+    }
+
+    #[test]
+    fn an_undefined_variable_suggests_the_nearest_one_in_scope() {
+        let e = errors("module m\nsub main\n  var total: int = 1\n  totl = 2\n  call print_int(totla)\nend\n");
+        assert!(
+            e.iter().any(|e| e.msg == "in `main`: assignment to undefined variable `totl` — did you mean `total`?"),
+            "{e:?}"
+        );
+        assert!(
+            e.iter().any(|e| e.msg == "in `main`: use of undefined variable `totla` — did you mean `total`?"),
+            "{e:?}"
+        );
+    }
+
+    /// The registry cannot see a library the module never `use`d; the caller
+    /// can, and says so through `Hints`. The message names the exact line to
+    /// add.
+    #[test]
+    fn a_command_from_an_unused_library_says_which_use_to_add() {
+        let m = parse("module m\nsub main\n  let t: text = file_read_text(\"a\")\nend\n").unwrap();
+        let mut hints = Hints::default();
+        hints.elsewhere.insert("file_read_text".into(), "file".into());
+        let e = validate_with(&m, &reg(), &hints).unwrap_err();
+        assert_eq!(
+            e[0].msg,
+            "in `main`: unknown command `file_read_text` — it is in the `file` library: add `use file` to the module"
+        );
+        assert_eq!((e[0].line, e[0].col), (3, 17), "{e:?}");
+    }
+
+    #[test]
+    fn closest_allows_a_slip_but_not_a_different_word() {
+        let names = ["print_text", "print_int", "length", "concat"];
+        let it = || names.iter().copied();
+        assert_eq!(closest("prnt_text", it()), Some("print_text"));
+        assert_eq!(closest("lenght", it()), Some("length"));
+        assert_eq!(closest("Length", it()), Some("length"));
+        assert_eq!(closest("print", it()), None);
+        assert_eq!(closest("xyz", it()), None);
+        assert_eq!(closest("length", it()), None, "an exact match is not a suggestion");
+    }
+
+    /// `sys_sleep_ms` holds the thread the window is drawn from. A module with
+    /// a form is refused it at build time, and told what to use instead.
+    #[test]
+    fn a_windowed_program_may_not_sleep() {
+        use crate::registry::{ComponentDesc, ComponentKind};
+        use crate::Signature;
+        let mut r = Registry::core();
+        r.insert("sys_sleep_ms", Signature { params: vec![Ty::Int], ret: None }, "x");
+        r.insert_component(ComponentDesc {
+            name: "form".into(),
+            a11y_role: 0,
+            kind: ComponentKind::Visual,
+            library: "ui".into(),
+            properties: Vec::new(),
+            events: Vec::new(),
+        });
+        let m = parse("module m\nform win\nend\nsub main\n  call sys_sleep_ms(500)\nend\n").unwrap();
+        let e = validate(&m, &r).unwrap_err();
+        assert_eq!(
+            e[0].msg,
+            "in `main`: `sys_sleep_ms` would freeze the window — a windowed program \
+             does not wait, it declares a `timer` and does the work in its `on tick` handler"
+        );
+        assert_eq!((e[0].line, e[0].col, e[0].end_col), (5, 8, 20), "{e:?}");
+        // Without a form there is no window to freeze.
+        let m = parse("module m\nsub main\n  call sys_sleep_ms(500)\nend\n").unwrap();
+        assert!(validate(&m, &r).is_ok());
+    }
+
+    /// The binding line is where a bad event or handler name is written, and
+    /// both are a typo away from a real one often enough to say which.
+    #[test]
+    fn a_bad_binding_is_placed_on_its_line_and_suggests_the_fix() {
+        let src = "module m\n\nbuzzer b\n  on beeb: hh\nend\n\nsub main\nend\n\nsub h\nend\n";
+        let e = validate(&parse(src).unwrap(), &reg_with_event_param()).unwrap_err();
+        let ev = e.iter().find(|e| e.msg.contains("has no event")).unwrap();
+        assert_eq!(
+            ev.msg,
+            "`b`: component `buzzer` has no event `beeb` — did you mean `beep`? (has: beep)"
+        );
+        assert_eq!((ev.line, ev.col, ev.end_col), (4, 6, 10), "{ev:?}");
+        let hd = e.iter().find(|e| e.msg.contains("not a subroutine")).unwrap();
+        assert!(hd.msg.ends_with("— did you mean `h`?"), "{hd:?}");
+        assert_eq!(hd.line, 4);
+    }
+
+    #[test]
+    fn a_wrong_handler_signature_shows_both_and_the_line_to_paste() {
+        let m = buzzer_module("sub h(s: text)\n  call print_text(s)\nend\n");
+        let e = validate(&m, &reg_with_event_param()).unwrap_err();
+        assert_eq!(
+            e[0].msg,
+            "`b`: event `beep` hands a handler (int), but `h` takes (text) — take exactly those, or none: `sub h(n: int)`"
+        );
+        assert_eq!((e[0].line, e[0].col), (11, 5), "points at the handler's name: {e:?}");
+    }
+
+    #[test]
+    fn param_lists_name_parameters_from_their_types() {
+        assert_eq!(param_list(&[Ty::Int, Ty::Text, Ty::Int]), "n: int, s: text, n2: int");
+        assert_eq!(param_list(&[]), "");
     }
 
     #[test]

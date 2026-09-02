@@ -649,3 +649,165 @@ fn records_and_dictionaries_reach_the_editor() {
     assert!(text.contains("record type"), "hover on a record: {text}");
     c.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostics that name the fix, and where
+// ---------------------------------------------------------------------------
+
+/// Two calls on one line: the squiggle has to say which. The range covers the
+/// offending name, not the line it sits on.
+#[test]
+fn diagnostics_underline_the_name_not_the_line() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_cols.oir";
+    //                                   0-based columns: `nope` is 17..21
+    c.open(uri, "module m\nsub main\n  call print_int(nope(1))\nend\n");
+    let d = c.diagnostics(uri);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0]["range"]["start"]["line"], 2);
+    assert_eq!(d[0]["range"]["start"]["character"], 17, "{:?}", d[0]);
+    assert_eq!(d[0]["range"]["end"]["character"], 21, "{:?}", d[0]);
+    c.shutdown();
+}
+
+/// The column is UTF-16, like every other position: a non-Latin string to the
+/// left of the mistake must not shift the squiggle.
+#[test]
+fn diagnostic_columns_are_utf16() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_cols_utf16.oir";
+    // "héllo" is 5 UTF-16 units, 6 bytes. `nope` starts at unit 27.
+    c.open(uri, "module m\nsub main\n  call print_text(\"héllo\" + nope())\nend\n");
+    let d = c.diagnostics(uri);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0]["range"]["start"]["character"], 28, "{:?}", d[0]);
+    assert_eq!(d[0]["range"]["end"]["character"], 32, "{:?}", d[0]);
+    c.shutdown();
+}
+
+/// A command from a library the module never `use`d: the message names the
+/// line to add. This is the one diagnostic the registry alone cannot give, so
+/// it is asserted here, through the server that can.
+#[test]
+fn a_command_from_an_unused_library_names_the_use_line() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_elsewhere.oir";
+    c.open(uri, "module m\nsub main\n  let t: text = file_read_text(\"a\")\nend\n");
+    let d = c.diagnostics(uri);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(
+        d[0]["message"],
+        "in `main`: unknown command `file_read_text` — it is in the `file` library: add `use file` to the module"
+    );
+    c.shutdown();
+}
+
+#[test]
+fn a_typo_suggests_the_nearest_command() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_typo.oir";
+    c.open(uri, "module m\nsub main\n  call prnt_text(\"hi\")\nend\n");
+    let d = c.diagnostics(uri);
+    assert_eq!(
+        d[0]["message"],
+        "in `main`: unknown command `prnt_text` — did you mean `print_text`?"
+    );
+    c.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// The RAD loop: `on ` completion
+// ---------------------------------------------------------------------------
+
+fn labels(r: &serde_json::Value) -> Vec<String> {
+    r.as_array()
+        .expect("completion list")
+        .iter()
+        .map(|i| i["label"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Inside a component block, `on ` offers exactly that component's events —
+/// and says what each hands a handler, so the signature is never a guess.
+#[test]
+fn completion_after_on_offers_the_components_events() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_on.oir";
+    //          1        2        3                 4      5    6        7
+    c.open(uri, "module m\ntimer t\n  interval = 500\n  on \nend\nsub main\nend\n");
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(120, "textDocument/completion", Client::at(uri, 3, 5));
+    assert_eq!(labels(&r), vec!["tick"], "{r}");
+    let tick = &r.as_array().unwrap()[0];
+    assert_eq!(tick["detail"], "timer event — hands (n: int)", "{tick}");
+    c.shutdown();
+}
+
+/// The handler position offers the subroutines that exist, plus one that does
+/// not: accepting it writes `sub t_tick(n: int) … end` at the end of the file.
+/// That edit is the whole RAD loop — draw, wire, and the handler is there.
+#[test]
+fn handler_completion_writes_the_subroutine_with_the_events_parameters() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_handler.oir";
+    //          1        2        3            4      5         6
+    let src = "module m\ntimer t\n  on tick: \nend\nsub main\nend\n";
+    c.open(uri, src);
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(121, "textDocument/completion", Client::at(uri, 2, 11));
+    let names = labels(&r);
+    assert!(names.contains(&"main".to_string()), "existing subroutines: {names:?}");
+    let new = r
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "t_tick")
+        .unwrap_or_else(|| panic!("the new handler: {names:?}"));
+    assert_eq!(new["insertText"], "t_tick");
+    let edit = &new["additionalTextEdits"][0];
+    assert_eq!(
+        edit["newText"], "\nsub t_tick(n: int)\n  \nend\n",
+        "the event hands an int, so the handler takes one: {new}"
+    );
+    assert_eq!(edit["range"]["start"]["line"], 6, "after the last line: {new}");
+
+    // Once the subroutine exists it is offered as itself, not created twice.
+    let uri2 = "file:///tmp/openepl_lsp_handler2.oir";
+    c.open(uri2, "module m\ntimer t\n  on tick: \nend\nsub main\nend\nsub t_tick(n: int)\nend\n");
+    let _ = c.diagnostics(uri2);
+    let r = c.request(122, "textDocument/completion", Client::at(uri2, 2, 11));
+    let ticks: Vec<&serde_json::Value> = r
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["label"] == "t_tick")
+        .collect();
+    assert_eq!(ticks.len(), 1, "{r}");
+    assert!(ticks[0]["additionalTextEdits"].is_null(), "{}", ticks[0]);
+    c.shutdown();
+}
+
+/// Hover on a property — as `id.name` or on its line inside the block — shows
+/// its type and the editor an inspector would offer.
+#[test]
+fn hover_on_a_property_shows_its_type_and_editor() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_prophover.oir";
+    //          1        2      3          4           5                            6     7    8      9                10
+    let src = "module m\nuse ui\nform Main\n  button ok\n    background_color = \"#fff\"\n  end\nend\nsub go\n  ok.text = \"hi\"\nend\n";
+    c.open(uri, src);
+    let _ = c.diagnostics(uri);
+
+    let h = c.request(130, "textDocument/hover", Client::at(uri, 4, 8));
+    let text = h["contents"]["value"].as_str().unwrap_or("").to_string();
+    assert!(text.contains("button.background_color: text"), "hover: {text}");
+    assert!(text.contains("editor: color"), "the editor hint: {text}");
+
+    let h = c.request(131, "textDocument/hover", Client::at(uri, 8, 6));
+    let text = h["contents"]["value"].as_str().unwrap_or("").to_string();
+    assert!(text.contains("button.text: text"), "hover on `ok.text`: {text}");
+    assert!(text.contains("property of `ok`"), "{text}");
+    c.shutdown();
+}

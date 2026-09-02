@@ -1,7 +1,6 @@
 #include "model.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -40,15 +39,23 @@ std::string quote(const std::string& v) {
     return out + "\"";
 }
 
-/// Does this line announce a kind of its own — `prop: `, `handler: `, or one
-/// this reader has never heard of?
-bool is_line_kind(const std::string& line) {
-    for (size_t i = 0; i < line.size(); i++) {
-        const char c = line[i];
-        if (c == ':') return i > 0 && i + 1 < line.size() && line[i + 1] == ' ';
-        if (!islower((unsigned char)c) && c != '_') return false;
+/// Undo what `inspect` does to keep a `prop:` value on one line: `\\n`,
+/// `\\0` and `\\\\`. The inverse is exact, which is what makes a memo's text
+/// a value rather than a guess about which lines belong to it. Any other
+/// backslash pair is not one `inspect` writes and is passed through untouched.
+std::string unescape(const std::string& v) {
+    std::string out;
+    out.reserve(v.size());
+    for (size_t i = 0; i < v.size(); i++) {
+        if (v[i] == '\\' && i + 1 < v.size()) {
+            const char n = v[i + 1];
+            if (n == 'n') { out += '\n'; i++; continue; }
+            if (n == '0') { out += '\0'; i++; continue; }
+            if (n == '\\') { out += '\\'; i++; continue; }
+        }
+        out += v[i];
     }
-    return false;
+    return out;
 }
 
 /// Write a property value as the declared type requires: quoted for text,
@@ -76,23 +83,7 @@ bool load_model(const std::string& openepl_bin, const std::string& path, Model& 
     std::istringstream lines(text);
     std::string line;
     Component* current = nullptr;   // component most recently declared
-    // The property a `prop:` line last named, so the rest of a multi-line value
-    // can be put back together.
-    Component* prop_target = nullptr;
-    std::string prop_name;
     while (std::getline(lines, line)) {
-        // `inspect` writes a property value raw, so a value with a newline in
-        // it arrives as several lines and only the first is labelled. Anything
-        // that does not announce a line kind of its own belongs to the value
-        // above it — without this, opening a form with a memo in it and saving
-        // truncates that memo to its first line.
-        if (prop_target && !is_line_kind(line)) {
-            if (const std::string* had = prop_target->property(prop_name)) {
-                prop_target->set_property(prop_name, *had + "\n" + line);
-            }
-            continue;
-        }
-        prop_target = nullptr;
         if (line.rfind("module: ", 0) == 0) {
             out.module_name = line.substr(8);
         } else if (line.rfind("use: ", 0) == 0) {
@@ -134,11 +125,7 @@ bool load_model(const std::string& openepl_bin, const std::string& path, Model& 
             if (parts.size() == 3) {
                 Component* target =
                     (parts[0] == out.form_name) ? &out.form : out.find(parts[0]);
-                if (target) {
-                    target->set_property(parts[1], parts[2]);
-                    prop_target = target;
-                    prop_name = parts[1];
-                }
+                if (target) target->set_property(parts[1], unescape(parts[2]));
             }
         } else if (line.rfind("handler: ", 0) == 0) {
             auto parts = split_words(line.substr(9), 3);

@@ -73,7 +73,14 @@ int oe_ui_set_a11y(OpenEPL_Widget w, int32_t role, const char *name);
  * so they cost nothing in a shipped app):
  *   OPENEPL_UI_EXIT_AFTER_FRAMES=<n>   render n frames, then return
  *   OPENEPL_UI_SYNTH_CLICK=<handle>    dispatch a synthetic click to that widget
- *                                      (a handle, not an id — ids never ship)
+ *                                      (a handle, not an id — ids never ship);
+ *                                      `5.3` hits the third part of widget 5,
+ *                                      `5.1.3` the third part of that part —
+ *                                      a control's parts have no handles of
+ *                                      their own, so they are reached by path
+ *   OPENEPL_UI_SYNTH_EVENT=<name>      what SYNTH_CLICK dispatches (default
+ *                                      `click`; `dblclick` activates a grid row)
+ *   OPENEPL_UI_SYNTH_KEY=<spec>        press a key, e.g. `enter`, `ctrl+s`
  *   OPENEPL_UI_DUMP=<path.ppm>         write the framebuffer before exiting
  *   OPENEPL_UI_MOUSE=<x,y>             place the mouse (drives hover states)
  *   OPENEPL_UI_DUMP_A11Y=1             print the accessibility tree

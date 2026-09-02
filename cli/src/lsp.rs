@@ -5,10 +5,16 @@
 //! own code pane) speaks to this over stdio and gets live diagnostics.
 //!
 //! Implemented: diagnostics, completion, signature help, hover,
-//! go-to-definition, references and document symbols. Diagnostics came first on purpose — a squiggle under
-//! the actual mistake is what makes an editor usable, and getting it right
-//! forces the whole pipeline (framing, document sync, position mapping) to be
-//! correct before anything is layered on top.
+//! go-to-definition, references and document symbols. Diagnostics came first
+//! on purpose — a squiggle under the actual mistake is what makes an editor
+//! usable, and getting it right forces the whole pipeline (framing, document
+//! sync, position mapping) to be correct before anything is layered on top.
+//!
+//! Completion knows the one thing that makes a RAD tool a RAD tool: inside a
+//! component block, `on ` offers that component's events, and the handler
+//! position offers the subroutines that exist plus one that does not yet —
+//! accepting it writes the `sub` with the event's parameter list at the end of
+//! the file. Nobody should have to remember an event's name or its signature.
 //!
 //! Navigation is backed by `lsp_index`, a token-level index rather than an
 //! AST one, so it keeps working on the half-typed files it will spend most of
@@ -48,10 +54,12 @@ use lsp_types::{
     ParameterInformation, ParameterLabel, PublishDiagnosticsParams, Range, ReferenceParams,
     ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureInformation,
     SymbolInformation, SymbolKind, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    TextDocumentSyncKind, TextEdit, Uri,
 };
 
-use openepl_ir::{parse, validate, Registry, Signature};
+use openepl_ir::registry::ComponentDesc;
+use openepl_ir::validate::{param_list, validate_with, Hints};
+use openepl_ir::{parse, Registry, Signature, Span};
 
 use crate::kit;
 use crate::libload;
@@ -81,8 +89,11 @@ fn serve() -> Result<(), Box<dyn Error + Sync + Send>> {
         // A client only sends requests for capabilities the server advertises,
         // so anything omitted here is dead code no matter how well it works.
         completion_provider: Some(CompletionOptions {
-            // `.` opens the property/event list for a component.
-            trigger_characters: Some(vec![".".to_string()]),
+            // `.` opens the property/event list for a component; `:` on an
+            // `on` line opens the handler list, where the item that creates
+            // the subroutine lives — the one position a user has no name to
+            // start typing at.
+            trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
             ..Default::default()
         }),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
@@ -125,6 +136,10 @@ struct Server {
     /// Cached registries, keyed by the module's `use` list. Loading is
     /// expensive; a module's imports rarely change between keystrokes.
     registries: HashMap<Vec<String>, Result<Registry, String>>,
+    /// Command name -> the library that declares it, over every library the
+    /// workspace can see. Built the first time a diagnostic needs it, since
+    /// that means loading every kit's metadata, and most sessions never do.
+    elsewhere: Option<HashMap<String, String>>,
 }
 
 impl Server {
@@ -165,6 +180,7 @@ impl Server {
             docs: HashMap::new(),
             repo_root,
             registries: HashMap::new(),
+            elsewhere: None,
         }
     }
 
@@ -256,6 +272,58 @@ impl Server {
 
         let registry = self.registry_for_src(&src);
 
+        // Inside a component block, an `on` line is the RAD loop: the event
+        // names are the component's, and the handler is a subroutine that may
+        // not exist yet. Both halves are answered from the descriptor, so
+        // neither has to be remembered.
+        if let Some((event, handler)) = on_line(before) {
+            let block = ix.block_at_line(line_no);
+            let desc = block
+                .zip(registry.as_ref())
+                .and_then(|(b, reg)| reg.component(&b.type_name));
+            let (Some(block), Some(desc), Some(reg)) = (block, desc, registry.as_ref()) else {
+                return serde_json::to_value(items).ok();
+            };
+            match handler {
+                None => {
+                    for ev in &desc.events {
+                        let hands = param_list(reg.event_params(&desc.name, ev));
+                        items.push(item(
+                            ev,
+                            CompletionItemKind::EVENT,
+                            if hands.is_empty() {
+                                format!("{} event", desc.name)
+                            } else {
+                                format!("{} event — hands ({hands})", desc.name)
+                            },
+                        ));
+                    }
+                }
+                Some(_) => {
+                    let subs: Vec<&str> = ix
+                        .names_in_scope(None)
+                        .into_iter()
+                        .filter(|(_, k)| *k == SymKind::Sub)
+                        .map(|(n, _)| n)
+                        .collect();
+                    for name in &subs {
+                        items.push(item(name, CompletionItemKind::FUNCTION, "subroutine".into()));
+                    }
+                    // The one that does not exist: named after the component
+                    // and the event, declared with what the event hands over,
+                    // and written at the end of the file where a new
+                    // subroutine goes. Offered only while there is no such
+                    // subroutine — once there is, it is in the list above.
+                    let name = format!("{}_{}", block.id, event);
+                    if desc.has_event(&event) && !subs.contains(&name.as_str()) {
+                        let params = param_list(reg.event_params(&desc.name, &event));
+                        items.push(new_handler_item(&src, &name, &params));
+                    }
+                }
+            }
+            return serde_json::to_value(items).ok();
+        }
+
         // After `id.` the only sensible completions are that component's
         // properties and events — offering variables there would be noise.
         if let Some(id) = trailing_member_target(before) {
@@ -315,7 +383,26 @@ impl Server {
         let occ = ix.at(line, col)?;
         let registry = self.registry_for_src(&src);
 
-        let text = if let Some(cmd) = registry.as_ref().and_then(|r| r.get(&occ.name)) {
+        // A property or event of a component, either as `id.name` or as a
+        // line inside the component's own block.
+        let member = registry.as_ref().and_then(|reg| {
+            let (id, ty) = if occ.kind == SymKind::Property {
+                let id = ix
+                    .occurrences
+                    .iter()
+                    .find(|o| o.line == occ.line && o.end_col() + 1 == occ.col)?;
+                (id.name.clone(), ix.component_types.get(&id.name)?.clone())
+            } else {
+                let b = ix.block_at_line(occ.line)?;
+                (b.id.clone(), b.type_name.clone())
+            };
+            let desc = reg.component(&ty)?;
+            member_hover(reg, desc, &id, occ, &nth_line(&src, occ.line).unwrap_or_default())
+        });
+
+        let text = if let Some(text) = member {
+            text
+        } else if let Some(cmd) = registry.as_ref().and_then(|r| r.get(&occ.name)) {
             format!("```\n{}\n```\n\ncommand", signature_text(&occ.name, &cmd.sig))
         } else if let Some(ty) = ix.component_types.get(&occ.name) {
             format!("```\n{} {}\n```\n\ncomponent", ty, occ.name)
@@ -521,7 +608,7 @@ impl Server {
             Ok(m) => m,
             // A parse error stops everything downstream — while you are typing,
             // this is the common case, so it must be positioned well.
-            Err(e) => return vec![diag(e.line, e.msg)],
+            Err(e) => return vec![diag(src, Span::line(e.line), e.msg)],
         };
 
         let registry = match self.registry_for(&module.uses) {
@@ -529,19 +616,53 @@ impl Server {
             Err(msg) => {
                 // Degraded: we parsed, but can't type-check. Say so once, at the
                 // top of the file, instead of pretending the file is clean.
-                return vec![diag(1, format!("OpenEPL runtime unavailable: {msg}"))];
+                return vec![diag(src, Span::line(1), format!("OpenEPL runtime unavailable: {msg}"))];
             }
         };
 
-        match validate(&module, &registry) {
-            Ok(()) => Vec::new(),
-            Err(errs) => errs
-                .into_iter()
-                // `msg`, not `to_string()`: Display prefixes "line N:", which
-                // the editor already shows via the range.
-                .map(|e| diag(e.line, e.msg))
-                .collect(),
+        let mut errs = match validate_with(&module, &registry, &Hints::default()) {
+            Ok(()) => return Vec::new(),
+            Err(errs) => errs,
+        };
+        // An unknown command is the one diagnostic that gets better with what
+        // the other libraries know, and the only one worth loading them for.
+        if errs.iter().any(|e| e.msg.contains("unknown command `")) {
+            let hints = Hints {
+                elsewhere: self.elsewhere().clone(),
+            };
+            if let Err(better) = validate_with(&module, &registry, &hints) {
+                errs = better;
+            }
         }
+        errs.into_iter()
+            // `msg`, not `to_string()`: Display prefixes "line N:", which
+            // the editor already shows via the range.
+            .map(|e| diag(src, e.span(), e.msg))
+            .collect()
+    }
+
+    /// Every command of every library the workspace can see, and which
+    /// library it is in. Loaded one kit at a time — two libraries can
+    /// legitimately collide, and one registry holding both would refuse.
+    fn elsewhere(&mut self) -> &HashMap<String, String> {
+        if self.elsewhere.is_none() {
+            let mut map = HashMap::new();
+            let kits = self.repo_root.clone().map(|r| kit::resolve_all(&r)).unwrap_or_default();
+            for k in kits {
+                let uses = vec![k.name.clone()];
+                if let Ok(reg) = self.registry_for(&uses) {
+                    for (name, _) in reg.iter() {
+                        map.entry(name.to_string()).or_insert_with(|| k.name.clone());
+                    }
+                }
+            }
+            // Core's commands are in every registry and never "elsewhere".
+            for name in Registry::core().names() {
+                map.remove(name);
+            }
+            self.elsewhere = Some(map);
+        }
+        self.elsewhere.as_ref().unwrap()
     }
 
     fn registry_for(&mut self, uses: &[String]) -> Result<Registry, String> {
@@ -703,6 +824,100 @@ fn trailing_member_target(before: &str) -> Option<&str> {
     (!id.is_empty()).then_some(id)
 }
 
+/// An `on` line to the left of the caret: the event name typed so far, and
+/// the handler name typed so far once the `:` is there.
+///
+/// `on cl` is `("cl", None)`; `on click: ok_` is `("click", Some("ok_"))`.
+/// A line that is not an `on` line is `None`, which is every other line.
+fn on_line(before: &str) -> Option<(String, Option<String>)> {
+    let rest = before.trim_start().strip_prefix("on")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    match rest.split_once(':') {
+        None => rest.chars().all(is_word).then(|| (rest.to_string(), None)),
+        Some((event, handler)) => {
+            let event = event.trim();
+            let handler = handler.trim_start();
+            (event.chars().all(is_word) && handler.chars().all(is_word))
+                .then(|| (event.to_string(), Some(handler.to_string())))
+        }
+    }
+}
+
+/// The completion that creates a handler: the name goes at the caret, the
+/// subroutine goes at the end of the file.
+fn new_handler_item(src: &str, name: &str, params: &str) -> CompletionItem {
+    let header = if params.is_empty() {
+        format!("sub {name}")
+    } else {
+        format!("sub {name}({params})")
+    };
+    // Appended after the last line, on a line of its own even when the file
+    // does not end with a newline yet.
+    let last_line = src.lines().count() as u32;
+    let lead = if src.is_empty() || src.ends_with('\n') { "\n" } else { "\n\n" };
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(CompletionItemKind::FUNCTION),
+        detail: Some(format!("new subroutine — writes `{header}` at the end of the file")),
+        insert_text: Some(name.to_string()),
+        // First in the list: it is the thing an `on` line is usually for.
+        sort_text: Some("0".into()),
+        preselect: Some(true),
+        additional_text_edits: Some(vec![TextEdit {
+            range: Range {
+                start: Position::new(last_line, 0),
+                end: Position::new(last_line, 0),
+            },
+            new_text: format!("{lead}{header}\n  \nend\n"),
+        }]),
+        ..Default::default()
+    }
+}
+
+/// Hover text for a property or event of component `id`, or `None` when the
+/// name is neither.
+///
+/// A property shows its type and the editor an inspector would offer for it;
+/// an event shows what it hands a handler. The property's default is not
+/// carried by the registry yet.
+fn member_hover(
+    reg: &Registry,
+    desc: &ComponentDesc,
+    id: &str,
+    occ: &Occurrence,
+    line_text: &str,
+) -> Option<String> {
+    let on_an_event_line = line_text.trim_start().starts_with("on ");
+    if on_an_event_line && desc.has_event(&occ.name) {
+        let hands = param_list(reg.event_params(&desc.name, &occ.name));
+        let header = if hands.is_empty() {
+            "sub handler".to_string()
+        } else {
+            format!("sub handler({hands})")
+        };
+        return Some(format!(
+            "```\n{}.{}\n```\n\nevent of `{id}` — a handler is `{header}`",
+            desc.name, occ.name
+        ));
+    }
+    let prop = desc.property(&occ.name)?;
+    let editor = if prop.editor.is_empty() {
+        String::new()
+    } else {
+        format!(" — editor: {}", prop.editor)
+    };
+    Some(format!(
+        "```\n{}.{}: {}\n```\n\nproperty of `{id}`{editor}",
+        desc.name,
+        prop.name,
+        prop.ty.as_str()
+    ))
+}
+
 /// The call the caret is inside: the callee's name and the 0-based index of
 /// the argument being typed.
 ///
@@ -808,19 +1023,25 @@ fn occ_range(src: &str, occ: &Occurrence) -> Range {
     }
 }
 
-/// Build a diagnostic covering a whole 1-based source line.
-///
-/// The validator has no columns yet, so a line-wide range is the honest
-/// rendering: it underlines exactly what we actually know is wrong.
-fn diag(line_1based: usize, msg: String) -> Diagnostic {
+/// Build a diagnostic at `at`: under the name when the validator knows one,
+/// across the whole line when it only knows the line.
+fn diag(src: &str, at: Span, msg: String) -> Diagnostic {
     // LSP lines are 0-based; ours are 1-based, and 0 means "unknown".
-    let line = line_1based.saturating_sub(1) as u32;
-    Diagnostic {
-        range: Range {
+    let line = at.line.saturating_sub(1) as u32;
+    let range = if at.col > 0 && at.end_col > at.col {
+        Range {
+            start: Position::new(line, byte_col_to_utf16(src, at.line, at.col)),
+            end: Position::new(line, byte_col_to_utf16(src, at.line, at.end_col)),
+        }
+    } else {
+        Range {
             start: Position::new(line, 0),
             // u32::MAX is clamped by the client to the real end of the line.
             end: Position::new(line, u32::MAX),
-        },
+        }
+    };
+    Diagnostic {
+        range,
         severity: Some(DiagnosticSeverity::ERROR),
         source: Some("openepl".into()),
         message: msg,
@@ -888,6 +1109,19 @@ mod tests {
             enclosing_call(r#"  call print_text(concat("a, "#),
             Some(("concat".into(), 0))
         );
+    }
+
+    /// The two halves of an `on` line, as they are typed.
+    #[test]
+    fn on_line_reads_the_event_and_then_the_handler() {
+        assert_eq!(on_line("  on "), Some(("".into(), None)));
+        assert_eq!(on_line("  on cl"), Some(("cl".into(), None)));
+        assert_eq!(on_line("  on click: "), Some(("click".into(), Some("".into()))));
+        assert_eq!(on_line("  on click:ok_"), Some(("click".into(), Some("ok_".into()))));
+        // Not an `on` line: a variable that happens to start with the word,
+        // or a statement.
+        assert_eq!(on_line("  online = 1"), None);
+        assert_eq!(on_line("  call print_text("), None);
     }
 
     #[test]

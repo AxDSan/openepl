@@ -411,9 +411,42 @@ pub enum Expr {
     Neg(Box<Expr>),
 }
 
+/// A source position: a 1-based line and 1-based **byte** columns, `end_col`
+/// one past the last byte. All zero when the position is not known.
+///
+/// Bytes rather than characters because that is what the lexer counts; the
+/// language server converts to UTF-16 at its edge, and nothing in between
+/// needs to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Span {
+    pub line: usize,
+    pub col: usize,
+    pub end_col: usize,
+}
+
+impl Span {
+    pub fn new(line: usize, col: usize, end_col: usize) -> Span {
+        Span { line, col, end_col }
+    }
+
+    /// A whole line, when nothing narrower is known.
+    pub fn line(line: usize) -> Span {
+        Span { line, col: 0, end_col: 0 }
+    }
+}
+
+/// An identifier as written: its spelling and where. A statement keeps the
+/// ones on its header line so a diagnostic about `x` can underline `x` and
+/// not the line it sits on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ident {
+    pub name: String,
+    pub span: Span,
+}
+
 /// A statement plus where it came from.
 ///
-/// The line lives on the wrapper rather than inside each variant so that
+/// The position lives on the wrapper rather than inside each variant so that
 /// existing pattern matches keep working, and so that a diagnostic can always
 /// say *where* — an error without a position is nearly useless in an editor.
 #[derive(Debug, Clone, PartialEq)]
@@ -421,11 +454,28 @@ pub struct Stmt {
     pub kind: StmtKind,
     /// 1-based source line; 0 when unknown.
     pub line: usize,
+    /// The statement's header line — for `if`, `while` and `for` the header
+    /// only, since the body is made of statements with positions of their own.
+    pub span: Span,
+    /// Every identifier on the header line, in source order. Expressions carry
+    /// no positions of their own, so this is how a diagnostic about a name
+    /// inside one finds its column.
+    pub idents: Vec<Ident>,
 }
 
 impl Stmt {
     pub fn new(kind: StmtKind, line: usize) -> Stmt {
-        Stmt { kind, line }
+        Stmt {
+            kind,
+            line,
+            span: Span::line(line),
+            idents: Vec::new(),
+        }
+    }
+
+    /// Where `name` is written on this statement's header line, if it is.
+    pub fn ident_span(&self, name: &str) -> Option<Span> {
+        self.idents.iter().find(|i| i.name == name).map(|i| i.span)
     }
 }
 
@@ -509,6 +559,8 @@ pub struct Sub {
     pub ret: Option<Ty>,
     /// 1-based source line of the `sub` keyword; 0 when unknown.
     pub line: usize,
+    /// Where the name is written, for a diagnostic about the subroutine itself.
+    pub name_span: Span,
     pub body: Vec<Stmt>,
 }
 
@@ -543,6 +595,11 @@ pub struct Component {
     pub properties: Vec<(String, Expr)>,
     /// Event bindings: `(event name, handler subroutine name)`.
     pub handlers: Vec<(String, String)>,
+    /// Where each property and each binding is written, parallel to
+    /// `properties` and `handlers`. Beside them rather than inside the tuples
+    /// so that everything reading the pairs keeps reading them.
+    pub property_spans: Vec<Span>,
+    pub handler_spans: Vec<Span>,
 }
 
 /// A form: the root component plus its children.
@@ -558,6 +615,9 @@ pub struct Form {
     /// Properties of the form itself (title, size, …).
     pub properties: Vec<(String, Expr)>,
     pub handlers: Vec<(String, String)>,
+    /// Positions parallel to `properties` and `handlers`, as on a `Component`.
+    pub property_spans: Vec<Span>,
+    pub handler_spans: Vec<Span>,
     pub children: Vec<Component>,
 }
 

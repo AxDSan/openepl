@@ -212,6 +212,37 @@ openepl commands                 # the core runtime
 openepl commands --use file      # and what a library adds
 ```
 
+## Reading a project from a tool
+
+`openepl inspect <file.oir>` is how OpenEPL Studio learns what a file holds;
+it is the only reader of a project file, so a tool that wants the same
+knowledge asks it rather than parsing the source. The output is one fact per
+line, `kind: rest`, in file order:
+
+| Line | Meaning |
+| --- | --- |
+| `module: <name>` | the module's name |
+| `use: <lib>` | a `use` line |
+| `sub: <name>` | a subroutine; `subsig: <name> (<params>) <ret>` follows when it takes or returns anything |
+| `form: <name> span=<first>..<last>` | the form, and the 1-based lines its `form … end` block occupies |
+| `component: <id> <type>` | a component inside the form |
+| `modcomponent: <id> <type> span=<first>..<last>` | a component declared at module level — a `timer`, an `httpserver` — with the lines of its block |
+| `prop: <id> <name> <value>` | a property of the form or of the component named by `<id>` |
+| `handler: <id> <event> <sub>` | an event binding |
+
+A `prop:` value is always on its one line: a newline in it is written `\n`, a
+NUL `\0`, and a backslash `\\`; nothing else is escaped. A reader reverses
+exactly those three. A `modcomponent:` without a `span=` is one the toolchain
+could not place, and a tool that splices the file should treat it as not yet
+written rather than guess.
+
+`openepl commands` is read the same way. Beside each `component: <type>` line
+is `kind: <type> visual` or `kind: <type> nonvisual`, and a `property:` line
+whose editor is not the plain one its type implies is followed by
+`editor: <type> <property> <hint>` — `color`, `file`, `font` or `multiline`.
+New line kinds are added; the existing ones do not change shape, so a reader
+that skips what it does not know keeps working.
+
 ## Kits
 
 A kit is a support library plus what an IDE needs to present it. `openepl kits`

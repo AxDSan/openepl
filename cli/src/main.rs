@@ -7,6 +7,7 @@
 //!   openepl emit  <in.oir>              print the generated LLVM IR to stdout
 //!   openepl lsp                         language server (stdio) for editors
 //!   openepl commands                    list available commands and components
+//!   openepl inspect <in.oir>            dump the form model, one fact per line
 //!   openepl templates                   list project templates
 //!   openepl new <tmpl> <dir>            create a project from a template
 //!   openepl kits                        list resolved kits and where they came from
@@ -273,8 +274,25 @@ fn cmd_commands(repo_root: &Path, args: &[String]) -> i32 {
     for type_name in components {
         let Some(desc) = plan.registry.component(type_name) else { continue };
         println!("component: {type_name}");
+        // `kind:` and `editor:` are ADDED lines, never a change to the shape of
+        // the existing ones: the designer's catalog, gen-docs.sh and
+        // check-docs.sh all read this output by prefix, and a reader that
+        // predates a line kind must still see exactly what it saw before. A
+        // designer that only knows the kind of the components it was linked
+        // against files a kit's visual control under the System tray, so the
+        // kind has to travel with the listing.
+        let kind = match desc.kind {
+            openepl_ir::registry::ComponentKind::Visual => "visual",
+            openepl_ir::registry::ComponentKind::NonVisual => "nonvisual",
+        };
+        println!("kind: {type_name} {kind}");
         for p in &desc.properties {
             println!("property: {type_name} {} {}", p.name, p.ty.as_str());
+            // Absent means the plain editor the type implies, which is what the
+            // descriptor's empty hint already means.
+            if !p.editor.is_empty() {
+                println!("editor: {type_name} {} {}", p.name, p.editor);
+            }
         }
         for e in &desc.events {
             println!("event: {type_name} {e}");
@@ -344,23 +362,80 @@ fn cmd_inspect(rest: &[String]) -> i32 {
             "form: {} span={}..{}",
             form.name, form.line_span.0, form.line_span.1
         );
-        for (name, value) in &form.properties {
-            println!("prop: {} {} {}", form.name, name, literal_text(value));
-        }
-        for (event, handler) in &form.handlers {
-            println!("handler: {} {} {}", form.name, event, handler);
-        }
+        print_members(&form.name, &form.properties, &form.handlers);
         for c in &form.children {
             println!("component: {} {}", c.id, c.type_name);
-            for (name, value) in &c.properties {
-                println!("prop: {} {} {}", c.id, name, literal_text(value));
-            }
-            for (event, handler) in &c.handlers {
-                println!("handler: {} {} {}", c.id, event, handler);
-            }
+            print_members(&c.id, &c.properties, &c.handlers);
         }
     }
+    // A module-level component is a DISTINCT line kind. The designer folds
+    // `component:` into the form's children, and a timer written back inside
+    // the form is source the compiler refuses.
+    let spans = module_component_spans(&src, &module);
+    for (c, span) in module.components().zip(spans) {
+        match span {
+            Some((a, b)) => println!("modcomponent: {} {} span={a}..{b}", c.id, c.type_name),
+            None => println!("modcomponent: {} {}", c.id, c.type_name),
+        }
+        print_members(&c.id, &c.properties, &c.handlers);
+    }
     0
+}
+
+/// The `prop:` and `handler:` lines of a form or component, keyed by its id.
+fn print_members(id: &str, props: &[(String, openepl_ir::Expr)], handlers: &[(String, String)]) {
+    for (name, value) in props {
+        println!("prop: {id} {name} {}", escape_value(&literal_text(value)));
+    }
+    for (event, handler) in handlers {
+        println!("handler: {id} {event} {handler}");
+    }
+}
+
+/// Where each module-level component sits in the file, in declaration order.
+///
+/// The parser records a span for a form and not for a component, so this
+/// finds it again from the token stream: a header is `type id` at the start of
+/// a line outside every form, and the first `end` after it closes the block,
+/// because a component body holds only properties and bindings and nothing
+/// that nests. Matching on the exact (type, id) pair is what keeps
+/// `record point` — the same two tokens — from being taken for one.
+///
+/// The right home for this is a `line_span` on `ir::Component`. Until then a
+/// component the walk cannot place gets no span — which cannot happen for a
+/// file the parser accepted, since the header it looks for is the one the
+/// parser consumed — and the designer would append it as new on save rather
+/// than splice at a guess.
+fn module_component_spans(src: &str, module: &Module) -> Vec<Option<(usize, usize)>> {
+    use openepl_ir::lexer::{lex, Tok};
+    let toks = match lex(src) {
+        Ok(t) => t,
+        Err(_) => return module.components().map(|_| None).collect(),
+    };
+    let form_spans: Vec<(usize, usize)> = module.forms().map(|f| f.line_span).collect();
+    let mut cursor = 0;
+    module
+        .components()
+        .map(|c| {
+            let mut i = cursor;
+            while i + 2 < toks.len() {
+                let at_line_start = i == 0 || matches!(toks[i - 1].tok, Tok::Newline);
+                let line = toks[i].line;
+                let header = at_line_start
+                    && matches!(&toks[i].tok, Tok::Ident(t) if *t == c.type_name)
+                    && matches!(&toks[i + 1].tok, Tok::Ident(id) if *id == c.id)
+                    && matches!(toks[i + 2].tok, Tok::Newline)
+                    && !form_spans.iter().any(|(a, b)| (*a..=*b).contains(&line));
+                if header {
+                    let end = toks[i + 3..].iter().find(|t| matches!(t.tok, Tok::End))?;
+                    cursor = i + 3;
+                    return Some((line, end.line));
+                }
+                i += 1;
+            }
+            None
+        })
+        .collect()
 }
 
 /// Render a property literal as the designer should display and re-emit it.
@@ -373,6 +448,26 @@ fn literal_text(e: &openepl_ir::Expr) -> String {
         Expr::BoolLit(b) => b.to_string(),
         _ => String::new(),
     }
+}
+
+/// Keep a `prop:` value on its one line.
+///
+/// The output is read a line at a time, so a raw newline in a memo's text
+/// used to arrive as extra unlabelled lines the reader had to guess were
+/// continuations. Backslash is escaped so the reversal is unambiguous, and NUL
+/// because a C reader working in `char *` stops at one. Everything else,
+/// including tab, cannot break a line and travels raw.
+fn escape_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for ch in v.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\0' => out.push_str("\\0"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn cmd_build(rest: &[String], then_run: bool) -> i32 {

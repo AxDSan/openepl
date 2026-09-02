@@ -65,6 +65,9 @@ pub struct Spanned {
     /// 1-based column of the token's first character. Together with `line` this
     /// is what lets the language server point at a symbol rather than a line.
     pub col: usize,
+    /// One past the token's last byte, so a diagnostic can underline exactly
+    /// the token — a string literal's spelling is longer than its value.
+    pub end_col: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,14 +85,22 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
     // Offset of the current line's first byte, so a column is `i - line_start`.
     let mut line_start = 0usize;
 
+    // `end_col` is filled in after the arm has consumed the token: every arm
+    // knows where its token starts, and only the loop knows where `i` ends up.
     let push = |out: &mut Vec<Spanned>, tok: Tok, line: usize, col: usize| {
-        out.push(Spanned { tok, line, col })
+        out.push(Spanned {
+            tok,
+            line,
+            col,
+            end_col: 0,
+        })
     };
 
     while i < n {
         let c = bytes[i];
         // Column of the token about to be read, for language-server positions.
         let start_col = i - line_start + 1;
+        let before = out.len();
         match c {
             b'\n' => {
                 // Collapse runs of blank lines into a single Newline token so the
@@ -102,6 +113,9 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     }) | None
                 ) {
                     push(&mut out, Tok::Newline, line, start_col);
+                    // Measured here: the generic fix-up below would read the
+                    // column against the line that starts after this token.
+                    out.last_mut().unwrap().end_col = start_col + 1;
                 }
                 line += 1;
                 i += 1;
@@ -266,11 +280,18 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                 });
             }
         }
+        if out.len() > before {
+            let last = out.last_mut().unwrap();
+            if last.end_col == 0 {
+                last.end_col = i - line_start + 1;
+            }
+        }
     }
     out.push(Spanned {
         tok: Tok::Eof,
         line,
         col: i - line_start + 1,
+        end_col: i - line_start + 1,
     });
     Ok(out)
 }
