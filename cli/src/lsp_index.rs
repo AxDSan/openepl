@@ -102,6 +102,15 @@ pub struct Index {
     pub component_types: HashMap<String, String>,
     /// Component and form blocks, in source order.
     pub blocks: Vec<Block>,
+    /// The libraries the file `use`s, in source order.
+    ///
+    /// Read here, off the lexer, for the same reason everything else is: the
+    /// registry those libraries make up is what answers `on ` and `id.`, and
+    /// the moment they are asked is the moment the file does not parse. A
+    /// server that learnt its `use` lines from the parser would lose `ui` —
+    /// and with it every form and button — exactly while a handler was being
+    /// wired.
+    pub uses: Vec<String>,
     /// Subroutine name -> its header as written, `(a: int, b: int): int`.
     ///
     /// Kept as source text rather than as parsed types because that is what
@@ -173,6 +182,13 @@ impl Index {
                         if matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Colon)) {
                             i += 2;
                         }
+                        continue;
+                    }
+                }
+                Tok::Use => {
+                    if let Some((lib, _)) = ident_at(&toks, i + 1) {
+                        ix.uses.push(lib);
+                        i += 2;
                         continue;
                     }
                 }
@@ -667,5 +683,17 @@ mod tests {
             ix.occurrences.iter().any(|o| o.name == "x" && o.is_definition),
             "half-typed code must still index"
         );
+    }
+
+    /// The `use` lines survive a file that does not parse. A half-typed `on `
+    /// inside a form is the one place they are needed most, and it is a parse
+    /// error.
+    #[test]
+    fn use_lines_are_read_from_a_file_that_does_not_parse() {
+        let ix = Index::build("module m\nuse ui\nuse net\nform Main\n  button ok\n    on \n");
+        assert_eq!(ix.uses, vec!["ui".to_string(), "net".to_string()]);
+        // And the second identifier on a `use` line is a library, not a
+        // component declaration that would open a block.
+        assert!(ix.blocks.iter().all(|b| b.id != "ui"), "{:?}", ix.blocks);
     }
 }

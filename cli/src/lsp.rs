@@ -270,7 +270,7 @@ impl Server {
             return serde_json::to_value(items).ok();
         }
 
-        let registry = self.registry_for_src(&src);
+        let registry = self.registry_for_src(&ix);
 
         // Inside a component block, an `on` line is the RAD loop: the event
         // names are the component's, and the handler is a subroutine that may
@@ -381,7 +381,7 @@ impl Server {
         let (src, line, col) = self.context(params)?;
         let ix = Index::build(&src);
         let occ = ix.at(line, col)?;
-        let registry = self.registry_for_src(&src);
+        let registry = self.registry_for_src(&ix);
 
         // A property or event of a component, either as `id.name` or as a
         // line inside the component's own block.
@@ -445,7 +445,7 @@ impl Server {
         let label = match ix.sub_headers.get(&name) {
             Some(header) => format!("{name}{header}"),
             None => {
-                let reg = self.registry_for_src(&src)?;
+                let reg = self.registry_for_src(&ix)?;
                 signature_text(&name, &reg.get(&name)?.sig)
             }
         };
@@ -550,12 +550,15 @@ impl Server {
         serde_json::to_value(syms).ok()
     }
 
-    /// Registry for a document, parsed leniently: while typing, the file often
-    /// does not parse, and completion must not go dark then. Fall back to the
-    /// bare `use`-less registry rather than giving up.
-    fn registry_for_src(&mut self, src: &str) -> Option<Registry> {
-        let uses = parse(src).map(|m| m.uses).unwrap_or_default();
-        self.registry_for(&uses).ok()
+    /// Registry for a document as it is being typed.
+    ///
+    /// The `use` lines come from the index, not the parser. The parser refuses
+    /// the file at exactly the moments completion and hover are asked — a
+    /// line that reads `on ` is a parse error — and a registry built without
+    /// the file's libraries knows the core `timer` but not the `ui` form and
+    /// button that `on ` is nearly always typed in.
+    fn registry_for_src(&mut self, ix: &Index) -> Option<Registry> {
+        self.registry_for(&ix.uses).ok()
     }
 
     fn on_notification(&mut self, conn: &Connection, note: Notification) {

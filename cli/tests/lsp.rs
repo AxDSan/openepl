@@ -789,6 +789,85 @@ fn handler_completion_writes_the_subroutine_with_the_events_parameters() {
     c.shutdown();
 }
 
+/// The same loop inside a form — where nearly every `on ` is actually typed.
+/// The button is nested in the form and its type comes from `use ui`, and the
+/// file does not parse while the line reads `on `: every one of those was a
+/// way for the list to come back empty, and the designer has nothing to show
+/// for its trigger.
+#[test]
+fn completion_after_on_inside_a_forms_button_offers_its_events() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_form_on.oir";
+    //          1        2      3          4           5      6    7    8      9
+    c.open(uri, "module m\nuse ui\nform Main\n  button ok\n    on \n  end\nend\nsub go\nend\n");
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(140, "textDocument/completion", Client::at(uri, 4, 7));
+    assert_eq!(labels(&r), vec!["click"], "{r}");
+    assert_eq!(r.as_array().unwrap()[0]["detail"], "button event", "{r}");
+    c.shutdown();
+}
+
+/// The handler position inside a form's button: the subroutines that exist,
+/// plus `ok_click` — a button's `click` hands nothing, so the subroutine it
+/// writes takes nothing.
+#[test]
+fn handler_completion_inside_a_forms_button_writes_the_subroutine() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_form_handler.oir";
+    //          1        2      3          4           5             6    7    8      9
+    c.open(uri, "module m\nuse ui\nform Main\n  button ok\n    on click: \n  end\nend\nsub go\nend\n");
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(141, "textDocument/completion", Client::at(uri, 4, 14));
+    let names = labels(&r);
+    assert!(names.contains(&"go".to_string()), "existing subroutines: {names:?}");
+    let new = r
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "ok_click")
+        .unwrap_or_else(|| panic!("the new handler: {names:?}"));
+    assert_eq!(new["insertText"], "ok_click");
+    let edit = &new["additionalTextEdits"][0];
+    assert_eq!(edit["newText"], "\nsub ok_click\n  \nend\n", "{new}");
+    assert_eq!(edit["range"]["start"]["line"], 9, "after the last line: {new}");
+    c.shutdown();
+}
+
+/// `on ` directly inside the form resolves to the form, not to the button
+/// declared above it: the events on offer are the form's own.
+#[test]
+fn completion_after_on_inside_the_form_offers_the_forms_events() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_form_own_on.oir";
+    //          1        2      3          4           5      6      7    8      9
+    c.open(uri, "module m\nuse ui\nform Main\n  button ok\n  end\n  on \nend\nsub go\nend\n");
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(142, "textDocument/completion", Client::at(uri, 5, 5));
+    assert_eq!(labels(&r), vec!["load"], "{r}");
+    assert_eq!(r.as_array().unwrap()[0]["detail"], "form event", "{r}");
+
+    // And the handler it creates is named after the form.
+    let uri2 = "file:///tmp/openepl_lsp_form_own_handler.oir";
+    c.open(uri2, "module m\nuse ui\nform Main\n  on load: \nend\nsub go\nend\n");
+    let _ = c.diagnostics(uri2);
+    let r = c.request(143, "textDocument/completion", Client::at(uri2, 3, 11));
+    let new = r
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "Main_load")
+        .unwrap_or_else(|| panic!("the new handler: {:?}", labels(&r)));
+    assert_eq!(
+        new["additionalTextEdits"][0]["newText"],
+        "\nsub Main_load\n  \nend\n",
+        "{new}"
+    );
+    c.shutdown();
+}
+
 /// Hover on a property — as `id.name` or on its line inside the block — shows
 /// its type and the editor an inspector would offer.
 #[test]
