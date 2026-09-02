@@ -2,7 +2,7 @@
   "name": "openepl",
   "displayName": "OpenEPL",
   "description": "OpenEPL language support: syntax highlighting plus the openepl language server (diagnostics, completion, hover, go-to-definition, references).",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "openepl",
   "license": "MIT",
   "engines": { "vscode": "^1.75.0" },
