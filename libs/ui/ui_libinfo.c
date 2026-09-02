@@ -15,7 +15,7 @@ static const OpenEPL_PropertyDesc FORM_PROPS[] = {
     /* A window's ground, not a terminal's. Every desktop the target audience
      * has used draws a form in light grey; a dark default reads as a theme
      * someone has to switch off before their first app looks normal. */
-    { "background_color", OE_SDT_TEXT, "#f0f0f0",             "color" },
+    { "background_color", OE_SDT_TEXT, "#f3f3f3",             "color" },
     /* The window's icon: a PNG beside the source, embedded at build time like
      * an image's source, so the shipped binary carries it. */
     { "icon",             OE_SDT_TEXT, "",                    "file" },
@@ -46,11 +46,22 @@ static const OpenEPL_PropertyDesc BUTTON_PROPS[] = {
     { "left",             OE_SDT_INT,  "0",       NULL },
     { "top",              OE_SDT_INT,  "0",       NULL },
     { "width",            OE_SDT_INT,  "120",     NULL },
-    { "height",           OE_SDT_INT,  "36",      NULL },
+    /* 32px is the specification's control height, and the whole palette is
+     * sized to that grid: an editbox, a combobox and a button drawn on one
+     * row line up without anyone reaching for the inspector. */
+    { "height",           OE_SDT_INT,  "32",      NULL },
     ANCHORS,
-    { "background_color", OE_SDT_TEXT, "#4a86e8", "color" },
-    { "color",            OE_SDT_TEXT, "#ffffff", "color" },
-    { "border_radius",    OE_SDT_INT,  "6",       NULL },
+    /* NO default colour, deliberately. The stylesheet's neutral button —
+     * white ground, hairline outline, and the hover and pressed shades that
+     * go with them — is what a button gets when it declares none, and a
+     * default written here would be written into every form the designer
+     * saves and would replace it. A form that DOES name a colour still gets
+     * exactly that colour, and the backend's own hover shades with it: the
+     * language has no `primary`/`accent` property yet, and inventing one
+     * silently in a stylesheet would be worse than the omission. */
+    { "background_color", OE_SDT_TEXT, NULL,      "color" },
+    { "color",            OE_SDT_TEXT, NULL,      "color" },
+    { "border_radius",    OE_SDT_INT,  "4",       NULL },
     { "enabled",          OE_SDT_BOOL, "true",    NULL },
     { "action",           OE_SDT_TEXT, "",        NULL },
 };
@@ -66,7 +77,7 @@ static const OpenEPL_PropertyDesc LABEL_PROPS[] = {
      * writes a `height` into anyway, and the build then rejects. */
     { "height", OE_SDT_INT, "24",      NULL },
     ANCHORS,
-    { "color", OE_SDT_TEXT, "#1f2328", "color" },
+    { "color", OE_SDT_TEXT, "#1a1a1a", "color" },
 };
 
 /* --- editbox ---------------------------------------------------------- */
@@ -75,9 +86,9 @@ static const OpenEPL_PropertyDesc EDIT_PROPS[] = {
     { "left",   OE_SDT_INT,  "0",       NULL },
     { "top",    OE_SDT_INT,  "0",       NULL },
     { "width",  OE_SDT_INT,  "160",     NULL },
-    { "height", OE_SDT_INT,  "26",      NULL },
+    { "height", OE_SDT_INT,  "32",      NULL },
     ANCHORS,
-    { "color",  OE_SDT_TEXT, "#1f2328", "color" },
+    { "color",  OE_SDT_TEXT, "#1a1a1a", "color" },
 };
 static const OpenEPL_EventDesc EDIT_EVENTS[] = { { "change", 0, NULL } };
 
@@ -90,7 +101,7 @@ static const OpenEPL_PropertyDesc CHECK_PROPS[] = {
     { "width",   OE_SDT_INT,  "140",      NULL },
     { "height",  OE_SDT_INT,  "24",       NULL },
     ANCHORS,
-    { "color",   OE_SDT_TEXT, "#1f2328",  "color" },
+    { "color",   OE_SDT_TEXT, "#1a1a1a",  "color" },
 };
 static const OpenEPL_EventDesc CHECK_EVENTS[] = { { "change", 0, NULL } };
 
@@ -102,7 +113,7 @@ static const OpenEPL_PropertyDesc GROUP_PROPS[] = {
     { "width",        OE_SDT_INT,  "200",     NULL },
     { "height",       OE_SDT_INT,  "120",     NULL },
     ANCHORS,
-    { "border_color", OE_SDT_TEXT, "#d0d7de", "color" },
+    { "border_color", OE_SDT_TEXT, "#e5e5e5", "color" },
 };
 
 /* --- image ------------------------------------------------------------ */
@@ -148,7 +159,7 @@ static const OpenEPL_PropertyDesc COMBO_PROPS[] = {
     { "left",     OE_SDT_INT,  "0",   NULL },
     { "top",      OE_SDT_INT,  "0",   NULL },
     { "width",    OE_SDT_INT,  "160", NULL },
-    { "height",   OE_SDT_INT,  "28",  NULL },
+    { "height",   OE_SDT_INT,  "32",  NULL },
     ANCHORS,
     { "enabled",  OE_SDT_BOOL, "true", NULL },
 };
@@ -187,7 +198,7 @@ static const OpenEPL_PropertyDesc RADIO_PROPS[] = {
     { "width",   OE_SDT_INT,  "140",     NULL },
     { "height",  OE_SDT_INT,  "24",      NULL },
     ANCHORS,
-    { "color",   OE_SDT_TEXT, "#1f2328", "color" },
+    { "color",   OE_SDT_TEXT, "#1a1a1a", "color" },
 };
 static const OpenEPL_EventDesc RADIO_EVENTS[] = { { "change", 0, NULL } };
 
@@ -204,7 +215,7 @@ static const OpenEPL_PropertyDesc MEMO_PROPS[] = {
     { "width",  OE_SDT_INT,  "240",    NULL },
     { "height", OE_SDT_INT,  "100",    NULL },
     ANCHORS,
-    { "color",  OE_SDT_TEXT, "#1f2328", "color" },
+    { "color",  OE_SDT_TEXT, "#1a1a1a", "color" },
     { "enabled", OE_SDT_BOOL, "true",  NULL },
 };
 static const OpenEPL_EventDesc MEMO_EVENTS[] = { { "change", 0, NULL } };
@@ -242,7 +253,7 @@ static const OpenEPL_PropertyDesc SPIN_PROPS[] = {
     { "left",    OE_SDT_INT,  "0",    NULL },
     { "top",     OE_SDT_INT,  "0",    NULL },
     { "width",   OE_SDT_INT,  "110",  NULL },
-    { "height",  OE_SDT_INT,  "28",   NULL },
+    { "height",  OE_SDT_INT,  "32",   NULL },
     ANCHORS,
     { "enabled", OE_SDT_BOOL, "true", NULL },
 };

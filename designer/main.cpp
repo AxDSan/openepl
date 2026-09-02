@@ -968,7 +968,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // from it by one rule; it is decoration only, and the client area under
     // it is where the file's coordinates start.
     s << "#formwin{left:60px;top:40px;border-radius:8px;border:1px " << BORDER
-      << ";background-color:#ffffff;"
+      << ";background-color:#f3f3f3;"
          "box-shadow:#0000001a 0 10px 25px -5px, #0000000d 0 8px 10px -6px}";
     s << "#formtitle{position:relative;height:" << (FORM_TITLE_H - 1)
       << "px;border-bottom:1px #e5e7eb;border-top-left-radius:7px;border-top-right-radius:7px;"
@@ -1422,7 +1422,10 @@ void rebuild_canvas() {
     // The title bar is the form's colour too — reading only, so a form that
     // sets no colour is drawn white and stays a form that sets no colour.
     const std::string* bg = g.model.form.property("background_color");
-    const std::string form_bg = bg && is_hex_colour(*bg) ? *bg : "#ffffff";
+    // The ground a built form actually paints when it declares no colour
+    // (the ui library's form default). White here would preview a window
+    // the program never renders.
+    const std::string form_bg = bg && is_hex_colour(*bg) ? *bg : "#f3f3f3";
     canvas->SetProperty("background-color", form_bg);
     if (Rml::Element* t = by_id("formtitle")) {
         const bool dark = dark_colour(form_bg);

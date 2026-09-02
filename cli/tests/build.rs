@@ -876,9 +876,10 @@ fn selection_outline_traces_the_rendered_frame() {
         .find(|l| l.contains("selection rect="))
         .expect("designer should report the selection rect");
 
-    // grp is 240x90 with 8px padding and a 1px border on each side.
+    // grp is 240x90 and, since the controls became border-box, renders at
+    // exactly the size it declares — padding and border inside it, not added.
     assert!(
-        line.contains("selection rect=20,120 258x108"),
+        line.contains("selection rect=20,120 240x90"),
         "outline does not trace the rendered frame: {line}"
     );
 }

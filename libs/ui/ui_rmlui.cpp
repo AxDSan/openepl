@@ -1376,6 +1376,13 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
     bool ok = e->SetProperty(openepl::ui::rcss_name(property), v);
 
     if (ok && std::strcmp(property, "background_color") == 0 && g.interactive.count(w)) {
+        /* A declared fill carries its own outline. The stylesheet gives an
+         * undeclared button the neutral grey ring the specification asks for,
+         * and that ring round a program's chosen blue reads as a mistake — a
+         * filled button's border is its fill, everywhere this look comes from.
+         * Only the border COLOUR is taken: the width and radius stay whatever
+         * the sheet or the form set. */
+        e->SetProperty("border-color", v);
         auto* st = new StateStyler(e, w, v, shade(v, 1.18f), shade(v, 0.82f));
         g_stylers.push_back(st);
         for (const char* ev : {"mouseover", "mouseout", "mousedown", "mouseup"})

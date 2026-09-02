@@ -48,6 +48,11 @@ inline const char* tag_for(const char* type_name) {
 /// in the designer is the WYSIWYG drift this header exists to prevent.
 inline const char* class_for(const char* type_name) {
     if (std::strcmp(type_name, "groupbox") == 0)    return "oe-groupbox";
+    /* A label is a bare `div` with nothing to select it by, so its text size
+     * was whatever the document around it happened to set — 14px in a built
+     * app, and the IDE's own 12px on the designer canvas. The same words, two
+     * sizes, in the two places this header exists to keep identical. */
+    if (std::strcmp(type_name, "label") == 0)       return "oe-label";
     if (std::strcmp(type_name, "checkbox") == 0)    return "oe-checkbox";
     if (std::strcmp(type_name, "radiobutton") == 0) return "oe-radio";
     if (std::strcmp(type_name, "listbox") == 0)     return "oe-listbox";
@@ -350,46 +355,160 @@ inline std::string control_styles(const std::string& scope = "") {
     // the DESIGNER must scope them to its canvas, or `div{position:absolute}`
     // lands on the whole IDE and every panel collapses onto the same point.
     const std::string p = scope.empty() ? std::string() : scope + " ";
+
+    /* The palette is written once, here, and every rule below names a token
+     * rather than a hex literal. A control that wants "the outline colour"
+     * must not be able to disagree with the control beside it about what that
+     * is — which is exactly what a stylesheet full of near-identical greys
+     * turns into. The names are the ones the specification uses. */
+    const std::string CARD        = "#ffffff";   /* surface.card            */
+    const std::string CONTROL     = "#ffffff";   /* control at rest         */
+    const std::string CONTROL_ALT = "#f9f9f9";   /* secondary / alt rows    */
+    const std::string HOVER_BG    = "#f5f5f5";   /* button hover            */
+    const std::string PRESS_BG    = "#ededed";   /* button pressed          */
+    const std::string INPUT_HOVER = "#fbfbfb";   /* input hover             */
+    const std::string SELECT_BG   = "#f0f0f0";   /* selected row / item     */
+    const std::string ACCENT      = "#005fb8";
+    const std::string ACCENT_HOV  = "#0254a3";
+    const std::string TEXT        = "#1a1a1a";   /* text.primary            */
+    const std::string TEXT_2      = "#5c5c5c";   /* text.secondary          */
+    const std::string ON_ACCENT   = "#ffffff";
+    const std::string BORDER      = "#e5e5e5";   /* border.default          */
+    const std::string BORDER_C    = "#d1d1d1";   /* border.control          */
+    const std::string BORDER_S    = "#8a8a8a";   /* border.control.strong   */
+
+    /* Radii and the 4px grid the specification is built on. */
+    const std::string R_CTRL = "4px";   /* buttons, inputs, dropdowns */
+    const std::string R_CARD = "8px";   /* cards, group boxes, flyouts */
+
+    /* Elevation. RmlUi's colour parser takes an rgba() alpha as 0..255, NOT
+     * 0..1 — `rgba(0,0,0,0.04)` parses as fully transparent and vanishes — so
+     * the shadow colours are written as #rrggbbaa. Lengths and colour may come
+     * in either order (PropertyParserBoxShadow), colour first reads clearest. */
+    const std::string L1 = "#0000000a 0px 2px 4px";
+    const std::string L2 = "#0000001f 0px 8px 16px, #0000000a 0px 2px 4px";
+
+    /* Body text. Named here rather than left to inherit because the designer
+     * canvas inherits the IDE's 12px and a built app inherited 16px — the same
+     * control rendered two sizes in the two places this header exists to keep
+     * identical. */
+    const std::string FONT = "14px";
+
     return
         p + "div { display: block; position: absolute; }" +
-        p + "button { display: block; position: absolute; text-align: center; padding-top: 8px; }" +
-        p + "input.text { display: block; position: absolute; background-color: #ffffff;"
-            " border: 1px #d0d7de; border-radius: 4px; padding: 4px 6px 0 6px; color: #1f2328; }" +
-        p + "input.text:focus { border: 1px #1e60d5; }" +
-        p + "div.oe-checkbox { background-color: #00000000; }" +
+
+        /* Body text, on the one control that is nothing but text. Named here
+         * and not on bare `div`, which under the designer's scope would become
+         * `#canvas div` and outrank every sized thing the IDE draws inside its
+         * own canvas. */
+        p + "div.oe-label { font-size: " + FONT + "; color: " + TEXT + "; }" +
+
+        /* --- push button -------------------------------------------------
+         * The neutral ("secondary") look is the default because OpenEPL has no
+         * property saying a button is the primary one. A program that DOES
+         * declare `background_color` sets it inline, which outranks every rule
+         * here, and its hover/press shades keep coming from the backend's
+         * StateStyler exactly as they did before.
+         *
+         * `min-width` is deliberately NOT set: it would outrank an inline
+         * `width` and silently widen every narrow button ever written. The
+         * specification's 80px minimum lives in the descriptor's default width.
+         * The caption is centred vertically by its LINE HEIGHT rather than by a
+         * top padding: half the leading falls above the glyphs and half below,
+         * so 30px of line inside a 32px border box puts the text in the middle
+         * — and a button the form made taller stays within a pixel or two of
+         * centre instead of riding at the top. (`display: flex` would centre it
+         * exactly, but a button's caption is bare text with no element around
+         * it, and RmlUi's flex container drops it entirely.) */
+        p + "button { display: block; position: absolute; box-sizing: border-box;"
+            " height: 32px; line-height: 30px;"
+            " padding: 0 16px 0 16px; text-align: center; font-size: " + FONT + ";"
+            " background-color: " + CONTROL + "; border: 1px " + BORDER_C + ";"
+            " border-radius: " + R_CTRL + "; color: " + TEXT + "; }" +
+        p + "button:hover { background-color: " + HOVER_BG + "; border-color: " + BORDER_S + "; }" +
+        p + "button:active { background-color: " + PRESS_BG + "; border-color: " + BORDER_C + "; }" +
+        /* RCSS has no `:focus-visible`, so this ring shows after a mouse click
+         * too. A visible focus that is occasionally redundant beats none. */
+        p + "button:focus { box-shadow: " + ON_ACCENT + " 0px 0px 0px 2px, "
+          + ACCENT + " 0px 0px 0px 4px; }" +
+
+        /* --- text input ---------------------------------------------------
+         * `box-sizing: border-box` so `height = 32` in a form IS 32 pixels on
+         * screen, and so the focused state's 2px bottom border eats into the
+         * box rather than growing it — the control must not shift by a pixel
+         * when it takes focus. The top padding is what centres the text: the
+         * substrate lays a text field's line out from the top of the content
+         * box, not down the middle of it. */
+        p + "input.text { display: block; position: absolute; box-sizing: border-box;"
+            " height: 32px; background-color: " + CONTROL + "; border: 1px " + BORDER_C + ";"
+            " border-bottom: 1px " + BORDER_S + "; border-radius: " + R_CTRL + ";"
+            " padding: 6px 10px 0 10px; color: " + TEXT + "; font-size: " + FONT + "; }" +
+        p + "input.text:hover { background-color: " + INPUT_HOVER + "; border-color: " + BORDER_S + "; }" +
+        /* After `:hover`, so a focused field that is also hovered reads as
+         * focused — the two pseudo-classes carry equal weight and order is the
+         * only tie-break RCSS offers. */
+        p + "input.text:focus { background-color: " + CARD + "; border: 1px " + BORDER_C + ";"
+            " border-bottom: 2px " + ACCENT + "; }" +
+
+        /* --- checkbox ------------------------------------------------------
+         * 16x16, caption 8px to its right. An `<input>` holds no content, so a
+         * checked box is a solid accent fill with no tick glyph. */
+        p + "div.oe-checkbox { background-color: #00000000; color: " + TEXT + ";"
+            " font-size: " + FONT + "; }" +
         p + "div.oe-checkbox input { display: inline-block; position: relative; width: 16px;"
-            " height: 16px; background-color: #ffffff; border: 1px #8c959f; border-radius: 3px;"
+            " height: 16px; box-sizing: border-box; background-color: " + CONTROL + ";"
+            " border: 1px " + BORDER_S + "; border-radius: " + R_CTRL + ";"
             " vertical-align: -3px; }" +
-        p + "div.oe-checkbox input:checked { background-color: #1e60d5; border: 1px #1e60d5; }" +
+        p + "div.oe-checkbox input:hover { border-color: " + TEXT_2 + "; }" +
+        p + "div.oe-checkbox input:checked { background-color: " + ACCENT + ";"
+            " border: 1px " + ACCENT + "; }" +
         p + "div.oe-checkbox span.oe-caption { display: inline-block; padding-left: 8px; }" +
-        p + "div.oe-groupbox { border: 1px #d0d7de; border-radius: 6px; padding: 8px; }" +
-        p + "progress { display: block; position: absolute; background-color: #e1e4e8;"
+
+        /* --- group box / card ---------------------------------------------
+         * A card: white ground, hairline border, 8px corners, L1 elevation.
+         * The text a group box carries is its header, so the weight goes on the
+         * box itself — it holds nothing else to embolden. */
+        p + "div.oe-groupbox { box-sizing: border-box; background-color: " + CARD + ";"
+            " border: 1px " + BORDER + "; border-radius: " + R_CARD + "; padding: 16px;"
+            " color: " + TEXT + "; font-size: " + FONT + "; font-weight: bold;"
+            " box-shadow: " + L1 + "; }" +
+
+        p + "progress { display: block; position: absolute; background-color: " + BORDER + ";"
             " border-radius: 8px; }" +
-        p + "progress fill { background-color: #1e60d5; border-radius: 8px; }" +
+        p + "progress fill { background-color: " + ACCENT + "; border-radius: 8px; }" +
         p + "img { display: block; position: absolute; }" +
 
         /* RmlUi builds a <select> out of three named sub-elements and styles
          * none of them: unstyled, the value is invisible, the arrow has no
          * size, and the drop-down opens as a zero-height box. */
-        p + "select { display: block; position: absolute; background-color: #ffffff;"
-            " border: 1px #d0d7de; border-radius: 4px; color: #1f2328; }" +
-        p + "select:focus { border: 1px #1e60d5; }" +
-        p + "select selectvalue { width: auto; margin-right: 22px; padding: 4px 8px 0 8px;"
+        p + "select { display: block; position: absolute; box-sizing: border-box; height: 32px;"
+            " background-color: " + CONTROL + "; border: 1px " + BORDER_C + ";"
+            " border-radius: " + R_CTRL + "; color: " + TEXT + "; font-size: " + FONT + "; }" +
+        p + "select:hover { background-color: " + INPUT_HOVER + "; border-color: " + BORDER_S + "; }" +
+        p + "select:focus { border: 1px " + BORDER_C + "; border-bottom: 2px " + ACCENT + "; }" +
+        p + "select selectvalue { width: auto; margin-right: 32px; padding: 6px 0 0 10px;"
             " height: 100%; }" +
-        /* RmlUi's arrow element takes no content, so the affordance has to be the
-         * band itself: a shaded, bordered strip reads as a control, an unshaded
-         * one reads as a gap in the border. */
-        p + "select selectarrow { width: 22px; height: 100%; background-color: #dfe4ea;"
-            " border-left: 1px #d0d7de; }" +
-        p + "select selectarrow:hover { background-color: #cdd4dd; }" +
+        /* The arrow element takes no content, so the chevron is drawn: a small
+         * square wearing two borders, turned 45 degrees. The widget pins this
+         * element to the select's top-right corner (WidgetDropDown::OnLayout,
+         * PositionElement TOP_RIGHT), so its margins are what inset it — 12px
+         * from the right edge, as the specification asks. */
+        p + "select selectarrow { width: 7px; height: 7px; box-sizing: border-box;"
+            " margin: 11px 12px 0 0; background-color: #00000000;"
+            " border-right: 1px " + TEXT_2 + "; border-bottom: 1px " + TEXT_2 + ";"
+            " transform: rotate(45deg); }" +
+        p + "select:hover selectarrow { border-right-color: " + TEXT + ";"
+            " border-bottom-color: " + TEXT + "; }" +
         /* The drop-down is drawn OUTSIDE the select's own box, so it needs its
-         * own background and border or it renders over whatever is behind it. */
-        p + "select selectbox { background-color: #ffffff; border: 1px #d0d7de;"
-            " border-radius: 4px; margin-top: 2px; padding: 2px; }" +
-        p + "select selectbox option { display: block; padding: 4px 8px 4px 8px;"
-            " color: #1f2328; }" +
-        p + "select selectbox option:hover { background-color: #dbe6f7; }" +
-        p + "select selectbox option:checked { background-color: #1e60d5; color: #ffffff; }" +
+         * own background and border or it renders over whatever is behind it.
+         * A flyout, so: card border, 8px corners, L2 elevation. */
+        p + "select selectbox { background-color: " + CARD + "; border: 1px " + BORDER + ";"
+            " border-radius: " + R_CARD + "; margin-top: 4px; padding: 4px;"
+            " box-shadow: " + L2 + "; }" +
+        p + "select selectbox option { display: block; padding: 6px 8px 6px 8px;"
+            " border-radius: " + R_CTRL + "; color: " + TEXT + "; }" +
+        p + "select selectbox option:hover { background-color: " + HOVER_BG + "; }" +
+        p + "select selectbox option:checked { background-color: " + SELECT_BG + "; }" +
 
         /* A listbox is assembled here rather than by the substrate, so the rows
          * and the selected row are this stylesheet's job entirely. */
@@ -398,32 +517,39 @@ inline std::string control_styles(const std::string& scope = "") {
          * against, and every one of them collapses to its padding. Clipping is
          * what the box needs anyway — a list longer than its rectangle must not
          * draw over the rest of the form. */
-        p + "div.oe-listbox { background-color: #ffffff; border: 1px #d0d7de;"
-            " border-radius: 4px; color: #1f2328; overflow: hidden; }" +
+        p + "div.oe-listbox { box-sizing: border-box; background-color: " + CARD + ";"
+            " border: 1px " + BORDER_C + "; border-radius: " + R_CTRL + "; color: " + TEXT + ";"
+            " font-size: " + FONT + "; overflow: hidden; }" +
         p + "div.oe-listbox div.oe-item { display: block; position: relative; width: 100%;"
-            " box-sizing: border-box; padding: 4px 8px 4px 8px; }" +
-        p + "div.oe-listbox div.oe-item:hover { background-color: #dbe6f7; }" +
-        p + "div.oe-listbox div.oe-selected { background-color: #1e60d5; color: #ffffff; }" +
+            " box-sizing: border-box; padding: 5px 8px 5px 8px; }" +
+        p + "div.oe-listbox div.oe-item:hover { background-color: " + HOVER_BG + "; }" +
+        p + "div.oe-listbox div.oe-selected { background-color: " + ACCENT + ";"
+            " color: " + ON_ACCENT + "; }" +
 
         /* Round, so a radio button is distinguishable from a checkbox at a
          * glance — which is the only thing that tells a reader the choice is
          * exclusive. */
-        p + "div.oe-radio { background-color: #00000000; }" +
+        p + "div.oe-radio { background-color: #00000000; color: " + TEXT + ";"
+            " font-size: " + FONT + "; }" +
         p + "div.oe-radio input { display: inline-block; position: relative; width: 16px;"
-            " height: 16px; background-color: #ffffff; border: 1px #8c959f;"
-            " border-radius: 8px; vertical-align: -3px; }" +
-        /* A filled dot rather than a ring: a thick inset border would have to be
-         * drawn inside the box, and the radius is the only thing distinguishing
-         * this from a checkbox — a border wide enough to read as a ring squares
-         * the corners off and takes that away. */
-        p + "div.oe-radio input:checked { background-color: #1e60d5; border: 1px #1e60d5;"
-            " border-radius: 8px; }" +
+            " height: 16px; box-sizing: border-box; background-color: " + CONTROL + ";"
+            " border: 1px " + BORDER_S + "; border-radius: 8px; vertical-align: -3px; }" +
+        p + "div.oe-radio input:hover { border-color: " + TEXT_2 + "; }" +
+        /* A filled disc rather than a ring with a dot in it: an `<input>` holds
+         * no content to make the dot from, and the thick inset border that
+         * would draw one squares the corners off — which takes away the round
+         * shape that is the only thing distinguishing this from a checkbox. */
+        p + "div.oe-radio input:checked { background-color: " + ACCENT + ";"
+            " border: 1px " + ACCENT + "; border-radius: 8px; }" +
         p + "div.oe-radio span.oe-caption { display: inline-block; padding-left: 8px; }" +
 
-        p + "textarea { display: block; position: absolute; background-color: #ffffff;"
-            " border: 1px #d0d7de; border-radius: 4px; padding: 4px 6px 4px 6px;"
-            " color: #1f2328; }" +
-        p + "textarea:focus { border: 1px #1e60d5; }" +
+        p + "textarea { display: block; position: absolute; box-sizing: border-box;"
+            " background-color: " + CONTROL + "; border: 1px " + BORDER_C + ";"
+            " border-bottom: 1px " + BORDER_S + "; border-radius: " + R_CTRL + ";"
+            " padding: 6px 10px 6px 10px; color: " + TEXT + "; font-size: " + FONT + "; }" +
+        p + "textarea:hover { background-color: " + INPUT_HOVER + "; border-color: " + BORDER_S + "; }" +
+        p + "textarea:focus { background-color: " + CARD + "; border: 1px " + BORDER_C + ";"
+            " border-bottom: 2px " + ACCENT + "; }" +
 
         /* A range input is a track plus a bar and nothing else; with no size on
          * either, the control lays out as a zero-pixel line. */
@@ -433,11 +559,11 @@ inline std::string control_styles(const std::string& scope = "") {
          * a flow offset from the track. So the two margins are what line the
          * handle up with the groove, and a negative one throws it clear of the
          * control entirely. */
-        p + "input.range slidertrack { width: 100%; height: 6px; margin-top: 7px;"
-            " background-color: #d0d7de; border-radius: 3px; }" +
+        p + "input.range slidertrack { width: 100%; height: 4px; margin-top: 8px;"
+            " background-color: " + BORDER_C + "; border-radius: 2px; }" +
         p + "input.range sliderbar { width: 18px; height: 18px; margin-top: 1px;"
-            " background-color: #1e60d5; border-radius: 9px; }" +
-        p + "input.range sliderbar:hover { background-color: #3a7ae8; }" +
+            " background-color: " + ACCENT + "; border-radius: 9px; }" +
+        p + "input.range sliderbar:hover { background-color: " + ACCENT_HOV + "; }" +
         p + "input.range sliderarrowdec, input.range sliderarrowinc { width: 0; height: 0; }" +
 
         p + "div.oe-spinner { background-color: #00000000; }" +
@@ -446,15 +572,19 @@ inline std::string control_styles(const std::string& scope = "") {
          * width here, which for a text box is the whole rest of the window. */
         p + "div.oe-spinner input.oe-value { display: block; position: absolute; left: 0;"
             " top: 0; width: 78%; height: 100%; box-sizing: border-box;"
-            " background-color: #ffffff; border: 1px #d0d7de; border-radius: 4px 0 0 4px;"
-            " padding: 4px 6px 0 6px; color: #1f2328; }" +
+            " background-color: " + CONTROL + "; border: 1px " + BORDER_C + ";"
+            " border-radius: " + R_CTRL + " 0 0 " + R_CTRL + ";"
+            " padding: 6px 10px 0 10px; color: " + TEXT + "; font-size: " + FONT + "; }" +
         p + "div.oe-spinner button.oe-step { display: block; position: absolute; left: 78%;"
             " width: 22%; height: 50%; box-sizing: border-box; padding: 0;"
-            " background-color: #eaeef2; border: 1px #d0d7de; color: #1f2328;"
-            " text-align: center; font-size: 12px; line-height: 12px; }" +
-        p + "div.oe-spinner button.oe-step:hover { background-color: #dbe1e8; }" +
-        p + "div.oe-spinner button.oe-up { top: 0; border-radius: 0 4px 0 0; }" +
-        p + "div.oe-spinner button.oe-down { top: 50%; border-radius: 0 0 4px 0; }" +
+            " background-color: " + CONTROL_ALT + "; border: 1px " + BORDER_C + ";"
+            " color: " + TEXT + "; text-align: center; font-size: 12px; line-height: 12px;"
+            " box-shadow: none; }" +
+        p + "div.oe-spinner button.oe-step:hover { background-color: " + HOVER_BG + ";"
+            " border-color: " + BORDER_C + "; }" +
+        p + "div.oe-spinner button.oe-step:active { background-color: " + PRESS_BG + "; }" +
+        p + "div.oe-spinner button.oe-up { top: 0; border-radius: 0 " + R_CTRL + " 0 0; }" +
+        p + "div.oe-spinner button.oe-down { top: 50%; border-radius: 0 0 " + R_CTRL + " 0; }" +
 
         /* The rows are a real table so the columns align on their widest
          * cell. Everything inside it is `position: relative` explicitly: the
@@ -468,10 +598,11 @@ inline std::string control_styles(const std::string& scope = "") {
          * take their width from the table — so `auto` is safe here and only
          * here. Sideways stays hidden; a row wider than the box is clipped,
          * not scrolled. */
-        p + "div.oe-grid { background-color: #ffffff; border: 1px #d0d7de; border-radius: 4px;"
-            " color: #1f2328; overflow-x: hidden; overflow-y: auto; }" +
-        p + "div.oe-grid scrollbarvertical { width: 10px; background-color: #f0f2f5; }" +
-        p + "div.oe-grid scrollbarvertical sliderbar { background-color: #c4cad3;"
+        p + "div.oe-grid { box-sizing: border-box; background-color: " + CARD + ";"
+            " border: 1px " + BORDER_C + "; border-radius: " + R_CTRL + "; color: " + TEXT + ";"
+            " font-size: " + FONT + "; overflow-x: hidden; overflow-y: auto; }" +
+        p + "div.oe-grid scrollbarvertical { width: 10px; background-color: " + CONTROL_ALT + "; }" +
+        p + "div.oe-grid scrollbarvertical sliderbar { background-color: " + BORDER_C + ";"
             " border-radius: 5px; margin: 0 2px 0 2px; }" +
         p + "div.oe-grid scrollbarvertical sliderarrowdec, "
           + p + "div.oe-grid scrollbarvertical sliderarrowinc { width: 0; height: 0; }" +
@@ -480,12 +611,13 @@ inline std::string control_styles(const std::string& scope = "") {
         p + "div.oe-grid div.oe-head, " + p + "div.oe-grid div.oe-row { display: table-row;"
             " position: relative; }" +
         p + "div.oe-grid div.oe-cell { display: table-cell; position: relative;"
-            " padding: 4px 8px 4px 8px; white-space: nowrap; overflow: hidden; }" +
-        p + "div.oe-grid div.oe-head { background-color: #eaeef2; }" +
+            " padding: 5px 8px 5px 8px; white-space: nowrap; overflow: hidden; }" +
+        p + "div.oe-grid div.oe-head { background-color: " + CONTROL_ALT + "; }" +
         p + "div.oe-grid div.oe-head div.oe-cell { font-weight: bold;"
-            " border-bottom: 1px #d0d7de; }" +
-        p + "div.oe-grid div.oe-row:hover { background-color: #dbe6f7; }" +
-        p + "div.oe-grid div.oe-selected { background-color: #1e60d5; color: #ffffff; }";
+            " border-bottom: 1px " + BORDER + "; }" +
+        p + "div.oe-grid div.oe-row:hover { background-color: " + HOVER_BG + "; }" +
+        p + "div.oe-grid div.oe-selected { background-color: " + ACCENT + ";"
+            " color: " + ON_ACCENT + "; }";
 }
 
 /// The seed document every OpenEPL form is built into.
@@ -498,8 +630,8 @@ inline std::string seed_document(int width, int height, const std::string& font_
     // something the inspector shows, not something the runtime applies: a form
     // that set no colour used to clear to black. Light grey is what every
     // desktop the audience has used draws a window in.
-    out += "body { background-color: #f0f0f0; width: " + std::to_string(width) + "px; height: " + std::to_string(height) +
-           "px; font-family: '" + font_family + "'; font-size: 16px; color: #1f2328; }";
+    out += "body { background-color: #f3f3f3; width: " + std::to_string(width) + "px; height: " + std::to_string(height) +
+           "px; font-family: '" + font_family + "'; font-size: 14px; color: #1a1a1a; }";
     out += control_styles();
     out += "</style></head><body/></rml>";
     return out;
