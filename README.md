@@ -10,8 +10,9 @@ English-first and cross-platform, with a compiler that produces clean native
 executables: no runtime to install, nothing to unpack.
 
 **[Documentation](https://axdsan.github.io/openepl/)** · [Quick start](#quick-start) ·
-[Build targets](#one-project-every-artifact) · [Editor support](#editor-support) ·
-[Building from source](#building-from-source) · [Status](#status)
+[Kits](#kits) · [Build targets](#one-project-every-artifact) ·
+[Editor support](#editor-support) · [Building from source](#building-from-source) ·
+[Status](#status)
 
 </div>
 
@@ -60,7 +61,8 @@ bin/openepl-studio
 ```
 
 Studio opens on a welcome screen. Pick a project kind and it is created and
-opened for you.
+opened for you. Give it a `.oir` file, a `project.oeproj` or a directory holding
+one, and it opens that instead.
 
 <div align="center">
 <img src="assets/screenshot-welcome.png" alt="Choosing a project template" width="760">
@@ -74,6 +76,8 @@ bin/openepl new gui-app my-app        # create a project
 bin/openepl run my-app/main.oir       # build it and run it
 ```
 
+Every template builds and runs the moment it is created.
+
 A first program is as short as it looks:
 
 ```
@@ -84,7 +88,7 @@ sub main
   call print_text("Hello from OpenEPL.")
 
   let answer: int = 6 * 7
-  call print_text(concat("six times seven is ", int_to_text(answer)))
+  call print_text("six times seven is " + int_to_text(answer))
 end
 ```
 
@@ -113,16 +117,34 @@ sub on_tick
     call print_text("Liftoff.")
     call quit()
   else
-    call print_text(concat(int_to_text(remaining), "..."))
+    call print_text(int_to_text(remaining) + "...")
   end
 end
 ```
 
-Beyond that: 13 bundled kits — `file`, `text`, `json`, `net`, `time`, `ui`
-and the rest — 302 commands and 19 components, and `use <name>` is the whole
-of asking for a kit. `openepl commands --use <name>` lists what each adds;
-the [Commands](https://axdsan.github.io/openepl/docs/reference-commands.html)
-reference is generated from the same answer.
+## Kits
+
+Everything beyond the core runtime comes from a kit: a directory of commands
+and components, written in plain C, that `use <name>` brings into a program.
+Thirteen ship with the toolchain — `file`, `text`, `json`, `net`, `time`,
+`process`, `ui` and the rest — for 302 commands and 19 components in all.
+
+```sh
+openepl commands --use net       # what a kit adds
+openepl kits                     # every kit found, its tier, and from where
+openepl kit add ./mykit          # install one under ~/.openepl/kits
+```
+
+A kit is found in three places, first match wins: `kits/` beside the project,
+`~/.openepl/kits/`, then the bundled ones in `libs/`. That is the whole
+mechanism — there is no registration list and no build file to edit. A kit's
+metadata is compiled into a small object the compiler reads at build time and
+never ships; its implementation is static-linked into your program and
+everything unreached is stripped. The
+[Commands](https://axdsan.github.io/openepl/docs/reference-commands.html)
+reference is generated from the same answer `openepl commands` gives, and
+[Kits](https://axdsan.github.io/openepl/docs/kits.html) explains how to write
+one.
 
 ## One project, every artifact
 
@@ -140,6 +162,7 @@ a module with a form is a GUI program and anything else is a console one.
 
 ```sh
 openepl build lib.oir --target sharedlib -o libgreet.so
+openepl build app.oir --release             # optimised, hardened, stripped
 ```
 
 Libraries export their subroutines under their own names, so a C host — or
@@ -163,8 +186,17 @@ foreign declaration. It is Windows-only, cross-built from Linux with
 
 ## Editing
 
-Studio's editor gives you syntax highlighting and live diagnostics as you
-type, backed by the same language server any other editor can use.
+Studio's toolbox is whatever `openepl kits` reports, grouped by the section
+each kit declares, so a kit you drop beside a project appears without a new
+build of the IDE. Components with no pixels — a `timer`, an `action`, an
+`httpserver` — sit in a tray under the canvas. The inspector offers a colour
+swatch, a file browser or a multi-line box according to what the component's
+metadata declares for each property, and double-clicking a control writes its
+handler.
+
+The editor has syntax highlighting, diagnostics that name the fix, completion,
+hover, go-to-definition and find-references — all from the same language
+server any other editor can use.
 
 <div align="center">
 <img src="assets/screenshot-editor.png" alt="The code editor with syntax highlighting" width="860">
@@ -203,6 +235,7 @@ tools/fetch-accesskit.sh      # vendor the accessibility bridge
 cargo build --release         # the compiler
 designer/build.sh             # the IDE
 cargo test                    # the test suite
+tools/fetch-mbedtls.sh        # optional: https in the `net` kit
 ```
 
 To produce a release bundle of your own:
