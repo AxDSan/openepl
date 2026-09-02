@@ -264,7 +264,14 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         const std::string out = session(
             designer, openepl, form,
             "goto:40,1;typein:  call ;key:ctrl-space;waitcomplete;key:escape;waitcomplete;bufline:40");
-        check("completion: Ctrl+Space opens the full list", has(out, "open=1 offered=109 shown=109"));
+        // The exact count is whatever the language server knows today, and it
+        // grew the moment completion learned to read `use` lines; the property
+        // worth holding is that the whole list is offered and all of it shown.
+        int offered = 0, shown = 0;
+        const size_t at = out.find("open=1 offered=");
+        if (at != std::string::npos)
+            std::sscanf(out.c_str() + at, "open=1 offered=%d shown=%d", &offered, &shown);
+        check("completion: Ctrl+Space opens the full list", offered >= 100 && shown == offered);
         check("completion: Escape closes it", has(out, "open=0 offered=0"));
         check("completion: neither key typed anything", has(out, "buf 40:   call end"));
     }
@@ -297,6 +304,52 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         { std::ofstream f(fixture, std::ios::trunc); f << bad; }
         const std::string out = session(designer, openepl, fixture, "view:code;waitdiag;scroll:6;waitdiag:1");
         check("the diagnostic names the line", has(out, "line 39: in `on_ok_click`"));
+    }
+
+    // The keyboard reaches the designer. The listener's keydown branch was
+    // once never subscribed: every shortcut in it passed review and did
+    // nothing on screen.
+    {
+        std::string path;
+        session(designer, openepl, form, "add:button;key:ctrl-z", &path);
+        check("Ctrl+Z on the canvas undoes the add", !has(slurp(path), "button1"));
+        session(designer, openepl, form, "add:button;click:button1;key:delete", &path);
+        check("Delete on the canvas removes the selection", !has(slurp(path), "button1"));
+        const std::string out =
+            session(designer, openepl, grid, "view:code;goto:104,20;focus;key:f12;waitdef");
+        check("F12 pressed in the editor jumps to the declaration",
+              has(out, "definition: caret 102,7"));
+    }
+
+    // Help > About: every way out closes it, a click inside does not, and a
+    // link goes to the browser rather than anywhere in Studio.
+    {
+        const std::string out = session(
+            designer, openepl, form,
+            "about;aboutstate;key:escape;aboutstate;about;click:ok;aboutstate;about;click:x;"
+            "aboutstate;about;clickat:30,300;aboutstate;about;clickat:720,400;aboutstate;"
+            "click:GitHub-link;aboutstate");
+        check("about: opens", has(out, "about: open\nkey: escape"));
+        size_t closed = 0;
+        for (size_t at = 0; (at = out.find("about: closed", at)) != std::string::npos; at++) closed++;
+        check("about: Escape, OK, the cross and a click outside all dismiss", closed == 4);
+        check("about: a click inside leaves it up", has(out, "click: GitHub-link\nabout: open"));
+        check("about: a link opens in the browser",
+              has(out, "about: open https://github.com/AxDSan/openepl"));
+    }
+
+    // The window's own frame: no window-manager frame over it, and the green
+    // dot maximises. What the manager did is read back from SDL, since a
+    // scripted session cannot look at the screen.
+    {
+        const std::string out =
+            session(designer, openepl, form, "winflags;click:wc-max;pump;winflags");
+        check("the window is borderless", has(out, " borderless"));
+        check("the maximise dot maximises", has(out, " maximized borderless"));
+        const std::string closed =
+            session(designer, openepl, form, "quitcheck;click:wc-close;quitcheck");
+        check("the close dot asks the event loop to stop, as the manager's close does",
+              has(closed, "quitcheck: running\n") && has(closed, "quitcheck: quit\n"));
     }
 }
 

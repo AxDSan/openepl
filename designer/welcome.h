@@ -153,6 +153,20 @@ inline std::string base_styles() {
     return s;
 }
 
+/// The window controls, drawn by Studio because the window has no frame of
+/// its own: minimise, maximise, close, in that order, at the top right. One
+/// definition for every screen, so the click path that reads `oe-win` and the
+/// tests that press these by id find the same elements on all of them.
+inline std::string window_controls_styles() {
+    return ".wc{position:absolute;top:8px;width:16px;height:16px;border-radius:8px;"
+           "cursor:pointer}.wc:hover{opacity:0.7}";
+}
+inline std::string window_controls_markup() {
+    return "<div class='wc' id='wc-min' oe-win='min' style='right:66px;background-color:#febc2e'/>"
+           "<div class='wc' id='wc-max' oe-win='max' style='right:42px;background-color:#28c840'/>"
+           "<div class='wc' id='wc-close' oe-win='close' style='right:18px;background-color:#ff5f57'/>";
+}
+
 /// The splash: shown while the runtime registry loads.
 inline std::string splash_markup(const std::string& family, int w, int h,
                                  const std::string& wordmark) {
@@ -241,7 +255,8 @@ inline std::string welcome_markup(const std::string& family, int w, int h,
     s += "#bg{position:absolute;left:0;top:0;width:" + std::to_string(w) + "px;height:" +
          std::to_string(h) + "px;background-color:" + CANVAS + "}";
     s += "#logo{display:block;width:300px}";
-    s += "</style></head><body><div id='bg'/>";
+    s += window_controls_styles();
+    s += "</style></head><body><div id='bg'/>" + window_controls_markup();
 
     s += "<div id='head'>";
     s += wordmark.empty() ? "<div id='mark'>OpenEPL <span class='accent'>Studio</span></div>"
@@ -383,7 +398,8 @@ inline std::string browse_markup(const std::string& family, int w, int h, const 
     s += "#cancel{position:absolute;left:56px;top:" + std::to_string(h - 60) +
          "px;padding:8px 16px;border-radius:6px;border:1px " + BORDER + ";cursor:pointer;font-size:13px}";
     s += "#cancel:hover{background-color:" + std::string(PANEL) + "}";
-    s += "</style></head><body><div id='bg'/>";
+    s += window_controls_styles();
+    s += "</style></head><body><div id='bg'/>" + window_controls_markup();
     s += "<div id='head'><div id='title'>";
     s += mode == "project" ? "Open Project" : "Open File";
     s += "</div><div id='dir'>" + dir + "</div></div>";

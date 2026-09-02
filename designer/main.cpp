@@ -198,6 +198,12 @@ struct Designer {
     /// reads it: a frame dump cannot show the mouse pointer, so this is how
     /// the resize cursor gets verified at all.
     std::string cursor_name;
+    /// The UI face, for documents built after the chrome — the About dialog.
+    std::string family;
+    /// The About dialog while it is up. A second document rather than a div
+    /// in the chrome: shown modal, it is the one thing that can take focus,
+    /// which is what makes Escape and "click outside" unambiguous.
+    Rml::ElementDocument* about = nullptr;
 
     /// The previous press on the canvas, for double-click detection. RmlUi's
     /// own `dblclick` compares element identity, and every press here rebuilds
@@ -281,6 +287,84 @@ struct StudioSystem : SystemInterface_SDL {
     }
     SDL_Cursor *ns = nullptr, *ew = nullptr, *nesw = nullptr, *nwse = nullptr;
 };
+
+/* --- the window's own frame --------------------------------------------- */
+
+/// What the three dots do. Close is a request to the event loop, not an exit:
+/// it goes in as the same SDL_QUIT the window manager's close sends, so the
+/// unsaved-changes handling at the end of the loop runs for both.
+void window_control(const std::string& which) {
+    SDL_Window* win = SDL_GL_GetCurrentWindow();
+    if (!win) return;
+    if (which == "min") {
+        SDL_MinimizeWindow(win);
+    } else if (which == "max") {
+        if (SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED) SDL_RestoreWindow(win);
+        else SDL_MaximizeWindow(win);
+    } else if (which == "close") {
+        SDL_Event ev{};
+        ev.type = SDL_QUIT;
+        SDL_PushEvent(&ev);
+    }
+}
+
+/// Which part of the frame the pointer is on. The window manager moves and
+/// resizes the window from this — the one mechanism that works under every
+/// compositor, since a borderless window cannot be moved by the program on
+/// Wayland at all. The dots are left out of the drag strip so their clicks
+/// still reach the document.
+///
+/// A press in the strip never reaches SDL's event queue: the platform hands
+/// it straight to the window manager. So the double-click that toggles
+/// maximise has to be recognised here, from the calls themselves. X11 calls
+/// on every motion as well, for the cursor, and there the server's button
+/// state tells a press from a pass-over. Wayland calls on press and on
+/// release alike and offers nothing to tell them apart, so a click there
+/// would read as a double-click: on Wayland the strip only drags.
+SDL_HitTestResult window_hit_test(SDL_Window* win, const SDL_Point* p, void*) {
+    int w = 0, h = 0;
+    SDL_GetWindowSize(win, &w, &h);
+    const bool maximised = SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED;
+    constexpr int EDGE = 6;
+    if (!maximised) {
+        const bool l = p->x < EDGE, r = p->x >= w - EDGE, t = p->y < EDGE, b = p->y >= h - EDGE;
+        if (t && l) return SDL_HITTEST_RESIZE_TOPLEFT;
+        if (t && r) return SDL_HITTEST_RESIZE_TOPRIGHT;
+        if (b && l) return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+        if (b && r) return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+        if (t) return SDL_HITTEST_RESIZE_TOP;
+        if (b) return SDL_HITTEST_RESIZE_BOTTOM;
+        if (l) return SDL_HITTEST_RESIZE_LEFT;
+        if (r) return SDL_HITTEST_RESIZE_RIGHT;
+    }
+    if (p->y >= theme::TITLEBAR_H || p->x >= w - 90) return SDL_HITTEST_NORMAL;
+
+    static const bool x11 = std::strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0;
+    static bool was_down = false;
+    static Uint32 last_press = 0;
+    static SDL_Point last_at{-100, -100};
+    if (!x11) return SDL_HITTEST_DRAGGABLE;
+    const bool down = SDL_GetGlobalMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK;
+    const bool press = down && !was_down;
+    was_down = down;
+    if (press) {
+        // A dump cannot show a drag; this is how a press in the strip is
+        // known to have reached here at all.
+        if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+            std::fprintf(stderr, "titlebar: press at %d,%d\n", p->x, p->y);
+        }
+        const Uint32 now = SDL_GetTicks();
+        const bool twice = now - last_press < 400 && std::abs(p->x - last_at.x) < 6 &&
+                           std::abs(p->y - last_at.y) < 6;
+        last_press = twice ? 0 : now;
+        last_at = *p;
+        if (twice) {
+            window_control("max");
+            return SDL_HITTEST_NORMAL;   // a toggle, not the start of a move
+        }
+    }
+    return SDL_HITTEST_DRAGGABLE;
+}
 
 void size_output_pane();
 void refresh_highlight();
@@ -668,7 +752,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "width:18px;height:18px;top:7px}";
     s << "#titlebar .title{position:absolute;left:38px;top:8px;width:700px;height:18px;"
          "overflow:hidden;white-space:nowrap;font-size:13px;font-weight:bold;color:" << TEXT << "}";
-    s << "#titlebar .wc{position:absolute;top:8px;width:16px;height:16px;border-radius:8px}";
+    s << openepl::welcome::window_controls_styles();
 
     // ---- menu bar -------------------------------------------------------
     s << "#menubar{left:0;top:" << TITLEBAR_H << "px;width:" << WIN_W << "px;height:" << MENUBAR_H
@@ -1002,10 +1086,8 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << (icon.empty() ? std::string("<div class='appicon'>E</div>")
                        : "<img class='appicon' src='" + icon + "'/>")
       << "<div class='title'>OpenEPL Studio — " << esc(basename_of(g.model.path)) << " — ["
-      << esc(g.model.form_name) << "]</div>"
-         "<div class='wc' style='right:66px;background-color:#febc2e'/>"
-         "<div class='wc' style='right:42px;background-color:#28c840'/>"
-         "<div class='wc' style='right:18px;background-color:#ff5f57'/></div>";
+      << esc(g.model.form_name) << "]</div>" << openepl::welcome::window_controls_markup()
+      << "</div>";
 
     s << "<div id='menubar'>";
     for (size_t i = 0; i < menus().size(); i++) {
@@ -2532,6 +2614,132 @@ void hide_tip() {
 /// markdown with a fenced signature first; the fences are dropped and the
 /// rest — "command", "subroutine", "declared on line 4" — is set in the
 /// chrome's face under it.
+/* --- Help > About ---------------------------------------------------------- */
+
+/// A link, in the user's browser. Not from a scripted session: a test that
+/// opened a browser on the machine running it would be a test nobody runs
+/// twice.
+void open_url(const std::string& url) {
+    if (std::getenv("OPENEPL_DESIGNER_SCRIPT")) {
+        std::printf("about: open %s\n", url.c_str());
+        std::fflush(stdout);
+        return;
+    }
+    const std::string cmd = "xdg-open '" + url + "' >/dev/null 2>&1 &";
+    if (std::system(cmd.c_str()) != 0) set_status("could not open " + url);
+}
+
+std::string about_markup() {
+    const int W = g.win_w, H = g.win_h;
+    const std::string icon = asset_path("openepl-icon-64.png");
+    const std::string mark = asset_path("openepl-wordmark.png");
+    std::string version = openepl::welcome::version_string(g.openepl_bin);
+    if (version.empty()) version = "openepl";
+    std::ostringstream s;
+    s << "<rml><head><style>";
+    s << "div{display:block}span{display:inline}";
+    // The body is the click-outside target, so it has to be the window's
+    // size: an unsized body is 0x0 and no click ever lands on it.
+    s << "body{position:absolute;left:0;top:0;width:" << W << "px;height:" << H
+      << "px;font-family:'" << g.family << "';background-color:#0000001c}";
+    s << "#about{position:absolute;left:" << (W - 480) / 2 << "px;top:" << (H - 400) / 2
+      << "px;width:440px;padding:16px 20px 20px 20px;background-color:#ffffff;"
+         "border-radius:12px;box-shadow:#00000038 0 14px 40px 0px}";
+    s << "#ttl{height:20px;font-size:12px;color:#1F2328;margin-bottom:16px}";
+    s << "#ttl img{width:16px;height:16px;vertical-align:-4px;margin-right:6px}";
+    s << "#x{position:absolute;right:18px;top:12px;width:22px;height:22px;text-align:center;"
+         "padding-top:2px;font-size:13px;color:#57606A;border-radius:4px;cursor:pointer}";
+    s << "#x:hover{background-color:#F3F4F6;color:#1F2328}";
+    s << "#hero{position:relative;height:64px}";
+    s << "#hero img.big{position:absolute;left:0;top:0;width:64px;height:64px}";
+    // The wordmark is 1100x224; 265px wide keeps its proportions at a height
+    // that sits beside the icon.
+    s << "#hero img.mark{position:absolute;left:80px;top:5px;width:265px;height:54px}";
+    // The weights are the design's. RmlUi has no synthesis, but it does pick
+    // the nearest face it was given — the regular and bold Studio loads —
+    // so a machine whose family ships a medium or semibold face gets them.
+    s << "#ver{margin-top:8px;font-size:14px;font-weight:600;color:#1F2328}";
+    s << "#tag{margin-top:10px;font-size:12.5px;font-weight:500;line-height:1.4;color:#1F2328}";
+    s << "#her{margin-top:10px;font-size:11.5px;line-height:1.4;color:#57606A}";
+    s << "#pills{margin-top:14px}";
+    s << ".pill{display:inline-block;height:24px;padding:3px 10px 0 10px;margin-right:6px;"
+         "margin-bottom:6px;border-radius:12px;background-color:#F3F4F6;border:1px #E5E7EB;"
+         "font-size:11px;font-weight:500;color:#374151}";
+    s << ".pill.accent{background-color:#EEF2FF;border:1px #C7D2FE;font-weight:600;color:#4338CA}";
+    s << "#foot{margin-top:10px;font-size:11px;color:#6E7781}";
+    s << "#links{margin-top:6px;margin-bottom:16px;font-size:11.5px;font-weight:600;color:#0969DA}";
+    s << "#links span.l{cursor:pointer}#links span.l:hover{text-decoration:underline}";
+    s << "#links span.pipe{color:#D0D7DE;padding:0 8px 0 8px}";
+    s << "#rule{height:1px;background-color:#E5E7EB;margin-bottom:12px}";
+    s << "#ok{position:absolute;right:20px;bottom:20px;width:75px;height:30px;padding-top:7px;"
+         "text-align:center;font-size:12px;color:#1F2328;background-color:#ffffff;border:1px #D0D7DE;"
+         "border-radius:5px;cursor:pointer}";
+    s << "#ok:hover{background-color:#F3F4F6}";
+    s << "#okrow{height:30px}";
+    s << "</style></head><body id='about-bg'><div id='about'>";
+    s << "<div id='ttl'>" << (icon.empty() ? "" : "<img src='" + icon + "'/>")
+      << "About OpenEPL Studio</div><div id='x' oe-about='close'>\u2715</div>";
+    s << "<div id='hero'>" << (icon.empty() ? "" : "<img class='big' src='" + icon + "'/>")
+      << (mark.empty() ? "" : "<img class='mark' src='" + mark + "'/>") << "</div>";
+    s << "<div id='ver'>" << esc(version) << "</div>";
+    s << "<div id='tag'>Visual builder for real desktop apps. Draw a window, wire a handler, "
+         "hit Run to a small native binary.</div>";
+    s << "<div id='her'>Open, cross-platform heir to the VB6 / Delphi RAD tradition. "
+         "Built from EPL and BlackMoon concepts.</div>";
+    s << "<div id='pills'>";
+    for (const char* t : {"Clean native binary", "IR to LLVM to linker", "IR never ships",
+                          "Radical ease"}) {
+        s << "<div class='pill'>" << t << "</div>";
+    }
+    s << "<div class='pill accent'>RAD is the identity</div></div>";
+    // Literal UTF-8: RmlUi prints an entity it does not know verbatim.
+    s << "<div id='foot'>\u00a9 2026 OpenEPL Community. MIT Licensed.</div>";
+    s << "<div id='links'><span class='l' id='GitHub-link' oe-url='https://github.com/AxDSan/openepl'>GitHub</span>"
+         "<span class='pipe'>|</span>"
+         "<span class='l' oe-url='https://axdsan.github.io/openepl/'>Docs</span></div>";
+    s << "<div id='rule'/><div id='okrow'/><div id='ok' oe-about='close'>OK</div>";
+    s << "</div></body></rml>";
+    return s.str();
+}
+
+void close_about() {
+    if (!g.about) return;
+    // Unloading is deferred to the context's next Update, so closing from
+    // inside the dialog's own listener is safe.
+    g.about->Close();
+    g.about = nullptr;
+    if (g.doc) g.doc->Focus();
+}
+
+/// OK, the cross, Escape and a click on the backdrop all dismiss; a link
+/// opens and leaves the dialog up.
+struct AboutListener : Rml::EventListener {
+    void ProcessEvent(Rml::Event& ev) override {
+        if (ev.GetType() == "keydown") {
+            if (ev.GetParameter<int>("key_identifier", 0) == Rml::Input::KI_ESCAPE) close_about();
+            return;
+        }
+        for (Rml::Element* e = ev.GetTargetElement(); e; e = e->GetParentNode()) {
+            if (e->HasAttribute("oe-url")) {
+                open_url(e->GetAttribute<Rml::String>("oe-url", ""));
+                return;
+            }
+            if (e->HasAttribute("oe-about")) { close_about(); return; }
+            if (e->GetId() == "about") return;      // inside the dialog: nothing
+        }
+        close_about();
+    }
+} g_about_listener;
+
+void show_about() {
+    if (g.about) return;
+    g.about = g.context->LoadDocumentFromMemory(about_markup());
+    if (!g.about) return;
+    g.about->Show(Rml::ModalFlag::Modal, Rml::FocusFlag::Document);
+    g.about->AddEventListener("click", &g_about_listener);
+    g.about->AddEventListener("keydown", &g_about_listener);
+}
+
 void show_tip(const std::string& markdown, int x, int y) {
     Rml::Element* tip = by_id("tip");
     if (!tip) return;
@@ -3151,6 +3359,14 @@ struct Listener : Rml::EventListener {
         }
 
         if (type == "keydown") {
+            // A key pressed inside a text control belongs to that control.
+            // The editor's textarea stops every keydown before it bubbles
+            // here today, but that is RmlUi's choice, not a contract: a
+            // Ctrl+V while typing must never paste a component.
+            for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                const Rml::String tag = e->GetTagName();
+                if (tag == "textarea" || tag == "input") return;
+            }
             const int key = ev.GetParameter<int>("key_identifier", 0);
             const bool ctrl = ev.GetParameter<bool>("ctrl_key", false);
             const bool shift = ev.GetParameter<bool>("shift_key", false);
@@ -3158,12 +3374,8 @@ struct Listener : Rml::EventListener {
             if (ctrl && key == Rml::Input::KI_Y) { redo(); return; }
             if (ctrl && key == Rml::Input::KI_C) { copy_selection(); return; }
             if (ctrl && key == Rml::Input::KI_V) { paste_clipboard(); return; }
-            if (ctrl && key == Rml::Input::KI_S) { save(); return; }
-            // F12 and Shift+F12, as in every editor that has them.
-            if (key == Rml::Input::KI_F12) {
-                shift ? find_references() : goto_definition();
-                return;
-            }
+            // Not Ctrl+S: the backend's key callback saves once the context
+            // has declined the key, and a save here too would be two.
             if (g.view == "code") return;   // the rest are designer gestures
             if (key == Rml::Input::KI_DELETE) { delete_selection(); return; }
             // Nudge the selection with the arrow keys: 1px normally, a grid
@@ -3299,6 +3511,10 @@ struct Listener : Rml::EventListener {
                     rebuild_inspector();
                     return;
                 }
+                if (e->HasAttribute("oe-win")) {
+                    window_control(e->GetAttribute<Rml::String>("oe-win", ""));
+                    return;
+                }
                 if (e->HasAttribute("oe-action")) {
                     const Rml::String a = e->GetAttribute<Rml::String>("oe-action", "");
                     if (a == "save") save();
@@ -3312,10 +3528,8 @@ struct Listener : Rml::EventListener {
                     else if (a == "delete") delete_selection();
                     else if (a == "view-designer") set_view("designer");
                     else if (a == "view-code") set_view("code");
-                    else if (a == "about") {
-                        log("OpenEPL Studio — RAD for clean native binaries.", "muted");
-                        set_status("OpenEPL Studio");
-                    } else if (a == "exit") {
+                    else if (a == "about") show_about();
+                    else if (a == "exit") {
                         Backend::RequestExit();
                     } else {
                         set_status(a + " is not implemented yet");
@@ -3562,7 +3776,17 @@ struct KeyGate : Rml::EventListener {
         }
         const int key = ev.GetParameter<int>("key_identifier", 0);
         const bool ctrl = ev.GetParameter<bool>("ctrl_key", false);
+        const bool shift = ev.GetParameter<bool>("shift_key", false);
         g.swallow_text.clear();
+        // F12 and Shift+F12, as in every editor that has them. Here, in the
+        // capture phase, because the textarea stops every keydown it sees
+        // whether or not it had a use for it: a listener on the document
+        // would never hear an F12 pressed in the editor.
+        if (key == Rml::Input::KI_F12) {
+            shift ? find_references() : goto_definition();
+            ev.StopImmediatePropagation();
+            return;
+        }
         if (ctrl && key == Rml::Input::KI_SPACE) {
             request_completion(true);
             g.swallow_text = " ";
@@ -3754,6 +3978,60 @@ void run_script(const char* script) {
                     relayout();
                     rebuild_canvas();
                 }
+            } else if (verb == "about") {
+                show_about();
+                g.context->Update();
+            } else if (verb == "aboutstate") {
+                g.context->Update();
+                std::printf("about: %s\n", g.about ? "open" : "closed");
+                std::fflush(stdout);
+            } else if (verb == "clickat") {
+                // A press at window coordinates, for what has no id — the
+                // backdrop behind a dialog.
+                int x = 0, y = 0;
+                std::sscanf(arg.c_str(), "%d,%d", &x, &y);
+                g.context->Update();
+                g.context->ProcessMouseMove(x, y, 0);
+                g.context->ProcessMouseButtonDown(0, 0);
+                g.context->ProcessMouseButtonUp(0, 0);
+                g.context->Update();
+            } else if (verb == "pump") {
+                // Let the window manager answer — a maximise asked for by a
+                // button lands as a resize some events later — and follow
+                // the window the way the interactive loop does each frame.
+                for (int i = 0; i < 30; i++) {
+                    Backend::ProcessEvents(g.context, nullptr, false);
+                    SDL_Delay(10);
+                }
+                const auto dim = g.context->GetDimensions();
+                if (dim.x != g.win_w || dim.y != g.win_h) {
+                    g.win_w = dim.x;
+                    g.win_h = dim.y;
+                    relayout();
+                    rebuild_canvas();
+                }
+                g.context->Update();
+            } else if (verb == "quitcheck") {
+                // Whether the event loop would now stop — how a close
+                // request from the red dot is told from one that went
+                // nowhere.
+                const bool running = Backend::ProcessEvents(g.context, nullptr, false);
+                std::printf("quitcheck: %s\n", running ? "running" : "quit");
+                std::fflush(stdout);
+            } else if (verb == "winflags") {
+                // What the window manager did with the request; a dump cannot
+                // show a minimised window.
+                Uint32 flags = 0;
+                int w = 0, h = 0;
+                if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
+                    flags = SDL_GetWindowFlags(win);
+                    SDL_GetWindowSize(win, &w, &h);
+                }
+                std::printf("winflags: %dx%d%s%s%s\n", w, h,
+                            flags & SDL_WINDOW_MAXIMIZED ? " maximized" : "",
+                            flags & SDL_WINDOW_MINIMIZED ? " minimized" : "",
+                            flags & SDL_WINDOW_BORDERLESS ? " borderless" : "");
+                std::fflush(stdout);
             } else if (verb == "undo") undo();
             else if (verb == "redo") redo();
             else if (verb == "copy") copy_selection();
@@ -3804,6 +4082,7 @@ void run_script(const char* script) {
                 // detected by the listener rather than the substrate.
                 g.context->Update();
                 Rml::Element* e = by_id(arg.c_str());
+                if (!e && g.about) e = g.about->GetElementById(arg);
                 if (!e) {
                     // Components — on the canvas or in the tray — carry their
                     // id as an attribute rather than as the element's id.
@@ -4015,10 +4294,17 @@ void run_script(const char* script) {
                 // character the platform sends after them, so the swallow
                 // path is exercised too.
                 const bool ctrl = arg.rfind("ctrl-", 0) == 0;
-                const std::string name = ctrl ? arg.substr(5) : arg;
-                const int mod = ctrl ? Rml::Input::KM_CTRL : 0;
+                const bool shift = arg.rfind("shift-", 0) == 0;
+                const std::string name = ctrl ? arg.substr(5) : shift ? arg.substr(6) : arg;
+                const int mod = ctrl ? Rml::Input::KM_CTRL : shift ? Rml::Input::KM_SHIFT : 0;
                 Rml::Input::KeyIdentifier key = Rml::Input::KI_UNKNOWN;
                 if (name == "up") key = Rml::Input::KI_UP;
+                else if (name == "left") key = Rml::Input::KI_LEFT;
+                else if (name == "right") key = Rml::Input::KI_RIGHT;
+                else if (name == "delete") key = Rml::Input::KI_DELETE;
+                else if (name == "f12") key = Rml::Input::KI_F12;
+                else if (name == "z") key = Rml::Input::KI_Z;
+                else if (name == "y") key = Rml::Input::KI_Y;
                 else if (name == "down") key = Rml::Input::KI_DOWN;
                 else if (name == "enter") key = Rml::Input::KI_RETURN;
                 else if (name == "tab") key = Rml::Input::KI_TAB;
@@ -4029,6 +4315,26 @@ void run_script(const char* script) {
                 if (key == Rml::Input::KI_RETURN) g.context->ProcessTextInput('\n');
                 if (key == Rml::Input::KI_SPACE) g.context->ProcessTextInput(' ');
                 g.context->Update();
+                // Where the key went is the whole question for a shortcut: a
+                // context with no focus hands keys to its root, and nothing
+                // registered on a document hears those.
+                const Rml::Element* focus = g.context->GetFocusElement();
+                std::printf("key: %s focus=%s\n", arg.c_str(),
+                            focus ? (focus->GetId().empty() ? focus->GetTagName().c_str()
+                                                            : focus->GetId().c_str())
+                                  : "none");
+                std::fflush(stdout);
+            }
+            else if (verb == "waitdef") {
+                // The answer to a definition request the way the frame loop
+                // delivers it; the key path that asked for it cannot wait.
+                if (g.def_request) g.lsp.pump_until(g.def_request, 3000);
+                poll_answers();
+                g.context->Update();
+                int cl = 0, cc = 0;
+                caret_position(cl, cc);
+                std::printf("definition: caret %d,%d scroll=%d\n", cl + 1, cc + 1, g.code_scroll);
+                std::fflush(stdout);
             }
             else if (verb == "waitcomplete") {
                 // Wait for the completion in flight the way the frame loop
@@ -4350,14 +4656,28 @@ std::string create_project(const std::string& template_id,
     return open_path;
 }
 
-/// Put the splash on screen and paint it, so it is visible *during* the work
-/// that follows rather than after it.
-Rml::ElementDocument* show_splash(const std::string& family) {
+/// The splash, sized to the window as it is now. The markup bakes its size
+/// in, and the window manager's maximise arrives in the first events after
+/// the window opens — a splash built for the size we asked for is clipped by
+/// the size we got.
+struct Splash {
+    Rml::ElementDocument* doc = nullptr;
+    Rml::Vector2i built_for;
+    Uint32 shown_at = 0;
+};
+
+void paint_splash(Splash& sp, const std::string& family) {
     const auto dim = g.context->GetDimensions();
-    Rml::ElementDocument* doc = g.context->LoadDocumentFromMemory(
+    if (sp.doc && dim == sp.built_for) return;
+    if (sp.doc) {
+        sp.doc->Close();
+        g.context->Update();
+    }
+    sp.built_for = dim;
+    sp.doc = g.context->LoadDocumentFromMemory(
         openepl::welcome::splash_markup(family, dim.x, dim.y, asset_path("openepl-wordmark.png")));
-    if (!doc) return nullptr;
-    doc->Show();
+    if (!sp.doc) return;
+    sp.doc->Show();
     // Two frames: one to lay out, one to present. Without this the splash is
     // constructed and never actually drawn.
     for (int i = 0; i < 2; i++) {
@@ -4366,8 +4686,51 @@ Rml::ElementDocument* show_splash(const std::string& family) {
         g.context->Render();
         Backend::PresentFrame();
     }
+}
+
+/// Put the splash on screen and paint it, so it is visible *during* the work
+/// that follows rather than after it.
+Splash show_splash(const std::string& family) {
+    Splash sp;
+    sp.shown_at = SDL_GetTicks();
+    paint_splash(sp, family);
+    // The backend applies the real window size in these events. Read it now
+    // and rebuild, or the splash sits at 1440x900 in a maximised window.
+    for (int i = 0; i < 3; i++) Backend::ProcessEvents(g.context, nullptr, false);
+    paint_splash(sp, family);
     dump_to(std::getenv("OPENEPL_DESIGNER_SPLASH_DUMP"));
-    return doc;
+    return sp;
+}
+
+/// Take the splash down — but not before it has been seen. The work it
+/// covers finishes in a fraction of a second on a fast machine, and a splash
+/// torn down that quickly is a flicker, not a splash. The work itself is not
+/// delayed: it has already run by the time this is called, and the hold only
+/// eats what remains of the minimum. Returns false when the user closed the
+/// window during the hold.
+///
+/// No hold in a scripted session: nobody is watching, and the Studio tests
+/// run dozens of sessions.
+bool close_splash(Splash& sp, const std::string& family, Uint32 min_ms) {
+    if (!sp.doc) return true;
+    const bool scripted = std::getenv("OPENEPL_DESIGNER_SCRIPT") != nullptr;
+    while (!scripted && SDL_GetTicks() - sp.shown_at < min_ms) {
+        if (!Backend::ProcessEvents(g.context, nullptr, false)) return false;
+        paint_splash(sp, family);
+        g.context->Update();
+        Backend::BeginFrame();
+        g.context->Render();
+        Backend::PresentFrame();
+        SDL_Delay(16);
+    }
+    if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+        std::fprintf(stderr, "splash: shown for %u ms (minimum %u)\n",
+                     SDL_GetTicks() - sp.shown_at, min_ms);
+    }
+    sp.doc->Close();
+    sp.doc = nullptr;
+    g.context->Update();
+    return true;
 }
 
 /// The welcome screen. Returns the project file to open, or "" if the user
@@ -4449,6 +4812,10 @@ std::string run_welcome(const std::string& family) {
         const std::vector<openepl::welcome::TemplateInfo>* templates;
         void ProcessEvent(Rml::Event& ev) override {
             for (Rml::Element* e = ev.GetTargetElement(); e; e = e->GetParentNode()) {
+                if (e->HasAttribute("oe-win")) {
+                    window_control(e->GetAttribute<Rml::String>("oe-win", ""));
+                    return;
+                }
                 if (e->HasAttribute("oe-open")) {
                     *out = e->GetAttribute<Rml::String>("oe-open", "");
                     return;
@@ -4646,12 +5013,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Ask the toolchain what exists before drawing a toolbox that claims to
-    // know. One subprocess per kit, once — and if the toolchain cannot be run
-    // at all the catalogue comes back empty, which shows an empty toolbox
-    // rather than a wrong one.
-    g.catalog = build_catalog(g.openepl_bin);
-
     if (!Backend::Initialize("OpenEPL Studio", INIT_W, INIT_H, true)) return 1;
 
     // The window icon: what a task switcher and a dock show. SDL owns the
@@ -4666,6 +5027,19 @@ int main(int argc, char** argv) {
                 SDL_SetWindowIcon(win, s);
                 SDL_FreeSurface(s);
             }
+        }
+        // Studio draws its own title bar; the window manager's would sit on
+        // top of it, and two title bars is one too many. Without a frame the
+        // hit test is what makes the window movable and resizable at all,
+        // so a platform that refuses one gets its frame back.
+        SDL_SetWindowBordered(win, SDL_FALSE);
+        if (SDL_SetWindowHitTest(win, window_hit_test, nullptr) != 0) {
+            std::fprintf(stderr, "designer: no window hit test (%s); keeping the frame\n",
+                         SDL_GetError());
+            SDL_SetWindowBordered(win, SDL_TRUE);
+        }
+        if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
+            std::fprintf(stderr, "designer: video driver %s\n", SDL_GetCurrentVideoDriver());
         }
     }
     // Ours rather than the backend's, for the directional resize cursors.
@@ -4711,6 +5085,7 @@ int main(int argc, char** argv) {
     // RmlUi resolves a decorator path as a URL and drops the leading slash of
     // an absolute one, so the tile has to be handed over in a form its URL
     // parser leaves alone. Doubling the slash survives that normalisation.
+    g.family = family;
     const std::string tile_path = cache_file("openepl_dotgrid.tga");
     const std::string dot_tile = write_dot_tile(tile_path, 10).empty() ? "" : "/" + tile_path;
     g.context = Rml::CreateContext("studio", Rml::Vector2i(INIT_W, INIT_H));
@@ -4719,21 +5094,31 @@ int main(int argc, char** argv) {
     g.context->EnableMouseCursor(true);
 
     // Splash first, and painted before the slow part starts. Loading the
-    // component registry shells out to `openepl inspect`; done before the
-    // window exists it is a second of nothing at all.
-    Rml::ElementDocument* splash = show_splash(family);
+    // component registry shells out to `openepl commands` once per kit; done
+    // before the window exists it is a second of nothing at all.
+    Splash splash = show_splash(family);
+
+    // Ask the toolchain what exists before drawing a toolbox that claims to
+    // know — and if the toolchain cannot be run at all the catalogue comes
+    // back empty, which shows an empty toolbox rather than a wrong one.
+    g.catalog = build_catalog(g.openepl_bin);
 
     // With no file to open, ask what to build. The welcome screen has no
     // project yet, so the IDE chrome cannot meaningfully exist behind it.
+    // The second splash is a transition between two screens, not a launch;
+    // it gets no minimum.
+    Uint32 splash_min = 1200;
+    auto quit = [] {
+        Rml::Shutdown();
+        Backend::Shutdown();
+        return 0;
+    };
     if (path.empty()) {
-        if (splash) { splash->Close(); splash = nullptr; }
+        if (!close_splash(splash, family, splash_min)) return quit();
         path = run_welcome(family);
-        if (path.empty()) {          // the user closed the window
-            Rml::Shutdown();
-            Backend::Shutdown();
-            return 0;
-        }
+        if (path.empty()) return quit();   // the user closed the window
         splash = show_splash(family);
+        splash_min = 0;
     }
 
     std::string err;
@@ -4759,7 +5144,7 @@ int main(int argc, char** argv) {
         }
         g.lsp.did_open(abs, text);
     }
-    if (splash) splash->Close();
+    if (!close_splash(splash, family, splash_min)) return quit();
 
     const std::string chrome = build_chrome(family, mono, dot_tile);
     if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
@@ -4769,7 +5154,8 @@ int main(int argc, char** argv) {
     if (!g.doc) { std::fprintf(stderr, "designer: chrome failed to load\n"); return 1; }
     g.doc->Show();
 
-    for (const char* e : {"click", "change", "mousedown", "mousemove", "mouseup", "mousescroll"}) {
+    for (const char* e : {"click", "change", "mousedown", "mousemove", "mouseup", "mousescroll",
+                          "keydown"}) {
         g.doc->AddEventListener(e, &g_listener);
     }
     for (const char* e : {"keydown", "textinput"}) g.doc->AddEventListener(e, &g_key_gate, true);
