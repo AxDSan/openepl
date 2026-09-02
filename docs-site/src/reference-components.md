@@ -33,6 +33,33 @@ list.
 
 **Events:** `request`
 
+## tcpclient
+
+| Property | Type |
+| --- | --- |
+| `name` | text |
+| `host` | text |
+| `port` | int |
+| `active` | bool |
+| `connected` | bool |
+| `delimiter` | text |
+| `timeout_ms` | int |
+
+**Events:** `connect`,`disconnect` `receive`,`error`
+
+## tcpserver
+
+| Property | Type |
+| --- | --- |
+| `name` | text |
+| `port` | int |
+| `address` | text |
+| `active` | bool |
+| `max_clients` | int |
+| `delimiter` | text |
+
+**Events:** `connect`,`disconnect` `receive`,`error`
+
 
 # ui
 

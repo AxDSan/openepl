@@ -288,6 +288,16 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `net_timeout_set` | int | bool |
 | `net_url_decode` | text | text |
 | `net_url_encode` | text | text |
+| `tcpclient_connected` | text | bool |
+| `tcpclient_connect` | text | bool |
+| `tcpclient_disconnect` | text | bool |
+| `tcpclient_send` | text, text | bool |
+| `tcpserver_client_address` | text, int | text |
+| `tcpserver_client_count` | text | int |
+| `tcpserver_client` | text, int | int |
+| `tcpserver_disconnect` | text, int | bool |
+| `tcpserver_send_all` | text, text | int |
+| `tcpserver_send` | text, int, text | bool |
 
 ## process
 

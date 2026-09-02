@@ -126,6 +126,205 @@ Calling `quit()` from inside a handler works — the reply that handler already
 set is flushed before the loop stops — but any *other* connection mid-response
 is dropped with it.
 
+## TCP components
+
+Below HTTP there is plain TCP, and it has the same shape: two non-visual
+components, `tcpserver` and `tcpclient`, the pair a Delphi programmer knows as
+`TIdTCPServer` and `TIdTCPClient`. Drop one from Studio's toolbox or declare it
+at module level, set a port, wire the events, switch it on with `active`.
+
+Here is a whole echo server. It is `examples/tcpecho.oir`, and it runs as
+`openepl run examples/tcpecho.oir 7000` with `nc localhost 7000` in another
+terminal:
+
+```
+module tcpecho
+use net
+use system
+
+tcpserver echo
+  name = "echo"
+  on connect: on_connect
+  on disconnect: on_disconnect
+  on receive: on_receive
+  on error: on_error
+end
+
+sub main
+  echo.port = text_to_int(sys_arg(1))
+  echo.active = true
+  call print_text(concat("echo server on port ", int_to_text(echo.port)))
+end
+
+sub on_connect(client: int)
+  call print_text(concat("connect ", int_to_text(client)))
+  call print_text(concat("  from ", tcpserver_client_address("echo", client)))
+end
+
+sub on_disconnect(client: int)
+  call print_text(concat("disconnect ", int_to_text(client)))
+end
+
+sub on_receive(client: int, data: text)
+  if data = "quit"
+    call tcpserver_send_all("echo", "bye\n")
+    call quit()
+  else
+    call tcpserver_send("echo", client, concat("echo: ", concat(data, "\n")))
+  end
+end
+
+sub on_error(message: text)
+  call print_text(concat("error: ", message))
+  call quit()
+end
+```
+
+Three things in it carry the whole design.
+
+**The events are typed.** Every server event names the client it is about —
+a small int, counted from 1 in order of arrival and never reused within a run
+— and `receive` adds the line. A handler declares those parameters or none,
+exactly as a `timer`'s `tick` handler may take the tick count or ignore it;
+the compiler checks the header against the component. A client id that has
+gone is refused as stale (`last_error_code()` is `10002`) rather than quietly
+meaning whoever connected next.
+
+**A line is the unit.** `delimiter` is a newline by default, and `receive`
+fires once per complete line with the delimiter stripped — a client that sends
+half a line waits, unseen, until the rest arrives. Set it to `"\r\n"` for a
+protocol that insists, or to `""` to be handed whatever bytes arrived, as they
+arrived. What is left when a peer closes without a final delimiter is delivered
+as one last `receive`, then `disconnect`.
+
+**The commands take the component's `name`.** `tcpserver_send("echo", ...)`
+finds the server whose `name` property is `"echo"`, the same way `grid_cell`
+finds a grid — nothing else a program can write names a component, and the
+compiler hands the library no id. Set `name` to the id you declared and forget
+about it; a command naming a server that has no such `name` fails with a
+message saying which line to add.
+
+### tcpserver
+
+| Property | Default | |
+|---|---|---|
+| `name` | `""` | what the commands call it by |
+| `port` | `0` | must be set before `active` |
+| `address` | `"0.0.0.0"` | every interface; `"127.0.0.1"` for this machine only |
+| `active` | `false` | `true` binds and listens; `false` tells every client and closes |
+| `max_clients` | `64` | the next connection past it is closed at once |
+| `delimiter` | `"\n"` | what ends a `receive`; `""` for raw chunks |
+
+| Event | Hands the handler |
+|---|---|
+| `connect` | `client: int` |
+| `disconnect` | `client: int` |
+| `receive` | `client: int, data: text` |
+| `error` | `message: text` |
+
+| Command | Answers |
+|---|---|
+| `tcpserver_send(server, client, data)` | `bool` — queued; the pump drains it |
+| `tcpserver_send_all(server, data)` | `int` — how many clients it went to |
+| `tcpserver_disconnect(server, client)` | `bool` |
+| `tcpserver_client_count(server)` | `int` |
+| `tcpserver_client_address(server, client)` | `text` — `ip:port` |
+| `tcpserver_client(server, n)` | `int` — the n-th live client's id, from 1; 0 past the end |
+
+Unlike `httpserver`, `address` is every interface: a chat server only its own
+machine could reach is the surprising default here, and a `tcpserver` does
+nothing at all until `active` is written, so nothing is exposed by accident.
+
+A port that cannot be bound is an `error` if a handler is wired. If none is,
+the server says so on stderr and stops the program with exit code 1, as an
+`httpserver` does — a server that cannot listen must not look like one that is
+running.
+
+### tcpclient
+
+```
+module tcphello
+use net
+
+tcpclient link
+  name = "link"
+  host = "127.0.0.1"
+  port = 7000
+  active = true
+  on connect: on_connect
+  on receive: on_receive
+  on disconnect: on_disconnect
+  on error: on_error
+end
+
+sub main
+  call print_text("connecting")
+end
+
+sub on_connect
+  call tcpclient_send("link", "hello\n")
+end
+
+sub on_receive(data: text)
+  call print_text(data)
+  link.active = false
+end
+
+sub on_disconnect
+  call print_text("done")
+end
+
+sub on_error(message: text)
+  call print_text(message)
+end
+```
+
+`active = true` connects — in the background, on the loop, so a form with a
+client on it keeps painting while the connection is made. The outcome arrives
+as `connect` or as `error` with a message (a refusal, an unknown host, or the
+`timeout_ms` deadline, 5 seconds by default). A client that fails switches
+itself off, so a console program with nothing else to wait for simply ends.
+`localhost` may resolve to more than one address; every one is tried before
+the client gives up.
+
+| Property | Default | |
+|---|---|---|
+| `name` | `""` | what the commands call it by |
+| `host` | `""` | a name or an address |
+| `port` | `0` | |
+| `active` | `false` | `true` connects, `false` disconnects |
+| `connected` | — | read-only: `true` once `connect` has fired |
+| `delimiter` | `"\n"` | as for the server |
+| `timeout_ms` | `5000` | how long a connect may take |
+
+| Event | Hands the handler |
+|---|---|
+| `connect` | nothing |
+| `disconnect` | nothing |
+| `receive` | `data: text` |
+| `error` | `message: text` |
+
+| Command | Answers |
+|---|---|
+| `tcpclient_send(client, data)` | `bool` — false with `10005` when not connected |
+| `tcpclient_connect(client)` | `bool` — `active = true` as a call |
+| `tcpclient_disconnect(client)` | `bool` — false with code 0 when there was nothing to close |
+| `tcpclient_connected(client)` | `bool` |
+
+`examples/tcpchat.oir` is a form with one of these on it: a memo for the
+conversation, an editbox, and Send and Connect buttons. Run it against the echo
+server above.
+
+### What both share with the http server
+
+Neither blocks and neither starts a thread; each is one pump on the runtime's
+loop while active, and a handler runs on the same turn as everything else, so
+keep handlers short. `send` queues and the pump drains, which means a handler
+may answer and `quit()` in the same breath and the answer still goes out. A
+peer that sends a megabyte with no delimiter in it is dropped with an `error`:
+that is either the wrong protocol or an attempt to exhaust memory, and neither
+is a thing to buffer through.
+
 ## The HTTP client
 
 ```

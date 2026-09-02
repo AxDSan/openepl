@@ -469,22 +469,12 @@ static int32_t net_httpd_pump(void *state) {
     return 0;
 }
 
-/* --- component entry points (abi/openepl_abi.h) ------------------------ */
+/* --- the component's hooks (net_component.c) --------------------------- */
 
-static NetServer *net_server_of(int64_t h) {
-    if (h < 1 || h > NET_SERVERS_MAX) return NULL;
-    NetServer *s = &g_servers[h - 1];
-    return s->in_use ? s : NULL;
-}
-
-int64_t oe_net_component_create(const char *type_name) {
-    if (!type_name || strcmp(type_name, "httpserver") != 0) {
-        oe_error_set(OE_ERR_INVALID_ARG, "net declares no such component type");
-        return 0;
-    }
+void *net_httpd_create(void) {
     if (g_next_handle >= NET_SERVERS_MAX) {
         oe_error_set(OE_ERR_TABLE_FULL, "too many http servers");
-        return 0;
+        return NULL;
     }
     NetServer *s = &g_servers[g_next_handle++];
     s->in_use = 1;
@@ -495,13 +485,11 @@ int64_t oe_net_component_create(const char *type_name) {
     snprintf(s->bind, sizeof s->bind, "127.0.0.1");
     s->listen_fd = -1;
     s->source = oe_loop_add(net_httpd_pump, s, NET_HTTPD_PERIOD_MS);
-    oe_error_clear();
-    return g_next_handle;
+    return s;
 }
 
-int32_t oe_net_component_set(int64_t h, const char *prop, const char *value) {
-    NetServer *s = net_server_of(h);
-    if (!s || !prop || !value) return 1;
+int32_t net_httpd_set(void *obj, const char *prop, const char *value) {
+    NetServer *s = (NetServer *)obj;
     if (strcmp(prop, "port") == 0) {
         long p = strtol(value, NULL, 10);
         s->port = (p < 1 || p > 65535) ? 8080 : (int32_t)p;
@@ -519,9 +507,8 @@ int32_t oe_net_component_set(int64_t h, const char *prop, const char *value) {
     return 0;
 }
 
-const char *oe_net_component_get(int64_t h, const char *prop) {
-    NetServer *s = net_server_of(h);
-    if (!s || !prop) return NULL;
+const char *net_httpd_get(void *obj, const char *prop) {
+    NetServer *s = (NetServer *)obj;
     if (strcmp(prop, "bind") == 0) return net_text(s->bind, strlen(s->bind));
     if (strcmp(prop, "port") == 0) {
         char n[16];
@@ -531,16 +518,14 @@ const char *oe_net_component_get(int64_t h, const char *prop) {
     return NULL;
 }
 
-int32_t oe_net_component_get_int(int64_t h, const char *prop) {
-    NetServer *s = net_server_of(h);
-    if (!s || !prop) return 0;
+int32_t net_httpd_get_int(void *obj, const char *prop) {
+    NetServer *s = (NetServer *)obj;
     if (strcmp(prop, "port") == 0) return s->port;
     return 0;
 }
 
-int32_t oe_net_component_on(int64_t h, const char *event, OpenEPL_HandlerFn handler) {
-    NetServer *s = net_server_of(h);
-    if (!s || !event || !handler) return 1;
+int32_t net_httpd_on(void *obj, const char *event, OpenEPL_HandlerFn handler) {
+    NetServer *s = (NetServer *)obj;
     if (strcmp(event, "request") != 0) return 1;
     s->on_request = handler;
     return 0;

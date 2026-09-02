@@ -44,6 +44,16 @@ void net_req_header(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
 void net_req_query(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
 void net_req_reply(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
 void net_req_reply_as(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpserver_send(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpserver_send_all(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpserver_disconnect(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpserver_client_count(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpserver_client_address(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpserver_client(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpclient_send(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpclient_connect(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpclient_disconnect(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
+void tcpclient_connected(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv);
 
 static const int32_t P_I[]   = { OE_SDT_INT };
 static const int32_t P_T[]   = { OE_SDT_TEXT };
@@ -54,6 +64,7 @@ static const int32_t P_IT[]  = { OE_SDT_INT,  OE_SDT_TEXT };
 static const int32_t P_II[]  = { OE_SDT_INT,  OE_SDT_INT };
 static const int32_t P_TT[]  = { OE_SDT_TEXT, OE_SDT_TEXT };
 static const int32_t P_TTT[] = { OE_SDT_TEXT, OE_SDT_TEXT, OE_SDT_TEXT };
+static const int32_t P_TIT[] = { OE_SDT_TEXT, OE_SDT_INT,  OE_SDT_TEXT };
 
 static const OpenEPL_CommandDesc NET_COMMANDS[] = {
     /* --- TCP ---------------------------------------------------------- */
@@ -86,6 +97,21 @@ static const OpenEPL_CommandDesc NET_COMMANDS[] = {
     { "net_req_query",        "net_req_query",        OE_SDT_TEXT, 2, P_IT  },
     { "net_req_reply",        "net_req_reply",        OE_SDT_BOOL, 3, P_IIT },
     { "net_req_reply_as",     "net_req_reply_as",     OE_SDT_BOOL, 4, P_IITT},
+    /* --- the tcpserver and tcpclient components ------------------------
+     * Named after the component rather than net_, the way `grid_` and
+     * `datasource_` are: the first argument is the component's `name`, and a
+     * command that starts with the type it addresses reads as a method on
+     * it.  The prefixes are this library's; see libs/README.md. */
+    { "tcpserver_send",           "tcpserver_send",           OE_SDT_BOOL, 3, P_TIT },
+    { "tcpserver_send_all",       "tcpserver_send_all",       OE_SDT_INT,  2, P_TT  },
+    { "tcpserver_disconnect",     "tcpserver_disconnect",     OE_SDT_BOOL, 2, P_TI  },
+    { "tcpserver_client_count",   "tcpserver_client_count",   OE_SDT_INT,  1, P_T   },
+    { "tcpserver_client_address", "tcpserver_client_address", OE_SDT_TEXT, 2, P_TI  },
+    { "tcpserver_client",         "tcpserver_client",         OE_SDT_INT,  2, P_TI  },
+    { "tcpclient_send",           "tcpclient_send",           OE_SDT_BOOL, 2, P_TT  },
+    { "tcpclient_connect",        "tcpclient_connect",        OE_SDT_BOOL, 1, P_T   },
+    { "tcpclient_disconnect",     "tcpclient_disconnect",     OE_SDT_BOOL, 1, P_T   },
+    { "tcpclient_connected",      "tcpclient_connected",      OE_SDT_BOOL, 1, P_T   },
 };
 
 /* --- httpserver: net's non-visual component ----------------------------
@@ -101,10 +127,63 @@ static const OpenEPL_PropertyDesc HTTPD_PROPS[] = {
  * costs a reader less than a -Wextra warning about the v3 fields does. */
 static const OpenEPL_EventDesc HTTPD_EVENTS[] = { { "request", 0, NULL } };
 
+/* --- tcpserver / tcpclient: plain TCP, the Indy shape ----------------------
+ * `name` is how a command finds the component (`tcpserver_send("chat", ...)`)
+ * — the compiler hands a library no id, and this is the same answer `grid`
+ * gives.  `active` is the switch: nothing listens or connects until it is
+ * true, and false closes everything.  `address` is every interface, unlike
+ * httpserver's `bind`: a chat server that only its own machine could reach
+ * is the surprising default here, and it does nothing until asked anyway.
+ *
+ * The events are typed.  A server event names the client it is about, as a
+ * small int the commands take back; `receive` adds the line, and `error` the
+ * message.  A client's `receive` hands the line alone: there is one peer. */
+static const OpenEPL_PropertyDesc TCPSERVER_PROPS[] = {
+    { "name",        OE_SDT_TEXT, "",        NULL },
+    { "port",        OE_SDT_INT,  "0",       NULL },
+    { "address",     OE_SDT_TEXT, "0.0.0.0", NULL },
+    { "active",      OE_SDT_BOOL, "false",   NULL },
+    { "max_clients", OE_SDT_INT,  "64",      NULL },
+    { "delimiter",   OE_SDT_TEXT, "\n",     NULL },
+};
+static const int32_t EV_I[]  = { OE_SDT_INT };
+static const int32_t EV_IT[] = { OE_SDT_INT, OE_SDT_TEXT };
+static const int32_t EV_T[]  = { OE_SDT_TEXT };
+static const OpenEPL_EventDesc TCPSERVER_EVENTS[] = {
+    { "connect",    1, EV_I  },
+    { "disconnect", 1, EV_I  },
+    { "receive",    2, EV_IT },
+    { "error",      1, EV_T  },
+};
+
+static const OpenEPL_PropertyDesc TCPCLIENT_PROPS[] = {
+    { "name",       OE_SDT_TEXT, "",      NULL },
+    { "host",       OE_SDT_TEXT, "",      NULL },
+    { "port",       OE_SDT_INT,  "0",     NULL },
+    { "active",     OE_SDT_BOOL, "false", NULL },
+    /* Read-only: setting it is refused at run time with the error slot set. */
+    { "connected",  OE_SDT_BOOL, "false", NULL },
+    { "delimiter",  OE_SDT_TEXT, "\n",   NULL },
+    { "timeout_ms", OE_SDT_INT,  "5000",  NULL },
+};
+static const OpenEPL_EventDesc TCPCLIENT_EVENTS[] = {
+    { "connect",    0, NULL },
+    { "disconnect", 0, NULL },
+    { "receive",    1, EV_T },
+    { "error",      1, EV_T },
+};
+
+#define NET_COUNT(a) ((int32_t)(sizeof(a) / sizeof((a)[0])))
+
 static const OpenEPL_ComponentDesc NET_COMPONENTS[] = {
     { "httpserver", OE_ROLE_UNKNOWN,
-      (int32_t)(sizeof(HTTPD_PROPS) / sizeof(HTTPD_PROPS[0])), HTTPD_PROPS,
-      (int32_t)(sizeof(HTTPD_EVENTS) / sizeof(HTTPD_EVENTS[0])), HTTPD_EVENTS,
+      NET_COUNT(HTTPD_PROPS), HTTPD_PROPS, NET_COUNT(HTTPD_EVENTS), HTTPD_EVENTS,
+      OE_COMPONENT_NONVISUAL },
+    { "tcpserver", OE_ROLE_UNKNOWN,
+      NET_COUNT(TCPSERVER_PROPS), TCPSERVER_PROPS, NET_COUNT(TCPSERVER_EVENTS), TCPSERVER_EVENTS,
+      OE_COMPONENT_NONVISUAL },
+    { "tcpclient", OE_ROLE_UNKNOWN,
+      NET_COUNT(TCPCLIENT_PROPS), TCPCLIENT_PROPS, NET_COUNT(TCPCLIENT_EVENTS), TCPCLIENT_EVENTS,
       OE_COMPONENT_NONVISUAL },
 };
 

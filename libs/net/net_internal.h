@@ -145,4 +145,44 @@ int  net_tls_send(NetTls *t, const char *p, size_t n);   /* 0 = failure     */
 long net_tls_recv(NetTls *t, char *p, size_t n);         /* 0 = end, -1 err */
 void net_tls_free(NetTls *t);                            /* not the socket  */
 
+/* --- components (net_component.c) ---------------------------------------
+ * The library's entry points — oe_net_component_create and its four siblings
+ * — are ONE set for the whole library, and the backend numbers handles per
+ * library in creation order whatever the type (backend/src/lib.rs,
+ * `build_component`): a tcpserver declared after an httpserver is handle 2.
+ * So the entry points live in one file and dispatch on type, and each type
+ * provides these five hooks.  `create` answers NULL with the error slot set;
+ * the rest are handed a non-NULL object, property and value, and answer 0 for
+ * done and 1 for "not mine". */
+typedef struct {
+    const char  *type_name;
+    void       *(*create)(void);
+    int32_t     (*set)(void *obj, const char *prop, const char *value);
+    const char *(*get)(void *obj, const char *prop);
+    int32_t     (*get_int)(void *obj, const char *prop);
+    int32_t     (*on)(void *obj, const char *event, OpenEPL_HandlerFn fn);
+} NetComponentType;
+
+void       *net_httpd_create(void);
+int32_t     net_httpd_set(void *obj, const char *prop, const char *value);
+const char *net_httpd_get(void *obj, const char *prop);
+int32_t     net_httpd_get_int(void *obj, const char *prop);
+int32_t     net_httpd_on(void *obj, const char *event, OpenEPL_HandlerFn fn);
+
+void       *net_tcpserver_create(void);
+int32_t     net_tcpserver_set(void *obj, const char *prop, const char *value);
+const char *net_tcpserver_get(void *obj, const char *prop);
+int32_t     net_tcpserver_get_int(void *obj, const char *prop);
+int32_t     net_tcpserver_on(void *obj, const char *event, OpenEPL_HandlerFn fn);
+
+void       *net_tcpclient_create(void);
+int32_t     net_tcpclient_set(void *obj, const char *prop, const char *value);
+const char *net_tcpclient_get(void *obj, const char *prop);
+int32_t     net_tcpclient_get_int(void *obj, const char *prop);
+int32_t     net_tcpclient_on(void *obj, const char *event, OpenEPL_HandlerFn fn);
+
+/* A truth value crosses the property boundary as text, spelled the way the
+ * source and every descriptor default spell it. */
+int net_bool_of(const char *value);
+
 #endif /* OPENEPL_NET_INTERNAL_H */
