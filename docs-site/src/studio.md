@@ -1,7 +1,11 @@
 # The IDE
 
 `openepl-studio` with no arguments opens the welcome screen; with a `.oir`
-file it opens that project.
+file, a `project.oeproj`, or a directory holding one, it opens that project.
+The welcome screen shows the toolchain's version, the templates, an *Open
+Project…* and *Open File…* browser, and the projects opened most recently.
+Opening a project opens its `main:` file; Studio never reads the project file
+itself — `openepl project` does.
 
 ![The OpenEPL Studio visual designer](./assets/screenshot-designer.png)
 
@@ -11,14 +15,16 @@ file it opens that project.
   declares. Search narrows it. A filled square is a control with a rectangle; a
   diamond is one without. Greyed items are declared but not implemented yet.
 - **Canvas** — the form as it will look. Drag to move, drag the handles to
-  resize, drag the form's corner to resize the window.
+  resize (the pointer shows the direction), drag the form's corner to resize
+  the window. Double-click a component to write its handler.
 - **Tray** — the strip under the canvas, holding the components that have no
   pixels. Click one to select it.
 - **Inspector** — every property of the selection, and its events on the
   second tab. Type a value and press Enter.
 - **Code preview** — the source for whatever is selected. Click it to open the
   editor.
-- **Problems** — what the language server has found, updated as you type.
+- **Problems** — what the language server has found, updated as you type,
+  and the list of references when you ask for one.
 - **Output** — build progress and whatever your program prints.
 
 The panels are resizable: drag the dividers between them.
@@ -62,10 +68,47 @@ A component from a kit also needs that kit in scope. Studio says so in the
 output pane rather than writing a `use` line you did not ask for — add it in
 the Code view.
 
-> Components already declared in a file are not listed in the tray yet:
-> `openepl inspect`, which is Studio's only reader of a project, reports forms
-> and their children and nothing else. They are still in the file, still
-> compiled, and a save leaves them alone.
+A grid on the canvas shows its rows. When it is bound to a datasource
+declared in the file, it shows that source's columns and rows, with the
+selected row highlighted, exactly as it will when the program runs; a source
+the file does not declare leaves a header naming it.
+
+## Double-click writes the handler
+
+Double-click a button and Studio opens the editor inside `sub
+button1_click`. If no handler was wired, it wires one — `on click:
+button1_click` in the component's block, and the subroutine at the end of
+the file — and if one was, it just goes there.
+
+The event is the component's default one: `click` for a button, `change` for
+an editbox or a combobox, `tick` for a timer, `select` for a grid. It is not
+a table in the IDE: it is the first event the component's own descriptor
+declares, so a component from a kit gets the gesture too.
+
+The subroutine takes what the event hands it. A grid's `select` hands the
+row, so the stub reads `sub grid1_select(n: int)`; a button's `click` hands
+nothing, so its stub takes nothing. Delete the parameter if you do not want
+it — the compiler accepts a handler that declares the event's parameters or
+none.
+
+Double-clicking a component in the tray does the same for a timer or an
+action.
+
+## Hover, definition, references
+
+The editor asks the same language server that VS Code and Neovim use:
+
+| Gesture | What happens |
+|---|---|
+| rest the pointer on a name | a tip with its signature: a command's parameters, a subroutine's, a property's type and editor, what an event hands its handler |
+| **F12** | jump to the declaration of the name at the caret |
+| **Shift+F12** | list every use of the name at the caret in the Problems strip; click one to jump |
+
+A command has no declaration to jump to — it is written in C, in the runtime
+or a library — so F12 on one says so, and hover shows what a jump would have.
+
+Diagnostics are underlined at the exact range the compiler reported, not the
+whole line: two calls on one line and the bad one is marked.
 
 ## Designer and Code
 

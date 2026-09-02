@@ -59,6 +59,10 @@ struct Component {
 
 struct Model {
     std::string path;                 // the .oir being edited
+    /// The project.oeproj this file belongs to, or "" for a loose file. Set
+    /// when the model was opened THROUGH a project; the file is what is
+    /// edited and saved, the project is what is remembered.
+    std::string project;
     std::string module_name;
     std::vector<std::string> uses;
     std::vector<std::string> subs;    // existing subroutine names
@@ -128,6 +132,11 @@ struct Model {
 };
 
 /// Load by running `openepl inspect` — never by parsing.oir here.
+///
+/// `path` may also be a `project.oeproj` or a directory holding one; the
+/// entry is then resolved through `openepl project`, and `out.path` is that
+/// entry. A save splices into `out.path`, so it must never be the project
+/// file.
 bool load_model(const std::string& openepl_bin, const std::string& path, Model& out,
                 std::string& error);
 

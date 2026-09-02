@@ -57,6 +57,15 @@ cargo test                    # the test suite
 The compiler is then `target/release/openepl` and the IDE is
 `designer/openepl-designer`.
 
+`https://` is opt-in: it needs mbedTLS vendored, and everything else builds
+without it.
+
+```sh
+tools/fetch-mbedtls.sh        # once; then net_http_get speaks https
+```
+
+See [Networking](./networking.md) for what that buys and what it never does.
+
 To produce a release bundle of your own:
 
 ```sh

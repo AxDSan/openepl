@@ -2374,3 +2374,32 @@ fn the_inspector_edits_a_colour_on_a_real_component() {
     );
     let _ = std::fs::remove_file(&project);
 }
+
+/// A grid bound to a datasource, end to end: `examples/grid.oir` adds a row
+/// from `main` and prints the count, so `rows: 4` proves the datasource, the
+/// binding and the count command all reached a built program. It is a GUI
+/// example, so it runs only where the UI stack is vendored and is told to
+/// exit after a few frames rather than wait for a window to close.
+#[test]
+fn grid_example_counts_its_rows() {
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let bin = build_as("grid", "rows");
+    let out = Command::new(&bin)
+        .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "3")
+        .output()
+        .expect("run grid");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.lines().any(|l| l == "rows: 4"),
+        "expected `rows: 4`; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !stdout.lines().any(|l| l.contains("FAIL")),
+        "grid reported failures:\n{stdout}"
+    );
+}

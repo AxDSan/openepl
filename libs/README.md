@@ -23,9 +23,12 @@ Read arguments with `oe_arg_int` / `oe_arg_int64` / `oe_arg_double` /
 Heap results go through `oe_malloc`, never `malloc` — the runtime owns program
 data and frees it at exit.
 
-**The types are** `int`, `int64`, `double`, `bool`, `text`, arrays (`T[]`) and
-`bytes`, plus void. There is no record and no dictionary. Read an argument of
-an aggregate type straight out of the slot's pointer — `argv[i].v.ptr`, cast to
+**The types a library can take or return are** `int`, `int64`, `double`,
+`bool`, `text`, arrays (`T[]`) and `bytes`, plus void. The ABI has a tag for a
+record and for a dictionary, and core's `dict_*` commands use the latter, but
+their layouts are the runtime's own and are not part of the ABI — so a library
+cannot declare a parameter of either yet. Read an argument of an aggregate
+type straight out of the slot's pointer — `argv[i].v.ptr`, cast to
 `OpenEPL_Array *` or `OpenEPL_Bin *` — and return one by writing that pointer
 back with the matching tag; the layouts are stated in `abi/openepl_abi.h`, and
 both are allocated by the runtime (`oe_ary_new` / `oe_bin_new`).
@@ -100,7 +103,7 @@ forgets.
 
 ## Naming
 
-There is one flat, global command namespace shared with core's 51 commands and
+There is one flat, global command namespace shared with core's 72 commands and
 every other library. Each library owns a **prefix**, and every command it
 exports must start with one of them:
 
@@ -118,6 +121,15 @@ exports must start with one of them:
 | `net` | `net_` |
 | `math` | `math_` |
 | `ui` | `grid_` `datasource_` |
+
+A library may also declare components — `ui` declares the visual ones and
+`net` declares `httpserver` — and `openepl commands --use <name>` lists them
+beside its commands, with `kind: <type> visual` or `nonvisual`. A non-visual
+component is declared at module level rather than inside a form, and the
+compiler enforces that from the kind the library reports. An event may hand
+its handler parameters (`timer`'s `tick` hands the tick count); the handler
+takes exactly those or none, and the compiler checks the header against the
+descriptor.
 
 Core already owns `text_eq`, `text_to_int` and `text_to_double`; the `text`
 library must not redefine them. A collision is a hard build error naming the

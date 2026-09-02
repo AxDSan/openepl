@@ -54,6 +54,15 @@ install -m755 target/release/openepl "$OUT/bin/openepl"
 install -m755 designer/openepl-designer "$OUT/bin/openepl-studio"
 strip "$OUT/bin/openepl" "$OUT/bin/openepl-studio" 2>/dev/null || true
 
+# The binary reports the version it was compiled with; the archive is named
+# after Cargo.toml. A stale target/ makes them disagree, and a bundle whose
+# `openepl version` contradicts its own file name is not one to ship.
+REPORTED="$("$OUT/bin/openepl" version | sed -n 's/^openepl //p')"
+if [ "$REPORTED" != "$VERSION" ]; then
+    echo "bin/openepl reports $REPORTED but Cargo.toml says $VERSION" >&2
+    exit 1
+fi
+
 # The runtime, ABI and support libraries ship as SOURCE: `openepl build`
 # compiles and links them into each program, which is what makes dead-stripping
 # per-command possible.

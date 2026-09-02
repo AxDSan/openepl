@@ -1,7 +1,9 @@
 # Language guide
 
 A whole program is one module. Files are UTF-8 and use the extension `.oir`;
-`#` starts a comment that runs to the end of the line.
+`#` starts a comment that runs to the end of the line. This page is the
+reference; [A tour of the language](./tour.md) is the same material met in the
+order a newcomer meets it.
 
 ```
 # A module is a compilation unit.
@@ -25,8 +27,9 @@ use <library>      # optional, repeatable
 and OpenEPL infers it — a module with a form is a windowed program, anything
 else is a console one. See [Build targets](./build-targets.md).
 
-`use ui` brings in the visual components; without it, `form` and the component
-types are not defined.
+`use ui` brings in the visual components; without it, `form` and the visual
+component types are not defined. `timer` needs no library — it is part of the
+core runtime, and a console program can declare one.
 
 ## Types
 
@@ -212,10 +215,41 @@ sub main
 end
 ```
 
-An entry point and an event handler are the one place the shape is fixed: the
-generated code that calls them has no arguments to pass and nowhere to put a
-result, so `main` and any subroutine bound to an event must take no parameters
-and return nothing.
+An entry point and an event handler are the one place the shape is fixed by
+someone other than you. `main` takes nothing and returns nothing — the runtime
+that calls it has nothing to hand over. A subroutine bound to an event takes
+exactly what the event hands it, or nothing at all, and returns nothing: a
+`timer`'s `tick` hands the tick count, so its handler is `sub on_tick(n: int)`
+or plain `sub on_tick`, and `sub on_tick(s: text)` is a compile error that
+shows the header to paste. See [Components](./components.md).
+
+## When a command fails
+
+There are no exceptions. A command that can fail returns a sentinel — `0` for
+a handle or a position, `-1` for a count or size, `""` for text, `false` for a
+yes/no — and leaves the reason in the *error slot*, which `last_error_code()`
+and `last_error_text()` read.
+
+```
+module missing
+use file
+
+sub main
+  let notes: text = file_read_text("notes.txt")
+  if last_error_code() <> 0
+    call print_text(concat("could not read notes.txt: ", last_error_text()))
+    return
+  end
+  call print_text(notes)
+end
+```
+
+A command that succeeds clears the slot, and a command that cannot fail never
+touches it, so a code left over from earlier is never mistaken for a fresh
+failure. That is what makes `false` and `0` readable: `false` with code `0`
+is a genuine no, and `0` from `find` means *not there* — nothing sits at
+position 0. [A tour of the language](./tour.md) walks through this with a
+program that grows.
 
 ## Expressions
 
@@ -334,4 +368,6 @@ button_ok.width = 200
 
 Which properties exist depends on the component; the compiler checks both the
 name and the type, so a typo is an error at build time rather than a control
-that silently does nothing. See [Forms and events](./forms-and-events.md).
+that silently does nothing. See [Forms and events](./forms-and-events.md) for
+the shape of a form, and [Components](./components.md) for what the
+components are and what their events hand a handler.

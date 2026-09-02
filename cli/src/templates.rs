@@ -250,12 +250,30 @@ pub fn cmd_new(repo_root: &Path, args: &[String]) -> i32 {
         }
     }
 
+    // The project file, from what the template already knows plus the entry's
+    // own `use` lines — so `kits:` is what the source actually asks for, not
+    // a second list in template.meta that could drift from it.
+    let entry_path = dest.join(&t.entry);
+    let kits = std::fs::read_to_string(&entry_path)
+        .ok()
+        .and_then(|src| openepl_ir::parse(&src).ok())
+        .map(|m| m.uses.clone())
+        .unwrap_or_default();
+    let proj = dest.join(crate::project::FILE_NAME);
+    let text = crate::project::render(&module, &t.entry, t.target, &kits, "0.1.0");
+    if let Err(e) = std::fs::write(&proj, text) {
+        eprintln!("openepl: cannot write {}: {e}", proj.display());
+        return 1;
+    }
+
     // Printed in the same line-based shape as the listing, so Studio can read
-    // where to open without guessing.
+    // where to open without guessing. `project:` is an ADDED line: a reader
+    // that only knows `open:` still sees exactly what it saw before.
     println!("created: {} {}", t.id, dest.display());
     println!("module: {module}");
     println!("target: {}", t.target.as_str());
-    println!("open: {}", dest.join(&t.entry).display());
+    println!("open: {}", entry_path.display());
+    println!("project: {}", proj.display());
     0
 }
 

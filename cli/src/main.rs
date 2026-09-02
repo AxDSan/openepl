@@ -12,6 +12,11 @@
 //!   openepl new <tmpl> <dir>            create a project from a template
 //!   openepl kits                        list resolved kits and where they came from
 //!   openepl kit add <path>              install a kit into ~/.openepl/kits
+//!   openepl project <file-or-dir>       dump a project file's resolved fields
+//!   openepl version                     the toolchain and ABI versions
+//!
+//! `build`, `run`, `emit` and `inspect` take a `project.oeproj`, or a directory
+//! holding one, in place of the `.oir`; the entry file comes from the project.
 //!
 //! The pipeline lowers a module to LLVM IR, then has `clang` assemble it and
 //! link the runtime sources, producing an ordinary native executable.
@@ -23,10 +28,15 @@ mod kit;
 mod libload;
 mod lsp;
 mod lsp_index;
+mod project;
 mod templates;
 
+use std::collections::HashMap;
+
 use openepl_backend::lower_module;
-use openepl_ir::{parse, validate, Module, Target};
+use openepl_ir::registry::Registry;
+use openepl_ir::validate::{validate_with, Hints};
+use openepl_ir::{parse, Module, Target};
 
 fn main() {
     // Die quietly when a reader goes away, the way every other command-line
@@ -104,6 +114,11 @@ fn run(args: &[String]) -> i32 {
                 1
             }
         },
+        "project" => project::cmd_project(rest),
+        "version" | "--version" | "-V" => {
+            print!("{}", version_text());
+            0
+        }
         "-h" | "--help" | "help" => {
             usage();
             0
@@ -130,8 +145,27 @@ fn usage() {
          openepl templates                   list the available project templates\n  \
          openepl new <template> <dir>        create a project from a template\n  \
          openepl kits                        list the kits found, and from where\n  \
-         openepl kit add <path>              install a kit into ~/.openepl/kits\n"
+         openepl kit add <path>              install a kit into ~/.openepl/kits\n  \
+         openepl project <file-or-dir>       dump a project file's resolved fields\n  \
+         openepl version                     print the toolchain and ABI versions\n\n\
+         Wherever <in.oir> is accepted, a project.oeproj or its directory is too.\n"
     );
+}
+
+/// `openepl version` — two lines, each one fact, so Studio reads the first
+/// and a library author checking compatibility reads the second.
+///
+/// The ABI number is read out of the header that defines it rather than
+/// restated here: a version this command reports and a version the loader
+/// checks have to be the same number, and the header is where both live.
+fn version_text() -> String {
+    const ABI_HEADER: &str = include_str!("../../abi/openepl_abi.h");
+    let abi = ABI_HEADER
+        .lines()
+        .find_map(|l| l.strip_prefix("#define OPENEPL_ABI_VERSION"))
+        .map(str::trim)
+        .unwrap_or("?");
+    format!("openepl {}\nabi {abi}\n", env!("CARGO_PKG_VERSION"))
 }
 
 /// What a build/emit invocation was asked to do.
@@ -142,10 +176,33 @@ struct Io {
     target: Option<Target>,
     /// Optimise, harden and strip the built program.
     release: bool,
+    /// Where the output goes when the input came through a project file: the
+    /// project's directory and name. Naming it after the entry would call
+    /// every program `main`, and putting it in the working directory would
+    /// collide with the project directory itself for `openepl build <dir>`.
+    project_output: Option<PathBuf>,
 }
 
 /// Parse `<in.oir> [-o out] [--target kind] [--release]` from an argument slice.
+///
+/// The input may be a project file or its directory. Resolved here, in the one
+/// place every subcommand parses its input, so that build, run, emit and
+/// inspect cannot disagree about what a project is. The project's `target:`
+/// stands in for `--target` only when none was given: a flag on the command
+/// line is the more deliberate of the two.
 fn parse_io(rest: &[String]) -> Result<Io, String> {
+    let mut io = parse_io_args(rest)?;
+    if project::is_project_path(&io.input) {
+        let p = project::load(&io.input)?;
+        io.input = p.main;
+        io.target = io.target.or(p.target);
+        let dir = p.file.parent().unwrap_or(Path::new(".")).to_path_buf();
+        io.project_output = Some(dir.join(&p.name));
+    }
+    Ok(io)
+}
+
+fn parse_io_args(rest: &[String]) -> Result<Io, String> {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut target: Option<Target> = None;
@@ -182,6 +239,7 @@ fn parse_io(rest: &[String]) -> Result<Io, String> {
         output,
         target,
         release,
+        project_output: None,
     })
 }
 
@@ -486,7 +544,9 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
             return 1;
         }
     };
-    let out_bin = io.output.unwrap_or_else(|| default_output(&input, target));
+    let out_bin = io
+        .output
+        .unwrap_or_else(|| default_output(&input, io.project_output.as_deref(), target));
 
     // Only a program builds a form, so only a program has pictures to carry.
     if target.is_executable() {
@@ -571,7 +631,7 @@ fn compile_with(
         libload::load_metadata(&lib_root, &module.uses)?
     };
 
-    if let Err(errs) = validate(&module, &plan.registry) {
+    if let Err(errs) = validate_hinted(&module, &plan.registry, &repo_root) {
         let joined = errs
             .iter()
             .map(|e| format!("  - {e}"))
@@ -585,6 +645,54 @@ fn compile_with(
     }
     let ll = lower_module(&module, &plan.registry).map_err(|e| e.to_string())?;
     Ok((ll, plan, target, module))
+}
+
+/// Validate, and when a command is unknown, say which library has it.
+///
+/// The same two passes the language server makes (`Server::diagnose`): the
+/// cheap one first, and the map of every kit's commands only when an unknown
+/// command is what went wrong — it costs an introspection build per kit, and
+/// a program that validates cleanly should not pay for it. Without this the
+/// editor said "add `use file`" and the terminal did not, and the terminal is
+/// where a build fails.
+fn validate_hinted(
+    module: &Module,
+    registry: &Registry,
+    repo_root: &Path,
+) -> Result<(), Vec<openepl_ir::validate::ValidateError>> {
+    let Err(errs) = validate_with(module, registry, &Hints::default()) else {
+        return Ok(());
+    };
+    if !errs.iter().any(|e| e.msg.contains("unknown command `")) {
+        return Err(errs);
+    }
+    let hints = Hints {
+        elsewhere: elsewhere(repo_root),
+    };
+    match validate_with(module, registry, &hints) {
+        Err(better) => Err(better),
+        Ok(()) => Err(errs),
+    }
+}
+
+/// Every command of every kit the toolchain can see, and which kit it is in.
+/// One kit at a time, as `Server::elsewhere` does: two kits may legitimately
+/// export the same name, and a registry holding both would refuse to load.
+fn elsewhere(repo_root: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for k in kit::resolve_all(repo_root) {
+        let uses = vec![k.name.clone()];
+        let Ok(root) = kit::overlay_root(repo_root, &uses) else { continue };
+        if let Ok(plan) = libload::load_metadata(&root, &uses) {
+            for (name, _) in plan.registry.iter() {
+                map.entry(name.to_string()).or_insert_with(|| k.name.clone());
+            }
+        }
+    }
+    for name in Registry::core().names() {
+        map.remove(name);
+    }
+    map
 }
 
 /// Compile every picture a form names INTO the program.
@@ -697,15 +805,24 @@ fn llvm_bytes(bytes: &[u8]) -> String {
     out
 }
 
-fn default_output(input: &Path, target: Target) -> PathBuf {
-    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("a");
+fn default_output(input: &Path, project_output: Option<&Path>, target: Target) -> PathBuf {
+    let (dir, stem) = match project_output {
+        Some(p) => (
+            p.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            p.file_name().and_then(|s| s.to_str()).unwrap_or("a").to_string(),
+        ),
+        None => (
+            PathBuf::new(),
+            input.file_stem().and_then(|s| s.to_str()).unwrap_or("a").to_string(),
+        ),
+    };
     // Libraries follow the platform convention, so a host's linker finds them
     // by the name it expects (`-lgreet` wants `libgreet.so`).
-    match target {
-        Target::Console | Target::Gui => PathBuf::from(stem),
-        Target::SharedLib => PathBuf::from(format!("lib{stem}.so")),
-        Target::StaticLib => PathBuf::from(format!("lib{stem}.a")),
-    }
+    dir.join(match target {
+        Target::Console | Target::Gui => stem,
+        Target::SharedLib => format!("lib{stem}.so"),
+        Target::StaticLib => format!("lib{stem}.a"),
+    })
 }
 
 /// Invoke clang to assemble the `.ll` and static-link the library implementation

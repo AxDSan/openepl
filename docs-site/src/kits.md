@@ -68,7 +68,7 @@ and installing over an existing one replaces it and says so.
 ## Writing one
 
 A kit is a library directory, so start from
-[Writing a support library](https://github.com/openepl/openepl/blob/main/libs/README.md)
+[Writing a support library](https://github.com/AxDSan/openepl/blob/main/libs/README.md)
 and add a `lib.json` with the design-time keys:
 
 ```json

@@ -5,7 +5,9 @@
 A component has properties you set and events you bind to subroutines — from
 the designer, or by writing it out directly. Most draw a rectangle; some, like
 `timer` and `httpserver`, have no pixels at all and are declared at module
-level rather than inside a form.
+level rather than inside a form. What each component is for, and what its
+events hand a handler, is in [Components](./components.md); this page is the
+list.
 
 
 # Core

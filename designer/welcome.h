@@ -13,17 +13,69 @@
 #ifndef OPENEPL_DESIGNER_WELCOME_H
 #define OPENEPL_DESIGNER_WELCOME_H
 
+#include <dirent.h>
 #include <cstdio>
 #include <cstdlib>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 
 #include "theme.h"
 
 namespace openepl::welcome {
+
+/// Strip the line ending `fgets` leaves on.
+inline void chomp(std::string& line) {
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+}
+
+/// What the toolchain says it is — the first line of `openepl version`, e.g.
+/// `openepl 0.2.0` — or "" when it cannot be asked. Shown on the welcome
+/// screen so the product says somewhere what it is; before this it did not.
+inline std::string version_string(const std::string& openepl_bin) {
+    if (openepl_bin.empty()) return "";
+    const std::string cmd = openepl_bin + " version 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    std::string line;
+    char buf[256];
+    if (fgets(buf, sizeof buf, pipe)) line = buf;
+    pclose(pipe);
+    chomp(line);
+    return line;
+}
+
+/// Is this path a project — a `.oeproj`, or a directory holding one?
+inline bool is_project_path(const std::string& path) {
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) return true;
+    const std::string ext = ".oeproj";
+    return path.size() > ext.size() && path.compare(path.size() - ext.size(), ext.size(), ext) == 0;
+}
+
+/// The file Studio should open for `path`: the `main:` of a project, as
+/// `openepl project` resolves it, or the path itself when it is already an
+/// `.oir`. Studio never reads a project file — the CLI is its only reader —
+/// so this is one subprocess, and "" when the project cannot be read.
+inline std::string resolve_open(const std::string& openepl_bin, const std::string& path) {
+    if (!is_project_path(path)) return path;
+    if (openepl_bin.empty()) return "";
+    const std::string cmd = openepl_bin + " project " + path + " 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    std::string main;
+    char buf[4096];
+    while (fgets(buf, sizeof buf, pipe)) {
+        std::string line(buf);
+        chomp(line);
+        if (line.rfind("main: ", 0) == 0) main = line.substr(6);
+    }
+    pclose(pipe);
+    return main;
+}
 
 /// One project template, as reported by `openepl templates`.
 struct TemplateInfo {
@@ -131,12 +183,26 @@ inline std::string splash_markup(const std::string& family, int w, int h,
     return s;
 }
 
-/// The welcome screen: pick a project kind, or open something recent.
+/// The welcome screen: pick a project kind, open a project or a file, or
+/// reopen something recent.
+///
+/// `openepl_bin` is what lets the screen say which toolchain it is and turn a
+/// recent PROJECT into the file to open: a recent entry is recorded as its
+/// `project.oeproj` when it has one, and `oe-open` must still carry an `.oir`,
+/// because the caller reads that path into the code editor. With no binary the
+/// screen shows no version and hands the recent path over as recorded.
+///
+/// Attributes the caller's click listener reads:
+///   oe-new='<template id>'   create from a template
+///   oe-open='<path.oir>'     open that file
+///   oe-browse='project'|'file'   show the path browser (`browse_markup`)
 inline std::string welcome_markup(const std::string& family, int w, int h,
                                   const std::vector<TemplateInfo>& templates,
                                   const std::vector<std::string>& recent,
-                                  const std::string& wordmark) {
+                                  const std::string& wordmark,
+                                  const std::string& openepl_bin) {
     using namespace openepl::designer::theme;
+    const std::string version = version_string(openepl_bin);
     std::string s = "<rml><head><style>";
     s += "body{width:" + std::to_string(w) + "px;height:" + std::to_string(h) +
          "px;font-family:'" + family + "'}";
@@ -159,8 +225,16 @@ inline std::string welcome_markup(const std::string& family, int w, int h,
     s += ".empty{font-size:12px;color:" + std::string(TEXT_MUTED) + ";font-style:italic}";
     s += "#left{position:absolute;left:0;top:0;width:520px}";
     s += "#right{position:absolute;left:560px;top:0;width:420px}";
+    s += ".open{display:inline-block;width:190px;margin-right:12px;margin-bottom:18px;"
+         "background-color:" + std::string(PANEL) + ";border:1px " + BORDER +
+         ";border-radius:8px;padding:12px 14px;cursor:pointer}";
+    s += ".open:hover{border:1px " + std::string(ACCENT) + ";background-color:#f2f6ff}";
     s += "#foot{position:absolute;left:56px;top:" + std::to_string(h - 56) +
          "px;font-size:11px;color:" + TEXT_MUTED + "}";
+    // Top right, beside the wordmark, rather than in the footer: the window
+    // opens taller than some screens, and a line at the bottom edge is the
+    // one line that would then not be seen.
+    s += "#version{position:absolute;right:56px;top:56px;font-size:12px;color:" + std::string(TEXT_MUTED) + "}";
     // An explicit backdrop rather than relying on the body's own background:
     // the body paints its box, but a full-window rectangle is what actually
     // guarantees no unpainted region shows through as black.
@@ -189,11 +263,26 @@ inline std::string welcome_markup(const std::string& family, int w, int h,
     }
     s += "</div>";
 
-    s += "<div id='right'><div class='colhead'>RECENT</div>";
+    s += "<div id='right'><div class='colhead'>OPEN</div>";
+    s += "<div class='open' oe-browse='project'><div class='tname'>Open Project\u2026</div>"
+         "<div class='tdesc'>A project.oeproj, or its folder</div></div>";
+    s += "<div class='open' oe-browse='file'><div class='tname'>Open File\u2026</div>"
+         "<div class='tdesc'>Any .oir</div></div>";
+
+    s += "<div class='colhead'>RECENT</div>";
     for (const auto& r : recent) {
-        const size_t slash = r.find_last_of('/');
-        const std::string base = slash == std::string::npos ? r : r.substr(slash + 1);
-        s += "<div class='recent' oe-open='" + r + "'><div>" + base + "</div>";
+        // A project is shown by its folder, which is its name; a file by its
+        // own name. Either way the path underneath says where it is.
+        std::string shown = r;
+        if (is_project_path(r)) {
+            const size_t slash = shown.find_last_of('/');
+            if (slash != std::string::npos) shown = shown.substr(0, slash);
+        }
+        const size_t slash = shown.find_last_of('/');
+        const std::string base = slash == std::string::npos ? shown : shown.substr(slash + 1);
+        const std::string open = openepl_bin.empty() ? r : resolve_open(openepl_bin, r);
+        if (open.empty()) continue;   // a project that no longer reads
+        s += "<div class='recent' oe-open='" + open + "'><div>" + base + "</div>";
         s += "<div class='rpath'>" + r + "</div></div>";
     }
     if (recent.empty()) {
@@ -202,12 +291,127 @@ inline std::string welcome_markup(const std::string& family, int w, int h,
     s += "</div></div>";
 
     s += "<div id='foot'>openepl-designer &lt;project.oir&gt; opens a file directly</div>";
+    if (!version.empty()) s += "<div id='version'>" + version + "</div>";
+    s += "</body></rml>";
+    return s;
+}
+
+/// The signature the IDE called before the screen could open anything: no
+/// toolchain to ask, so no version line and recent entries handed over as
+/// recorded. Kept so the caller compiles unchanged; it should move to the
+/// overload above.
+inline std::string welcome_markup(const std::string& family, int w, int h,
+                                  const std::vector<TemplateInfo>& templates,
+                                  const std::vector<std::string>& recent,
+                                  const std::string& wordmark) {
+    return welcome_markup(family, w, h, templates, recent, wordmark, "");
+}
+
+/// One row of the path browser.
+struct DirEntry {
+    std::string name;
+    std::string path;
+    bool is_dir = false;
+    /// A `project.oeproj` (browsing for a project) or an `.oir` (for a file).
+    bool is_openable = false;
+};
+
+/// What `dir` holds that a person choosing a `mode` — "project" or "file" —
+/// could want: directories to descend into, and the one kind of file the mode
+/// is for. Everything else is noise in a file dialog and is left out.
+/// Directories first, then files, each sorted, and `..` on top unless at `/`.
+inline std::vector<DirEntry> list_dir(const std::string& dir, const std::string& mode) {
+    std::vector<DirEntry> dirs, files;
+    DIR* d = ::opendir(dir.c_str());
+    if (!d) return {};
+    while (dirent* e = ::readdir(d)) {
+        const std::string name = e->d_name;
+        if (name == "." || name == ".." || name[0] == '.') continue;
+        const std::string path = dir == "/" ? "/" + name : dir + "/" + name;
+        struct stat st;
+        if (::stat(path.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            dirs.push_back(DirEntry{name, path, true, false});
+        } else if (mode == "project" ? name == "project.oeproj"
+                                     : name.size() > 4 && name.compare(name.size() - 4, 4, ".oir") == 0) {
+            files.push_back(DirEntry{name, path, false, true});
+        }
+    }
+    ::closedir(d);
+    auto by_name = [](const DirEntry& a, const DirEntry& b) { return a.name < b.name; };
+    std::sort(dirs.begin(), dirs.end(), by_name);
+    std::sort(files.begin(), files.end(), by_name);
+
+    std::vector<DirEntry> out;
+    if (dir != "/") {
+        const size_t slash = dir.find_last_of('/');
+        out.push_back(DirEntry{"..", slash == 0 ? "/" : dir.substr(0, slash), true, false});
+    }
+    out.insert(out.end(), dirs.begin(), dirs.end());
+    out.insert(out.end(), files.begin(), files.end());
+    return out;
+}
+
+/// The path browser: RmlUi has no native file dialog, so this is a document
+/// listing `dir` for the caller to show in place of the welcome screen.
+///
+/// Attributes the caller's click listener reads:
+///   oe-browse-dir='<path>'   relist that directory (`list_dir` + this again)
+///   oe-open='<path.oir>'     open that file — for a project entry it is
+///                            already the project's `main`, resolved here
+///   oe-browse-cancel=''      back to the welcome screen
+inline std::string browse_markup(const std::string& family, int w, int h, const std::string& dir,
+                                 const std::string& mode, const std::string& openepl_bin) {
+    using namespace openepl::designer::theme;
+    std::string s = "<rml><head><style>";
+    s += "body{width:" + std::to_string(w) + "px;height:" + std::to_string(h) +
+         "px;font-family:'" + family + "'}";
+    s += base_styles();
+    s += "#bg{position:absolute;left:0;top:0;width:" + std::to_string(w) + "px;height:" +
+         std::to_string(h) + "px;background-color:" + CANVAS + "}";
+    s += "#head{position:absolute;left:56px;top:40px;width:" + std::to_string(w - 112) + "px}";
+    s += "#title{font-size:22px;font-weight:bold;color:" + std::string(TEXT) + "}";
+    s += "#dir{font-size:12px;color:" + std::string(TEXT_MUTED) + ";margin-top:6px}";
+    s += "#list{position:absolute;left:56px;top:120px;width:" + std::to_string(w - 112) +
+         "px;height:" + std::to_string(h - 200) + "px;overflow-y:auto;background-color:" +
+         PANEL + ";border:1px " + BORDER + ";border-radius:8px;padding:6px}";
+    s += ".row{padding:7px 10px;border-radius:5px;cursor:pointer;font-size:13px;color:" +
+         std::string(TEXT) + "}";
+    s += ".row:hover{background-color:#f2f6ff}";
+    s += ".dir{color:" + std::string(ACCENT) + "}";
+    s += ".empty{font-size:12px;color:" + std::string(TEXT_MUTED) + ";font-style:italic;padding:8px}";
+    s += "#cancel{position:absolute;left:56px;top:" + std::to_string(h - 60) +
+         "px;padding:8px 16px;border-radius:6px;border:1px " + BORDER + ";cursor:pointer;font-size:13px}";
+    s += "#cancel:hover{background-color:" + std::string(PANEL) + "}";
+    s += "</style></head><body><div id='bg'/>";
+    s += "<div id='head'><div id='title'>";
+    s += mode == "project" ? "Open Project" : "Open File";
+    s += "</div><div id='dir'>" + dir + "</div></div>";
+
+    s += "<div id='list'>";
+    const auto entries = list_dir(dir, mode);
+    for (const auto& e : entries) {
+        if (e.is_dir) {
+            s += "<div class='row dir' oe-browse-dir='" + e.path + "'>" + e.name + "/</div>";
+            continue;
+        }
+        const std::string open = mode == "project" ? resolve_open(openepl_bin, e.path) : e.path;
+        if (open.empty()) continue;   // a project file the CLI refuses is not offered
+        s += "<div class='row' oe-open='" + open + "'>" + e.name + "</div>";
+    }
+    if (entries.empty()) s += "<div class='empty'>Nothing here that can be opened.</div>";
+    s += "</div>";
+    s += "<div id='cancel' oe-browse-cancel=''>Back</div>";
     s += "</body></rml>";
     return s;
 }
 
 /// Where the recent-projects list lives.
 inline std::string recent_path() {
+    // XDG_DATA_HOME first: it is how a test run keeps its scratch files out of
+    // the list a person sees on their next real start.
+    const char* xdg = std::getenv("XDG_DATA_HOME");
+    if (xdg && *xdg) return std::string(xdg) + "/openepl/recent";
     const char* home = std::getenv("HOME");
     if (!home) return "";
     return std::string(home) + "/.local/share/openepl/recent";
@@ -235,11 +439,21 @@ inline std::vector<std::string> load_recent(size_t limit = 8) {
 ///
 /// Stored absolute: a relative path is meaningless from the next session's
 /// working directory, and the entry would silently vanish from the list.
+///
+/// A file with a `project.oeproj` beside it is recorded as that project, not
+/// as the file: the list is of things a person worked on, and what they
+/// worked on was the project. A loose `.oir` is still recorded as itself.
 inline void remember_recent(const std::string& relative_or_absolute, size_t limit = 8) {
     std::string path = relative_or_absolute;
     if (char* real = ::realpath(relative_or_absolute.c_str(), nullptr)) {
         path = real;
         std::free(real);
+    }
+    if (!is_project_path(path)) {
+        const size_t slash = path.find_last_of('/');
+        const std::string sibling =
+            (slash == std::string::npos ? std::string() : path.substr(0, slash + 1)) + "project.oeproj";
+        if (::access(sibling.c_str(), R_OK) == 0) path = sibling;
     }
     const std::string file = recent_path();
     if (file.empty()) return;

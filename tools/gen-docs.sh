@@ -72,22 +72,10 @@ sub main
 end
 ```
 
-## Reporting failure
-
-A command that can fail returns a sentinel — `0` for a handle, `-1` for a count
-or size, `""` for text, `false` for a yes/no — and leaves the reason in the
-error slot, which `last_error_code()` and `last_error_text()` read.
-
-```
-let h: int = file_open("notes.txt", "read")
-if h = 0
-  call print_text(last_error_text())
-end
-```
-
-A successful command clears the slot, so a code left over from earlier can
-never be mistaken for a fresh failure. That is also what makes `false` precise:
-false with code `0` is a genuine no, false with a non-zero code is a failure.
+A command that can fail returns a sentinel — `0` for a handle or a position,
+`-1` for a count or size, `""` for text, `false` for a yes/no — and leaves the
+reason in the error slot, which `last_error_code()` and `last_error_text()`
+read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 
 ## Core
 
@@ -115,7 +103,9 @@ rm -f /tmp/openepl-core-cmds.$$
 A component has properties you set and events you bind to subroutines — from
 the designer, or by writing it out directly. Most draw a rectangle; some, like
 `timer` and `httpserver`, have no pixels at all and are declared at module
-level rather than inside a form.
+level rather than inside a form. What each component is for, and what its
+events hand a handler, is in [Components](./components.md); this page is the
+list.
 
 MD
     "$OPENEPL" commands | sed -n 's/^component: //p' | sort > /tmp/openepl-core-comps.$$

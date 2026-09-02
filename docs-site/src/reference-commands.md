@@ -22,22 +22,10 @@ sub main
 end
 ```
 
-## Reporting failure
-
-A command that can fail returns a sentinel — `0` for a handle, `-1` for a count
-or size, `""` for text, `false` for a yes/no — and leaves the reason in the
-error slot, which `last_error_code()` and `last_error_text()` read.
-
-```
-let h: int = file_open("notes.txt", "read")
-if h = 0
-  call print_text(last_error_text())
-end
-```
-
-A successful command clears the slot, so a code left over from earlier can
-never be mistaken for a fresh failure. That is also what makes `false` precise:
-false with code `0` is a genuine no, false with a non-zero code is a failure.
+A command that can fail returns a sentinel — `0` for a handle or a position,
+`-1` for a count or size, `""` for text, `false` for a yes/no — and leaves the
+reason in the error slot, which `last_error_code()` and `last_error_text()`
+read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 
 ## Core
 

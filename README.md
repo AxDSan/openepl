@@ -38,6 +38,11 @@ that emits standalone native binaries.
 The language is English-first and deliberately small: one uniform call syntax,
 no pointers, no manual memory management, no ceremony. Assignment is a
 statement rather than an expression, so `if x = 5` cannot silently assign.
+It has `int`, `int64`, `double`, `bool` and `text`; arrays, `bytes`, records
+and dictionaries; subroutines with parameters and return values; and every
+position counts from 1, so `0` is free to mean *not found*. A command that
+fails returns a sentinel and leaves the reason in an error slot — there are
+no exceptions.
 
 <div align="center">
 <img src="assets/screenshot-designer.png" alt="The OpenEPL Studio visual designer" width="860">
@@ -49,8 +54,8 @@ Download a release, unpack it anywhere, and run it — there is no installer and
 nothing to configure:
 
 ```sh
-tar xzf openepl-0.1.0-linux-x86_64.tar.gz
-cd openepl-0.1.0-linux-x86_64
+tar xzf openepl-0.2.0-linux-x86_64.tar.gz
+cd openepl-0.2.0-linux-x86_64
 bin/openepl-studio
 ```
 
@@ -82,6 +87,42 @@ sub main
   call print_text(concat("six times seven is ", int_to_text(answer)))
 end
 ```
+
+A program that waits — for a tick, a click or an HTTP request — declares the
+component that wakes it and stays in the runtime's event loop after `main`
+returns:
+
+```
+module countdown
+target console
+
+var remaining: int = 3
+
+timer tick_source
+  interval = 500
+  on tick: on_tick
+end
+
+sub main
+  call print_text("3...")
+end
+
+sub on_tick
+  remaining = remaining - 1
+  if remaining <= 0
+    call print_text("Liftoff.")
+    call quit()
+  else
+    call print_text(concat(int_to_text(remaining), "..."))
+  end
+end
+```
+
+Beyond that: 13 bundled kits — `file`, `text`, `json`, `net`, `time`, `ui`
+and the rest — 302 commands and 19 components, and `use <name>` is the whole
+of asking for a kit. `openepl commands --use <name>` lists what each adds;
+the [Commands](https://axdsan.github.io/openepl/docs/reference-commands.html)
+reference is generated from the same answer.
 
 ## One project, every artifact
 
@@ -115,9 +156,10 @@ type, backed by the same language server any other editor can use.
 
 ### Editor support
 
-`openepl lsp` is a Language Server Protocol server: diagnostics, completion,
-signature help, hover, go-to-definition and find-references. It resolves kits
-exactly as the compiler does, so an editor never underlines code that builds.
+`openepl lsp` is a Language Server Protocol server: diagnostics that name the
+fix and underline the name they are about, completion, signature help, hover,
+go-to-definition and find-references. It resolves kits exactly as the compiler
+does, so an editor never underlines code that builds.
 Point any LSP-capable editor at it — [`docs/editors.md`](docs/editors.md) has
 ready-made configuration for Neovim, VS Code, Helix and Zed, and
 [`editors/vscode/`](editors/vscode) is a working extension with syntax
@@ -167,15 +209,25 @@ OpenEPL is young, and honest about it:
 - **Linux x86-64 only.** Windows, macOS and arm64 are not supported yet.
 - **No debugger for the programs you build.** `--release` optimises, hardens
   and strips; what it cannot do is let you step through the result.
-- The component library is small, and the language is still growing.
+- **TLS is opt-in.** `https://` works once `tools/fetch-mbedtls.sh` has
+  vendored mbedTLS, and the call fails rather than downgrading without it;
+  the `httpserver` component is plaintext either way.
+- **Memory is reclaimed at exit**, not before: a program that runs for days
+  grows with the work it has done.
+- Nineteen components, and the language has no enum, no `for` over a
+  collection and no module-level constant yet. The
+  [limitations page](https://axdsan.github.io/openepl/docs/limitations.html)
+  is the full list, checked against the toolchain.
 
 What does work, end to end: design a form, wire an event, build it, run it,
-and ship the binary — on Linux, today.
+and ship the binary — and a console program, a web server or a library the
+same way — on Linux, today.
 
 ## Documentation
 
-Full documentation — installation, a language guide, the visual designer, and
-generated references for every command and component — is at
+Full documentation — installation, a tour of the language, the component
+model, the visual designer, and generated references for every command and
+component — is at
 **[axdsan.github.io/openepl](https://axdsan.github.io/openepl/)**.
 
 The landing page is `docs-site/landing/`, and the book is `docs-site/`. To work
@@ -184,6 +236,7 @@ on them locally:
 ```sh
 cargo install mdbook
 tools/gen-docs.sh          # regenerate the reference pages from the toolchain
+tools/check-docs.sh        # compile every sample in every page
 mdbook serve docs-site     # the book, at http://localhost:3000
 
 # or assemble the whole site the way it is published

@@ -208,8 +208,8 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
       <a class="btn btn-ghost" href="https://github.com/AxDSan/openepl">View on GitHub</a>
     </div>
     <div class="install">
-      <span class="p">$</span> tar xzf openepl-0.1.0-linux-x86_64.tar.gz<br>
-      <span class="p">$</span> cd openepl-0.1.0-linux-x86_64<br>
+      <span class="p">$</span> tar xzf openepl-0.2.0-linux-x86_64.tar.gz<br>
+      <span class="p">$</span> cd openepl-0.2.0-linux-x86_64<br>
       <span class="p">$</span> bin/openepl-studio
     </div>
   </div>
@@ -263,7 +263,23 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
         ceremony. Assignment is a statement rather than an expression, so
         <code>if x = 5</code> compares — it cannot silently assign.
       </p>
-      <p><a href="docs/language.html">Read the language guide →</a></p>
+      <p class="lede">
+        Whole numbers, doubles, booleans and text; arrays, bytes, records and
+        dictionaries; subroutines with parameters and return values. Every
+        position counts from 1, so <code>0</code> is free to mean <em>not
+        found</em>. A command that fails returns a sentinel and leaves the
+        reason in an error slot — there are no exceptions to catch.
+      </p>
+      <p class="lede">
+        <!-- landing-counts: the numbers below are checked against the
+             toolchain by tools/check-docs.sh; edit them there and here. -->
+        <span id="kit-count">13</span> bundled kits,
+        <span id="command-count">302</span> commands and
+        <span id="component-count">19</span> components — files, text, JSON,
+        HTTP, a timer, a grid — and <code>use &lt;name&gt;</code> is the whole
+        of asking for a kit.
+      </p>
+      <p><a href="docs/tour.html">Take the tour →</a> · <a href="docs/language.html">Read the language guide →</a></p>
     </div>
     <pre><span class="c"># hello.oir</span>
 <span class="k">module</span> hello
@@ -273,8 +289,7 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
   <span class="k">call</span> print_text(<span class="s">"Hello from OpenEPL."</span>)
 
   <span class="k">let</span> answer: <span class="k">int</span> = <span class="n">6</span> * <span class="n">7</span>
-  <span class="k">call</span> print_text(concat(<span class="s">"six times seven is "</span>,
-                       int_to_text(answer)))
+  <span class="k">call</span> print_text(<span class="s">"six times seven is "</span> + int_to_text(answer))
 <span class="k">end</span></pre>
   </div>
 </section>
@@ -307,8 +322,11 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
     <h2>Editing, with the compiler helping</h2>
     <p class="lede">
       Syntax highlighting and live diagnostics in the IDE, backed by a language
-      server any editor can use — completion, hover, go-to-definition and
-      find-references in VS Code, Neovim, Helix and Zed.
+      server any editor can use — completion, signature help, hover,
+      go-to-definition and find-references in VS Code, Neovim, Helix and Zed.
+      A diagnostic underlines the name it is about and names the fix: the
+      <code>use</code> line to add, the name you probably meant, the handler
+      header to paste.
     </p>
     <img src="assets/screenshot-editor.png" alt="The OpenEPL code editor with syntax highlighting and a problems pane"
          style="width:100%;border-radius:12px;border:1px solid var(--line);box-shadow:0 10px 30px rgba(16,22,48,0.14)">
@@ -320,11 +338,14 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
   <div class="wrap">
     <div class="note">
       <h3>OpenEPL is young — here is the honest part</h3>
-      <p>Linux on x86-64 only. Programs you build are ordinary native binaries;
-      the hardened, hard-to-decompile release output is not implemented yet.
-      There is no debugger, and the component library is small.</p>
+      <p>Linux on x86-64 only. A release build is hardened and stripped, not
+      hidden — a native binary can always be disassembled. TLS is opt-in and
+      client-side only. Memory is reclaimed when a program exits, not before.
+      There is no debugger, and the toolbox still greys out a few controls that
+      are not written yet.</p>
       <p>What does work, end to end: design a form, wire an event, build it, run
-      it, and ship the binary — today.</p>
+      it, and ship the binary — and a console program, a web server or a
+      library the same way — today.</p>
       <p><a href="docs/limitations.html">The full list of limitations →</a></p>
     </div>
   </div>

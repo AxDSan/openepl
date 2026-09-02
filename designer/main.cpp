@@ -15,6 +15,7 @@
  */
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
+#include <RmlUi/Core/Elements/ElementFormControlTextArea.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,6 +37,7 @@
 
 #include "RmlUi_Backend.h"
 #include "RmlUi_Include_GL3.h"
+#include "RmlUi_Platform_SDL.h"
 #include "RmlUi_Renderer_GL3.h"
 #include "catalog.h"
 #include "descriptors.h"
@@ -186,6 +188,33 @@ struct Designer {
     /// Current window size. Layout is recomputed whenever this changes, so the
     /// IDE fills the OS window instead of leaving unpainted margins.
     int win_w = INIT_W, win_h = INIT_H;
+
+    /// The cursor the platform was last asked for. Only a scripted session
+    /// reads it: a frame dump cannot show the mouse pointer, so this is how
+    /// the resize cursor gets verified at all.
+    std::string cursor_name;
+
+    /// The previous press on the canvas, for double-click detection. RmlUi's
+    /// own `dblclick` compares element identity, and every press here rebuilds
+    /// the canvas (select → refresh_all), so the second press always lands on
+    /// a freshly created element and the substrate never sees a pair.
+    std::string last_press_id;
+    double last_press_time = 0.0;
+    int last_press_x = 0, last_press_y = 0;
+
+    /// The mouse over the editor, for hover-on-rest. A hover request is sent
+    /// once the pointer has stayed put for a moment, and once only per spot.
+    int hover_x = -1, hover_y = -1;
+    double hover_moved_at = 0.0;
+    bool hover_asked = false;
+    int hover_request = 0;      // the in-flight hover's id, 0 when none
+    int hover_shown_for = 0;    // the request whose answer is still wanted
+    int hover_line = -1, hover_col = -1;
+    /// Definition and references answers land here through the frame loop.
+    int def_request = 0;
+    int refs_request = 0;
+    /// Where a hit in the references list jumps to, by list index.
+    std::vector<openepl::lsp::Location> refs;
 };
 Designer g;
 
@@ -199,7 +228,41 @@ std::string basename_of(const std::string& p) {
 
 Rml::Element* by_id(const char* id) { return g.doc ? g.doc->GetElementById(id) : nullptr; }
 
+/// The platform layer, with the cursors the designer's stylesheet asks for.
+///
+/// RmlUi's SDL backend knows one `resize` cursor, the diagonal one. Every
+/// handle here names its direction — `resize-ns` on the top and bottom
+/// anchors, `resize-ew` on the sides — and a name the backend does not know
+/// leaves the pointer as it was, so the directional cursors are created here
+/// and the rest is handed back to the backend.
+struct StudioSystem : SystemInterface_SDL {
+    explicit StudioSystem(SDL_Window* window) : SystemInterface_SDL(window) {
+        ns = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENS);
+        ew = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
+        nesw = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENESW);
+        nwse = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE);
+    }
+    ~StudioSystem() override {
+        for (SDL_Cursor* c : {ns, ew, nesw, nwse}) {
+            if (c) SDL_FreeCursor(c);
+        }
+    }
+    void SetMouseCursor(const Rml::String& name) override {
+        g.cursor_name = name;
+        SDL_Cursor* c = name == "resize-ns"     ? ns
+                        : name == "resize-ew"   ? ew
+                        : name == "resize-nesw" ? nesw
+                        : name == "resize-nwse" ? nwse
+                                                : nullptr;
+        if (c) SDL_SetCursor(c);
+        else SystemInterface_SDL::SetMouseCursor(name);
+    }
+    SDL_Cursor *ns = nullptr, *ew = nullptr, *nesw = nullptr, *nwse = nullptr;
+};
+
 void size_output_pane();
+void refresh_highlight();
+int code_char_width();
 
 /// Apply the current dock sizes to the layout. Geometry lives here rather than
 /// in the stylesheet so the panels can be resized at run time.
@@ -280,6 +343,14 @@ void relayout() {
         if (Rml::Element* e = by_id(id)) {
             e->SetProperty("height", Rml::String(std::to_string(g.bottom_h - 32) + "px"));
         }
+    }
+    // The highlight layer draws only the rows that fit, so a new geometry is a
+    // new row count: repaint it here, after the layout it depends on, rather
+    // than leaving it to the next scroll. Every path that resizes the editor
+    // — the tab, the splitters, the OS window — comes through this function.
+    if (g.view == "code") {
+        g.context->Update();
+        refresh_highlight();
     }
 }
 
@@ -639,18 +710,33 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << "#codehl{position:absolute;left:0;top:0;font-family:'" << mono
       << "';font-size:13px;line-height:" << CODE_LINE_H << "px;padding:" << CODE_PAD_Y << "px "
       << CODE_PAD_X << "px;padding-top:0px;white-space:pre;color:" << TEXT << "}";
-    s << "#codehl div{white-space:pre;height:" << CODE_LINE_H << "px}";
+    // Relative, so a diagnostic's underline can be placed within its row.
+    s << "#codehl div{white-space:pre;height:" << CODE_LINE_H << "px;position:relative}";
     // Absolutely-positioned children ignore an ancestor's overflow in RmlUi
     // unless told to respect it. Without this the editor keeps painting once
     // scrolled — straight over the menu bar and toolbar.
     s << "#codehl,#fullcode{clip:always}";
-    // A bad line is tinted rather than underlined: the server reports whole
-    // lines, so a squiggle would claim a precision the diagnostic does not have.
-    s << "#codehl div.badline{background-color:#fff0f0;border-left:3px " << DANGER << "}";
+    // The diagnostic's range is underlined, and the line it sits on is tinted
+    // faintly so the mark can be found when it is off to the right. The bar
+    // is a positioned child of the line's div: the font is monospace, so a
+    // column is a multiple of one glyph's width and the bar lands under
+    // exactly the name the server meant.
+    s << "#codehl div.badline{background-color:#fff6f6}";
+    s << "#codehl div div.dline{position:absolute;height:2px;background-color:" << DANGER << "}";
+    s << "#codehl div div.dline.warn{background-color:#bf8700}";
     s << "#problems{height:22px;overflow-y:auto;padding:6px 12px}";
     s << ".problem{font-size:12px;color:" << TEXT << ";padding:2px 0}";
     s << ".problem .pline{color:" << DANGER << ";margin-right:8px}";
+    s << ".problem.ref .pline{color:" << ACCENT << "}";
+    s << ".problem.ref:hover{background-color:#eef2f8}";
     s << ".noproblems{font-size:12px;color:" << TEXT_MUTED << ";font-style:italic}";
+    // The hover tooltip: what the language server says about the name under
+    // the pointer. Monospace, because the first line is a signature.
+    s << "#tip{position:absolute;background-color:" << PANEL << ";border:1px " << BORDER
+      << ";border-radius:5px;padding:6px 10px;z-index:70;max-width:520px;font-family:'" << mono
+      << "';font-size:12px;color:" << TEXT << ";white-space:pre;"
+         "box-shadow:#00000024 0 4px 14px 0px}";
+    s << "#tip .tipkind{font-family:'" << family << "';color:" << TEXT_MUTED << ";font-size:11px}";
     // The CONTAINER scrolls, not the textarea. RmlUi keeps a text control's
     // own overflow hidden, so the wheel did nothing there — and mirroring one
     // layer's scroll onto the other is a sync bug waiting to happen. Sizing
@@ -694,7 +780,14 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << "#canvas{position:relative;overflow:hidden;border-bottom-left-radius:8px;"
          "border-bottom-right-radius:8px}";
     // selection chrome
-    s << "#overlay{position:absolute;left:0;top:0;width:100%;height:100%}";
+    // Above the components, or the handles are under them and only their
+    // outer three pixels can be grabbed — and the pointer never rests on one
+    // long enough to show its cursor. The overlay itself lets every hit
+    // through, so components still take their own clicks; only the chrome
+    // drawn on it is solid.
+    s << "#overlay{position:absolute;left:0;top:0;width:100%;height:100%;z-index:5;"
+         "pointer-events:none}";
+    s << ".handle,.fgrip,.badge{pointer-events:auto}";
     s << ".selbox{border:1px " << ACCENT << "}";
     s << ".selbox.alt{border:1px #9db8ea}";
     s << ".guide{background-color:#ff4d9a}";
@@ -837,7 +930,8 @@ std::string build_chrome(const std::string& family, const std::string& mono,
         s << "<div class='m' oe-menu='" << i << "'>" << menus()[i].title << "</div>";
     }
     s << "</div><div id='menupop' style='display:none'/>"
-         "<div id='editpop' style='display:none'/>";
+         "<div id='editpop' style='display:none'/>"
+         "<div id='tip' style='display:none'/>";
 
     s << "<div id='toolbar'>"
          "<div class='tb' oe-action='save'>Save</div>"
@@ -1043,6 +1137,32 @@ void rebuild_canvas() {
                                openepl::ui::rcss_value(p.first.c_str(), p.second.c_str()));
             }
         }
+        if (comp.type_name == "grid") {
+            // Real rows at design time, through the same markup the running
+            // app uses, so the grid on the canvas is the grid in the window.
+            // A grid bound to a datasource shows the source's rows, as it will
+            // when it runs; a source the file does not declare — filled from
+            // code, or from a kit — leaves a header naming it, which says
+            // what will fill the box rather than showing a broken control.
+            const std::string* cols = comp.property("columns");
+            const std::string* rows = comp.property("rows");
+            const std::string* bind = comp.property("bind");
+            std::string head = cols ? *cols : std::string();
+            std::string body = rows ? *rows : std::string();
+            if (bind && !bind->empty()) {
+                bool found = false;
+                for (const auto& m : g.model.module_components) {
+                    const std::string* mname = m.property("name");
+                    if (m.removed || m.type_name != "datasource") continue;
+                    if (m.id != *bind && !(mname && *mname == *bind)) continue;
+                    if (const std::string* c = m.property("columns")) head = *c;
+                    if (const std::string* r = m.property("rows")) body = *r;
+                    found = true;
+                }
+                if (!found && head.empty() && body.empty()) head = "bound to " + *bind;
+            }
+            e->SetInnerRML(openepl::ui::grid_markup(head, body, prop_int(comp, "selected", 0)));
+        }
     }
 
     // Form resize grips, on the edges of the preview window itself.
@@ -1165,8 +1285,7 @@ void rebuild_tray() {
     if (html.empty()) {
         html = "<div class='trayhint'>Empty. A timer, an action or a server has no rectangle, "
                "so it is declared beside the form rather than inside it — drop one from the "
-               "toolbox's System section.<br/>Components already in the file are not listed "
-               "yet: <em>openepl inspect</em> reports forms only.</div>";
+               "toolbox's System section, or double-click one here to write its handler.</div>";
     }
     list->SetInnerRML(html);
 }
@@ -1295,7 +1414,7 @@ void rebuild_inspector() {
     const CatalogComponent* cc = g.catalog.find(comp->type_name);
     if (!cc) { grid->SetInnerRML("<div class='hint'>unknown type</div>"); return; }
     const std::vector<CatalogProp>& props = cc->props;
-    const std::vector<std::string>& events = cc->events;
+    const std::vector<CatalogEvent>& events = cc->events;
 
     std::string html;
     if (g.inspector_tab == "props") {
@@ -1340,9 +1459,9 @@ void rebuild_inspector() {
     } else {
         if (events.empty()) html += "<div class='hint'>This component has no events.</div>";
         for (const auto& ev : events) {
-            const std::string* h = comp->handler(ev);
-            html += "<div class='prow'><label>On" + esc(ev) + "</label>"
-                    "<input type='text' class='ev' name='" + esc(ev) + "' value='" +
+            const std::string* h = comp->handler(ev.name);
+            html += "<div class='prow'><label>On" + esc(ev.name) + "</label>"
+                    "<input type='text' class='ev' name='" + esc(ev.name) + "' value='" +
                     esc(h ? *h : "") + "'/></div>";
         }
     }
@@ -1434,6 +1553,11 @@ void rebuild_code() {
     // away what they were typing.
     if (!g.code_dirty) {
         if (auto* full = code_editor()) full->SetValue(g.model_text);
+        // The server hears about typing from the editor's change event, and
+        // about nothing else. A designer save rewrites the file underneath it,
+        // and a hover answered against the text before the save names the
+        // wrong line.
+        g.lsp.did_change(g.model_text);
     }
     refresh_highlight();
 }
@@ -1481,23 +1605,52 @@ void refresh_highlight() {
     // The row count belongs in the cache key. The first refresh can run before
     // the view has been laid out, when its height is zero and only one row
     // "fits"; keyed on text and scroll alone, that one-line render is what the
-    // cache then preserves forever.
+    // cache then preserves forever. So do the diagnostics: they are drawn
+    // into these rows, and a new set with the same text must repaint.
+    std::string marks;
+    for (const auto& d : g.diagnostics) {
+        marks += std::to_string(d.range.line) + ":" + std::to_string(d.range.character) + "-" +
+                 std::to_string(d.range.end_line) + ":" + std::to_string(d.range.end_character) +
+                 (d.severity == 1 ? "e;" : "w;");
+    }
     static std::string painted;
     static size_t painted_first = (size_t)-1;
     static size_t painted_rows = 0;
-    if (text == painted && first_line == painted_first && rows == painted_rows) return;
+    static std::string painted_marks;
+    if (text == painted && first_line == painted_first && rows == painted_rows &&
+        marks == painted_marks) {
+        return;
+    }
     painted = text;
     painted_first = first_line;
     painted_rows = rows;
+    painted_marks = marks;
 
+    const int cw = code_char_width();
     std::string html;
     for (size_t i = first_line; i < lines.size() && i < first_line + rows; i++) {
+        std::string bars;
+        bool bad = false;
+        for (const auto& d : g.diagnostics) {
+            if ((int)i < d.range.line || (int)i > d.range.end_line) continue;
+            bad = true;
+            // The part of the range that falls on this row. A range with no
+            // width still gets a mark two columns wide: the position is the
+            // information, and nothing is not a mark.
+            const int from = (int)i == d.range.line ? d.range.character : 0;
+            int to = (int)i == d.range.end_line ? d.range.end_character : (int)lines[i].size();
+            if (to <= from) to = from + 2;
+            bars += "<div class='dline" + std::string(d.severity == 1 ? "" : " warn") +
+                    "' style='left:" + std::to_string(from * cw) + "px;top:" +
+                    std::to_string(theme::CODE_LINE_H - 2) + "px;width:" +
+                    std::to_string((to - from) * cw) + "px'/>";
+        }
         // An empty div collapses, which would shift every following line up.
-        html += "<div>" +
-                (lines[i].empty() ? std::string("&nbsp;") : highlight_line(lines[i])) + "</div>";
+        html += std::string(bad ? "<div class='badline'>" : "<div>") +
+                (lines[i].empty() ? std::string("&nbsp;") : highlight_line(lines[i])) + bars +
+                "</div>";
     }
     layer->SetInnerRML(html);
-
 }
 
 /// Split the output pane between PROBLEMS and the build log.
@@ -1508,8 +1661,11 @@ void refresh_highlight() {
 /// almost the whole pane instead of reserving space for nothing.
 void size_output_pane() {
     using namespace theme;
-    const int rows = (int)std::min<size_t>(g.diagnostics.size(), 4);
-    const int problems_h = g.diagnostics.empty() ? 22 : rows * 18 + 12;
+    // The strip holds diagnostics or, until the next diagnostics arrive, a
+    // references list; either way it is sized to what it shows.
+    const size_t shown = std::max(g.diagnostics.size(), g.refs.size());
+    const int rows = (int)std::min<size_t>(shown, 4);
+    const int problems_h = shown == 0 ? 22 : rows * 18 + 12;
     if (Rml::Element* e = by_id("problems")) {
         e->SetProperty("height", Rml::String(std::to_string(problems_h) + "px"));
     }
@@ -1538,24 +1694,29 @@ void size_output_pane() {
 /// Diagnostics never touch the editor's text. Writing into the control would
 /// fight the unsaved-changes guard and could destroy what the user typed.
 void render_diagnostics() {
-    Rml::Element* layer = by_id("codehl");
-    if (layer) {
-        // Re-tint the affected lines in place. The highlight layer has one div
-        // per source line, so a diagnostic maps straight onto a child index.
-        for (int i = 0; i < layer->GetNumChildren(); i++) {
-            layer->GetChild(i)->SetAttribute("class", Rml::String(""));
-        }
-        for (const auto& d : g.diagnostics) {
-            if (d.line >= 0 && d.line < layer->GetNumChildren()) {
-                layer->GetChild(d.line)->SetAttribute("class", "badline");
-            }
-        }
+    // The marks are drawn by the highlight layer itself, which knows which
+    // rows are on screen; marking children by source line here put the
+    // underline on the wrong row as soon as the editor had scrolled.
+    refresh_highlight();
+    // The server republishes on every change, the same set included. A
+    // references list is only displaced by news; the same diagnostics again
+    // are not news, and typing clears the list itself.
+    std::string marks;
+    for (const auto& d : g.diagnostics) {
+        marks += std::to_string(d.range.line) + ":" + std::to_string(d.range.character) + " " +
+                 d.message + "\n";
     }
+    static std::string shown;
+    const bool same = marks == shown;
+    shown = marks;
+    if (same && !g.refs.empty()) return;
+    g.refs.clear();
     if (Rml::Element* box = by_id("problems")) {
         std::string html;
         for (const auto& d : g.diagnostics) {
             html += "<div class='problem'><span class='pline'>line " +
-                    std::to_string(d.line + 1) + "</span>" + esc(d.message) + "</div>";
+                    std::to_string(d.line + 1) + ":" + std::to_string(d.range.character + 1) +
+                    "</span>" + esc(d.message) + "</div>";
         }
         if (g.diagnostics.empty()) html = "<div class='noproblems'>No problems.</div>";
         box->SetInnerRML(html);
@@ -1624,13 +1785,6 @@ bool apply_code() {
         g.dirty = false;
         g.model_text = text;
         return false;
-    }
-    // `openepl inspect` reports forms only, so a module-level component in the
-    // file does not come back in the reload. Saying so beats a tray that
-    // quietly empties itself and reads as though the save deleted something.
-    if (!g.model.module_components.empty() && fresh.module_components.empty()) {
-        log("the tray is not rebuilt on reload — `openepl inspect` does not report "
-            "module-level components yet; they are still in the file.", "muted");
     }
     fresh.path = g.model.path;
     g.model = fresh;
@@ -2125,6 +2279,376 @@ bool on_key_down(Rml::Context* context, Rml::Input::KeyIdentifier key, int modif
     return true;
 }
 
+/* --- the editor's geometry ------------------------------------------------ */
+
+/// One glyph's width in the editor, measured from its font rather than
+/// assumed: the face is whichever monospace font the machine had, and a
+/// column landed one glyph off for every guess made here.
+int code_char_width() {
+    static int width = 0;
+    if (width > 0) return width;
+    Rml::Element* ed = by_id("fullcode");
+    if (!ed) return 8;
+    const Rml::FontFaceHandle face = ed->GetFontFaceHandle();
+    if (!face) return 8;
+    const Rml::String language;
+    const Rml::TextShapingContext shaping{language};
+    width = Rml::GetFontEngineInterface()->GetStringWidth(face, "M", shaping);
+    return width > 0 ? width : 8;
+}
+
+/// The source line and column under screen point (mx,my), 0-based, or false
+/// when the point is not over the editor's text.
+bool editor_position_at(int mx, int my, int& line, int& col) {
+    Rml::Element* ed = by_id("fullcode");
+    if (!ed || g.view != "code") return false;
+    const auto at = ed->GetAbsoluteOffset(Rml::BoxArea::Border);
+    const auto size = ed->GetBox().GetSize(Rml::BoxArea::Border);
+    if (mx < at.x || my < at.y || mx >= at.x + size.x || my >= at.y + size.y) return false;
+    line = ((int)(my - at.y) + g.code_scroll) / theme::CODE_LINE_H;
+    col = ((int)(mx - at.x) - theme::CODE_PAD_X) / code_char_width();
+    if (col < 0) col = 0;
+    return true;
+}
+
+/// The caret's line and column, 0-based, from the editor's selection.
+bool caret_position(int& line, int& col) {
+    auto* ta = dynamic_cast<Rml::ElementFormControlTextArea*>(by_id("fullcode"));
+    if (!ta) return false;
+    int start = 0, end = 0;
+    Rml::String selected;
+    ta->GetSelection(&start, &end, &selected);
+    const Rml::String text = ta->GetValue();
+    line = 0;
+    col = 0;
+    for (int i = 0; i < start && i < (int)text.size(); i++) {
+        if (text[(size_t)i] == '\n') { line++; col = 0; }
+        else col++;
+    }
+    return true;
+}
+
+/// Put the caret at a line and column and bring it into view. The offset is
+/// a character index into the editor's text, which is what the control's
+/// selection API takes.
+void jump_to(int line, int col) {
+    auto* ta = dynamic_cast<Rml::ElementFormControlTextArea*>(by_id("fullcode"));
+    if (!ta) return;
+    const Rml::String text = ta->GetValue();
+    int offset = 0, at_line = 0;
+    while (at_line < line && offset < (int)text.size()) {
+        if (text[(size_t)offset] == '\n') at_line++;
+        offset++;
+    }
+    for (int i = 0; i < col && offset < (int)text.size() && text[(size_t)offset] != '\n'; i++) {
+        offset++;
+    }
+    // Focus first: the control ignores a selection set while it is not
+    // focused, silently.
+    ta->Focus();
+    ta->SetSelectionRange(offset, offset);
+    // A third of the way down rather than at the top edge: the lines above a
+    // definition are the context it was written in.
+    Rml::Element* view = by_id("codeview");
+    const int viewport = view ? (int)view->GetBox().GetSize().y : 400;
+    g.code_scroll = std::max(0, line * theme::CODE_LINE_H - viewport / 3);
+    sync_highlight_scroll();
+}
+
+/// Where `sub <name>` is declared, as a 0-based line, or -1.
+int line_of_sub(const std::string& text, const std::string& name) {
+    int line = 0;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t nl = text.find('\n', start);
+        const std::string l = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        if (l.rfind("sub " + name, 0) == 0) {
+            const char after = l.size() > 4 + name.size() ? l[4 + name.size()] : '\0';
+            if (after == '\0' || after == '(' || after == ' ' || after == ':') return line;
+        }
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+        line++;
+    }
+    return -1;
+}
+
+/* --- hover, definition, references ----------------------------------------- */
+
+void hide_tip() {
+    if (Rml::Element* tip = by_id("tip")) tip->SetProperty("display", "none");
+}
+
+/// Show what the server said about the name under the pointer. The answer is
+/// markdown with a fenced signature first; the fences are dropped and the
+/// rest — "command", "subroutine", "declared on line 4" — is set in the
+/// chrome's face under it.
+void show_tip(const std::string& markdown, int x, int y) {
+    Rml::Element* tip = by_id("tip");
+    if (!tip) return;
+    std::string code, rest;
+    bool in_code = false;
+    size_t start = 0;
+    while (start <= markdown.size()) {
+        const size_t nl = markdown.find('\n', start);
+        const std::string l =
+            markdown.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        if (l.rfind("```", 0) == 0) {
+            in_code = !in_code;
+        } else if (in_code) {
+            code += (code.empty() ? "" : "\n") + l;
+        } else if (!l.empty()) {
+            rest += (rest.empty() ? "" : "\n") + l;
+        }
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+    }
+    std::string html = esc(code.empty() ? rest : code);
+    if (!code.empty() && !rest.empty()) html += "<div class='tipkind'>" + esc(rest) + "</div>";
+    tip->SetInnerRML(html);
+    int tx = x + 14, ty = y + 18;
+    if (tx > g.win_w - 540) tx = std::max(8, g.win_w - 540);
+    if (ty > g.win_h - 120) ty = y - 60;
+    tip->SetProperty("left", Rml::String(std::to_string(tx) + "px"));
+    tip->SetProperty("top", Rml::String(std::to_string(ty) + "px"));
+    tip->SetProperty("display", "block");
+}
+
+/// Ask the server about the spot the pointer has rested on. Called every
+/// frame; sends at most one request per resting place.
+void hover_tick() {
+    if (g.view != "code" || g.hover_x < 0 || g.hover_asked) return;
+    if (now_seconds() - g.hover_moved_at < 0.45) return;
+    // Nothing to ask is a settled state too: the frame loop stays awake while
+    // a hover is pending, and a pointer resting on the toolbox must not keep
+    // it spinning.
+    g.hover_asked = true;
+    int line = 0, col = 0;
+    if (!g.lsp.running() || !editor_position_at(g.hover_x, g.hover_y, line, col)) return;
+    g.hover_line = line;
+    g.hover_col = col;
+    g.hover_request = g.lsp.hover(line, col);
+    g.hover_shown_for = g.hover_request;
+}
+
+/// The list of places a name is used, in the Problems strip. Each row jumps.
+void render_references() {
+    Rml::Element* box = by_id("problems");
+    if (!box) return;
+    std::string html;
+    const std::string text = code_editor() ? std::string(code_editor()->GetValue()) : "";
+    for (size_t i = 0; i < g.refs.size(); i++) {
+        const auto& r = g.refs[i].range;
+        std::string line_text;
+        size_t start = 0;
+        for (int n = 0; n < r.line && start != std::string::npos; n++) {
+            start = text.find('\n', start);
+            if (start != std::string::npos) start++;
+        }
+        if (start != std::string::npos) {
+            const size_t nl = text.find('\n', start);
+            line_text = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        }
+        while (!line_text.empty() && line_text[0] == ' ') line_text.erase(0, 1);
+        html += "<div class='problem ref' oe-ref='" + std::to_string(i) + "'><span class='pline'>line " +
+                std::to_string(r.line + 1) + ":" + std::to_string(r.character + 1) + "</span>" +
+                esc(line_text) + "</div>";
+    }
+    if (g.refs.empty()) html = "<div class='noproblems'>No references.</div>";
+    box->SetInnerRML(html);
+    if (Rml::Element* tab = by_id("problemcount")) {
+        tab->SetInnerRML("REFERENCES (" + std::to_string(g.refs.size()) + ")");
+    }
+    size_output_pane();
+}
+
+/// Definition at the caret, and jump to it.
+void goto_definition() {
+    int line = 0, col = 0;
+    if (g.view != "code" || !caret_position(line, col)) return;
+    g.def_request = g.lsp.definition(line, col);
+    if (!g.def_request) set_status("no language server");
+}
+
+/// Every use of the name at the caret, listed in the Problems strip.
+void find_references() {
+    int line = 0, col = 0;
+    if (g.view != "code" || !caret_position(line, col)) return;
+    g.refs_request = g.lsp.references(line, col);
+    if (!g.refs_request) set_status("no language server");
+}
+
+/// Deliver whatever the server has answered. Once per frame; a reply that has
+/// not come yet is simply not there, and the UI never waits for it.
+void poll_answers() {
+    openepl::json::Value v;
+    if (!g.lsp.running()) {
+        // A server that has gone leaves no answers to wait for.
+        g.hover_request = g.def_request = g.refs_request = 0;
+        return;
+    }
+    if (g.hover_request && g.lsp.take_response(g.hover_request, v)) {
+        // The pointer may have moved on since; the answer is for where it
+        // rested, and only shown if it is still there.
+        const bool current = g.hover_request == g.hover_shown_for;
+        g.hover_request = 0;
+        const std::string text = openepl::lsp::hover_text(v);
+        if (!text.empty() && current) show_tip(text, g.hover_x, g.hover_y);
+    }
+    if (g.def_request && g.lsp.take_response(g.def_request, v)) {
+        g.def_request = 0;
+        const auto locs = openepl::lsp::read_locations(v);
+        if (locs.empty()) {
+            // A command is declared in C, not in this file: there is nowhere
+            // to go, and hover already shows what a jump would have shown.
+            set_status("no definition in this file — hover shows the signature");
+        } else {
+            jump_to(locs[0].range.line, locs[0].range.character);
+            set_status("line " + std::to_string(locs[0].range.line + 1));
+        }
+    }
+    if (g.refs_request && g.lsp.take_response(g.refs_request, v)) {
+        g.refs_request = 0;
+        g.refs = openepl::lsp::read_locations(v);
+        render_references();
+        set_status(std::to_string(g.refs.size()) + " reference(s)");
+    }
+}
+
+/* --- the handler gesture ---------------------------------------------------- */
+
+/// Parameter names from types, the way the language server and the checker
+/// spell them (`param_list` in validate.rs), so a handler written from the
+/// catalogue reads exactly like one the server wrote.
+std::string param_list(const std::vector<std::string>& types) {
+    std::string out;
+    std::vector<std::pair<std::string, int>> seen;
+    for (const auto& t : types) {
+        const char* stem = (t == "int" || t == "int64") ? "n"
+                           : t == "double"              ? "x"
+                           : t == "text"                ? "s"
+                           : t == "bool"                ? "flag"
+                           : t == "bytes"               ? "data"
+                                                        : "value";
+        int n = 0;
+        for (auto& s : seen) {
+            if (s.first == stem) n = ++s.second;
+        }
+        if (n == 0) { seen.push_back({stem, 1}); n = 1; }
+        const std::string name = n == 1 ? std::string(stem) : stem + std::to_string(n);
+        out += (out.empty() ? "" : ", ") + name + ": " + t;
+    }
+    return out;
+}
+
+/// The stub for a new handler, with what the event hands it.
+///
+/// The catalogue knows the parameters of every component this build was
+/// linked against. For one it was not — a timer, whose descriptor lives in
+/// the runtime — the language server is asked: the handler completion it
+/// offers other editors carries the full `sub` text, and the same text is
+/// used here. When neither answers the stub takes no parameters, which the
+/// checker accepts for every event.
+std::string handler_stub(const CatalogComponent& cc, const CatalogEvent& ev,
+                         const std::string& name, const std::string& file_text) {
+    if (ev.known) {
+        const std::string params = param_list(ev.params);
+        return "\nsub " + name + (params.empty() ? "" : "(" + params + ")") + "\n  \nend\n";
+    }
+    (void)cc;
+    // Where the wiring line now sits: the completion is asked for at the end
+    // of it, which is the position the server treats as "the handler's name".
+    int line = 0;
+    size_t start = 0;
+    while (start <= file_text.size()) {
+        const size_t nl = file_text.find('\n', start);
+        const std::string l =
+            file_text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        const size_t on = l.find("on " + ev.name + ":");
+        if (on != std::string::npos && l.find(name, on) != std::string::npos) {
+            g.lsp.did_change(file_text);
+            openepl::json::Value v;
+            const int id = g.lsp.completion(line, (int)l.size());
+            if (id && g.lsp.wait(id, v, 2000)) {
+                const openepl::json::Value& items =
+                    v.kind == openepl::json::Value::Kind::Array ? v : v["items"];
+                for (size_t i = 0; i < items.size(); i++) {
+                    const openepl::json::Value& it = items.at(i);
+                    if (it["label"].str() != name) continue;
+                    const std::string text = it["additionalTextEdits"].at(0)["newText"].str();
+                    if (!text.empty()) return text;
+                }
+            }
+            break;
+        }
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+        line++;
+    }
+    return "\nsub " + name + "\n  \nend\n";
+}
+
+/// Double-click on a component: its default event gets a handler, and the
+/// editor opens inside it. Delphi's single most-used gesture.
+///
+/// The default event is the first one the component declares — the
+/// descriptor's order is the author's order, and every author puts the one
+/// that matters first: click for a button, change for an editbox, tick for a
+/// timer, select for a grid. No table by name here, so a kit's component gets
+/// the gesture with no change to the IDE.
+void open_handler(const std::string& id) {
+    Component* c = g.model.find(id);
+    if (!c) return;
+    const CatalogComponent* cc = g.catalog.find(c->type_name);
+    if (!cc || cc->events.empty()) {
+        set_status(c->type_name + " has no events to handle");
+        return;
+    }
+    const CatalogEvent ev = cc->events.front();
+    std::string name;
+    if (const std::string* h = c->handler(ev.name)) name = *h;
+    if (name.empty() || !g.model.has_sub(name)) {
+        if (name.empty()) {
+            name = id + "_" + ev.name;
+            push_undo();
+            c->set_handler(ev.name, name);
+            mark_dirty();
+        }
+        // The wiring goes through the same save as any designer edit; the
+        // stub is appended after it, because save_model's own stubs carry no
+        // parameters and this event may hand some over. A stub the inspector
+        // already promised for this name would be written twice otherwise.
+        for (size_t i = 0; i < g.pending_subs.size(); i++) {
+            if (g.pending_subs[i] == name) g.pending_subs.erase(g.pending_subs.begin() + (long)i--);
+        }
+        std::string err;
+        if (!save_model(g.model, g.pending_subs, property_needs_quotes, err)) {
+            set_status("save failed: " + err);
+            return;
+        }
+        g.pending_subs.clear();
+        std::string text;
+        if (FILE* f = std::fopen(g.model.path.c_str(), "rb")) {
+            // Re-read rather than reuse: save_model has just moved lines.
+            char buf[4096];
+            size_t n;
+            while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
+            std::fclose(f);
+        }
+        const std::string stub = handler_stub(*cc, ev, name, text);
+        if (FILE* f = std::fopen(g.model.path.c_str(), "ab")) {
+            std::fwrite(stub.data(), 1, stub.size(), f);
+            std::fclose(f);
+        }
+        g.model.subs.push_back(name);
+        g.dirty = false;
+        set_status("wired " + id + "." + ev.name + " to " + name);
+    }
+    set_view("code");
+    const int line = line_of_sub(g.model_text, name);
+    if (line >= 0) jump_to(line + 1, 2);
+}
+
 /* --- events --------------------------------------------------------------- */
 
 struct Listener : Rml::EventListener {
@@ -2167,6 +2691,11 @@ struct Listener : Rml::EventListener {
                     set_status("code edited — Ctrl+S to save");
                 }
                 refresh_highlight();
+                // A references list describes the text before this keystroke.
+                if (!g.refs.empty()) {
+                    g.refs.clear();
+                    render_diagnostics();
+                }
                 // Diagnostics as you type: the server re-checks on every
                 // change, exactly as it does for any other editor.
                 if (auto* ed2 = code_editor()) g.lsp.did_change(ed2->GetValue());
@@ -2224,6 +2753,12 @@ struct Listener : Rml::EventListener {
             if (ctrl && key == Rml::Input::KI_C) { copy_selection(); return; }
             if (ctrl && key == Rml::Input::KI_V) { paste_clipboard(); return; }
             if (ctrl && key == Rml::Input::KI_S) { save(); return; }
+            // F12 and Shift+F12, as in every editor that has them.
+            if (key == Rml::Input::KI_F12) {
+                shift ? find_references() : goto_definition();
+                return;
+            }
+            if (g.view == "code") return;   // the rest are designer gestures
             if (key == Rml::Input::KI_DELETE) { delete_selection(); return; }
             // Nudge the selection with the arrow keys: 1px normally, a grid
             // step with shift.
@@ -2383,6 +2918,11 @@ struct Listener : Rml::EventListener {
                     }
                     return;
                 }
+                if (e->HasAttribute("oe-ref")) {
+                    const size_t i = (size_t)e->GetAttribute<int>("oe-ref", 0);
+                    if (i < g.refs.size()) jump_to(g.refs[i].range.line, g.refs[i].range.character);
+                    return;
+                }
                 if (e->HasAttribute("oe-id")) {
                     select(e->GetAttribute<Rml::String>("oe-id", ""),
                            ev.GetParameter<bool>("ctrl_key", false));
@@ -2445,6 +2985,20 @@ struct Listener : Rml::EventListener {
             for (Rml::Element* e = el; e; e = e->GetParentNode()) {
                 if (!e->HasAttribute("oe-id")) continue;
                 const std::string id = e->GetAttribute<Rml::String>("oe-id", "");
+                // A second press on the same component, soon and close: the
+                // handler gesture, and not the start of a drag.
+                const double t = now_seconds();
+                const bool twice = id == g.last_press_id && t - g.last_press_time < 0.5 &&
+                                   std::abs(mx - g.last_press_x) <= 4 &&
+                                   std::abs(my - g.last_press_y) <= 4;
+                g.last_press_id = twice ? std::string() : id;
+                g.last_press_time = t;
+                g.last_press_x = mx;
+                g.last_press_y = my;
+                if (twice) {
+                    open_handler(id);
+                    return;
+                }
                 if (ev.GetParameter<bool>("ctrl_key", false)) {
                     select(id, true);   // extend the selection instead of dragging
                 } else {
@@ -2459,6 +3013,20 @@ struct Listener : Rml::EventListener {
         if (type == "mousemove") {
             const int mx = ev.GetParameter<int>("mouse_x", 0);
             const int my = ev.GetParameter<int>("mouse_y", 0);
+
+            // Hover-on-rest: the clock restarts on every move, and the tip
+            // for the last spot goes away with it.
+            if (mx != g.hover_x || my != g.hover_y) {
+                g.hover_x = mx;
+                g.hover_y = my;
+                g.hover_moved_at = now_seconds();
+                g.hover_asked = false;
+                // A request already out stays out, so its answer is taken
+                // (and dropped) rather than left queued; it just no longer
+                // matches the spot the tip would be shown for.
+                g.hover_shown_for = 0;
+                hide_tip();
+            }
 
             if (!g.splitting.empty()) {
                 int v = g.split_v0;
@@ -2721,6 +3289,161 @@ void run_script(const char* script) {
                 }
             }
             else if (verb == "save") save();
+            else if (verb == "click" || verb == "dblclick") {
+                // A real press through the context, on the element with that
+                // id — the same path a mouse takes, so a click on the Code tab
+                // here runs set_view from inside the event listener exactly
+                // as the user's click does. Twice for a double-click, which is
+                // detected by the listener rather than the substrate.
+                g.context->Update();
+                Rml::Element* e = by_id(arg.c_str());
+                if (!e) {
+                    // Components — on the canvas or in the tray — carry their
+                    // id as an attribute rather than as the element's id.
+                    for (const char* holder : {"canvas", "traylist"}) {
+                        Rml::Element* box = by_id(holder);
+                        for (int i = 0; box && i < box->GetNumChildren(); i++) {
+                            if (box->GetChild(i)->GetAttribute<Rml::String>("oe-id", "") == arg) {
+                                e = box->GetChild(i);
+                            }
+                        }
+                    }
+                }
+                if (e) {
+                    const auto at = e->GetAbsoluteOffset(Rml::BoxArea::Border);
+                    const auto size = e->GetBox().GetSize(Rml::BoxArea::Border);
+                    const int cx = (int)(at.x + size.x / 2), cy = (int)(at.y + size.y / 2);
+                    for (int n = 0; n < (verb == "dblclick" ? 2 : 1); n++) {
+                        g.context->ProcessMouseMove(cx, cy, 0);
+                        g.context->ProcessMouseButtonDown(0, 0);
+                        g.context->ProcessMouseButtonUp(0, 0);
+                        g.context->Update();
+                    }
+                    std::printf("%s: %s\n", verb.c_str(), arg.c_str());
+                } else {
+                    std::printf("%s: %s NOT FOUND\n", verb.c_str(), arg.c_str());
+                }
+                std::fflush(stdout);
+            }
+            else if (verb == "frame") {
+                // One pass of the interactive loop's body, then a present, so
+                // what a dump shows is what the first frame after a gesture
+                // shows — not the third.
+                sync_highlight_scroll();
+                g.lsp.poll();
+                if (g.lsp.has_update()) {
+                    g.lsp.clear_update();
+                    g.diagnostics = g.lsp.diagnostics();
+                    render_diagnostics();
+                }
+                hover_tick();
+                poll_answers();
+                g.context->Update();
+                Backend::BeginFrame();
+                g.context->Render();
+                Backend::PresentFrame();
+            }
+            else if (verb == "hovergrip") {
+                // Rest the pointer on a selection handle and report the cursor
+                // the platform was asked for. A dump cannot show the pointer.
+                g.context->Update();
+                Rml::Element* found = nullptr;
+                if (Rml::Element* overlay = by_id("overlay")) {
+                    for (int i = 0; i < overlay->GetNumChildren(); i++) {
+                        Rml::Element* h = overlay->GetChild(i);
+                        if (h->GetAttribute<Rml::String>("oe-grip", "") == arg ||
+                            h->GetAttribute<Rml::String>("oe-formgrip", "") == arg) {
+                            found = h;
+                        }
+                    }
+                }
+                if (found) {
+                    const auto at = found->GetAbsoluteOffset(Rml::BoxArea::Border);
+                    const auto size = found->GetBox().GetSize(Rml::BoxArea::Border);
+                    g.context->ProcessMouseMove((int)(at.x + size.x / 2), (int)(at.y + size.y / 2), 0);
+                    g.context->Update();
+                }
+                Rml::Element* over = g.context->GetHoverElement();
+                std::printf("cursor: %s %s  (over <%s class='%s' cursor=%s>)\n", arg.c_str(),
+                            found ? g.cursor_name.c_str() : "(no such grip)",
+                            over ? over->GetTagName().c_str() : "none",
+                            over ? over->GetAttribute<Rml::String>("class", "").c_str() : "",
+                            over ? over->GetProperty(Rml::PropertyId::Cursor)->ToString().c_str()
+                                 : "");
+                std::fflush(stdout);
+            }
+            else if (verb == "hoverat" || verb == "gotodef" || verb == "refs") {
+                // The language-server gestures, at a 1-based line:column in
+                // the editor. `hoverat` rests the pointer on that spot and
+                // reports the tip; the other two move the caret there and
+                // press F12 / Shift+F12 through the same functions the key
+                // reaches, then report where the caret went or what was found.
+                int line = 1, col = 1;
+                std::sscanf(arg.c_str(), "%d,%d", &line, &col);
+                line--;
+                col--;
+                if (g.view != "code") set_view("code");
+                g.context->Update();
+                if (verb == "hoverat") {
+                    // Into view first: a spot below the fold is not a spot the
+                    // pointer can rest on.
+                    jump_to(line, col);
+                    g.context->Update();
+                    Rml::Element* ed = by_id("fullcode");
+                    const auto at = ed->GetAbsoluteOffset(Rml::BoxArea::Border);
+                    const int mx = (int)at.x + theme::CODE_PAD_X + col * code_char_width() + 2;
+                    const int my = (int)at.y + line * theme::CODE_LINE_H - g.code_scroll + 4;
+                    g.context->ProcessMouseMove(mx, my, 0);
+                    g.context->Update();
+                    g.hover_moved_at -= 1.0;      // the rest has already happened
+                    hover_tick();
+                    openepl::json::Value v;
+                    std::string text;
+                    if (g.hover_request && g.lsp.wait(g.hover_request, v, 3000)) {
+                        text = openepl::lsp::hover_text(v);
+                        g.hover_request = 0;
+                        if (!text.empty()) show_tip(text, mx, my);
+                    }
+                    for (char& ch : text) {
+                        if (ch == '\n') ch = ' ';
+                    }
+                    Rml::Element* tip = by_id("tip");
+                    std::printf("hover: %d,%d asked=%d,%d tip=%s | %s\n", line + 1, col + 1,
+                                g.hover_line + 1, g.hover_col + 1,
+                                tip ? tip->GetProperty(Rml::PropertyId::Display)->ToString().c_str()
+                                    : "?",
+                                text.c_str());
+                } else {
+                    jump_to(line, col);
+                    g.context->Update();
+                    if (verb == "gotodef") goto_definition();
+                    else find_references();
+                    const int id = verb == "gotodef" ? g.def_request : g.refs_request;
+                    if (id) g.lsp.pump_until(id, 3000);
+                    // The reply is delivered the way the frame loop delivers it.
+                    poll_answers();
+                    g.context->Update();
+                    int cl = 0, cc = 0;
+                    caret_position(cl, cc);
+                    if (verb == "gotodef") {
+                        std::printf("definition: caret %d,%d scroll=%d\n", cl + 1, cc + 1,
+                                    g.code_scroll);
+                    } else {
+                        std::printf("references: %zu\n", g.refs.size());
+                        for (const auto& r : g.refs) {
+                            std::printf("  line %d:%d\n", r.range.line + 1, r.range.character + 1);
+                        }
+                    }
+                }
+                std::fflush(stdout);
+            }
+            else if (verb == "caret") {
+                g.context->Update();
+                int cl = 0, cc = 0;
+                caret_position(cl, cc);
+                std::printf("caret: %d,%d scroll=%d\n", cl + 1, cc + 1, g.code_scroll);
+                std::fflush(stdout);
+            }
             else if (verb == "buildstart") {
                 // Start a build and leave it running, so a dumped frame shows
                 // the IDE mid-build with its activity indicator up.
@@ -2956,7 +3679,7 @@ std::string run_welcome(const std::string& family) {
 
     Rml::ElementDocument* doc = g.context->LoadDocumentFromMemory(
         openepl::welcome::welcome_markup(family, dim.x, dim.y, templates, recent,
-                                         asset_path("openepl-wordmark.png")));
+                                         asset_path("openepl-wordmark.png"), g.openepl_bin));
     if (!doc) return "";
     doc->Show();
 
@@ -2994,14 +3717,6 @@ std::string run_welcome(const std::string& family) {
             }
         }
     }
-    if (const char* pick = std::getenv("OPENEPL_DESIGNER_WELCOME_PICK")) {
-        doc->Close();
-        g.context->Update();
-        const std::string want(pick);
-        if (want.rfind("open:", 0) == 0) return want.substr(5);
-        return create_project(want, templates);
-    }
-
     std::string chosen;
     struct Pick : Rml::EventListener {
         std::string* out;
@@ -3016,6 +3731,18 @@ std::string run_welcome(const std::string& family) {
                     *out = "new:" + e->GetAttribute<Rml::String>("oe-new", "");
                     return;
                 }
+                if (e->HasAttribute("oe-browse")) {
+                    *out = "browse:" + e->GetAttribute<Rml::String>("oe-browse", "");
+                    return;
+                }
+                if (e->HasAttribute("oe-browse-dir")) {
+                    *out = "browsedir:" + e->GetAttribute<Rml::String>("oe-browse-dir", "");
+                    return;
+                }
+                if (e->HasAttribute("oe-browse-cancel")) {
+                    *out = "cancel";
+                    return;
+                }
             }
         }
     } pick;
@@ -3023,14 +3750,84 @@ std::string run_welcome(const std::string& family) {
     pick.templates = &templates;
     doc->AddEventListener("click", &pick);
 
-    while (chosen.empty()) {
-        if (!Backend::ProcessEvents(g.context, nullptr, true)) break;   // window closed
+    // The path browser is a second document that replaces the welcome screen
+    // and hands back to it. Documents are swapped here, between frames, never
+    // inside the listener that is still walking the clicked element's parents.
+    // A directory entry carries only its path, so the mode is remembered from
+    // the tile that opened the browser.
+    std::string browse_mode;
+    auto swap_document = [&](const std::string& markup) {
+        doc->Close();
+        g.context->Update();
+        doc = g.context->LoadDocumentFromMemory(markup);
+        if (!doc) return false;
+        doc->Show();
+        doc->AddEventListener("click", &pick);
+        chosen.clear();
+        return true;
+    };
+    auto start_dir = []() {
+        char buf[4096];
+        if (::getcwd(buf, sizeof buf)) return std::string(buf);
+        const char* home = std::getenv("HOME");
+        return std::string(home && *home ? home : "/");
+    };
+
+    if (const char* pick = std::getenv("OPENEPL_DESIGNER_WELCOME_PICK")) {
+        const std::string want(pick);
+        // `browse:<mode>` swaps in the path browser and dumps it, so the same
+        // document swap a click performs can be looked at without a click.
+        if (want.rfind("browse:", 0) == 0) {
+            if (swap_document(openepl::welcome::browse_markup(
+                    family, dim.x, dim.y, start_dir(), want.substr(7), g.openepl_bin))) {
+                for (int i = 0; i < 3; i++) {
+                    Backend::ProcessEvents(g.context, nullptr, false);
+                    g.context->Update();
+                    Backend::BeginFrame();
+                    g.context->Render();
+                    Backend::PresentFrame();
+                }
+                dump_to(std::getenv("OPENEPL_DESIGNER_BROWSE_DUMP"));
+                doc->Close();
+            }
+            g.context->Update();
+            return "";
+        }
+        doc->Close();
+        g.context->Update();
+        if (want.rfind("open:", 0) == 0) return want.substr(5);
+        return create_project(want, templates);
+    }
+
+    while (true) {
+        if (!Backend::ProcessEvents(g.context, nullptr, true)) {   // window closed
+            chosen.clear();
+            break;
+        }
         g.context->Update();
         Backend::BeginFrame();
         g.context->Render();
         Backend::PresentFrame();
+        if (chosen.empty()) continue;
+
+        std::string dir;
+        if (chosen.rfind("browse:", 0) == 0) {
+            browse_mode = chosen.substr(7);
+            dir = start_dir();
+        } else if (chosen.rfind("browsedir:", 0) == 0) {
+            dir = chosen.substr(10);
+        } else if (chosen == "cancel") {
+            if (!swap_document(openepl::welcome::welcome_markup(
+                    family, dim.x, dim.y, templates, recent,
+                    asset_path("openepl-wordmark.png"), g.openepl_bin))) break;
+            continue;
+        } else {
+            break;
+        }
+        if (!swap_document(openepl::welcome::browse_markup(family, dim.x, dim.y, dir,
+                                                           browse_mode, g.openepl_bin))) break;
     }
-    doc->Close();
+    if (doc) doc->Close();
     g.context->Update();
 
     if (chosen.rfind("new:", 0) == 0) {
@@ -3090,14 +3887,15 @@ int main(int argc, char** argv) {
         const std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
             std::fprintf(stderr,
-                         "usage: openepl-designer [project.oir] [path/to/openepl]\n\n"
+                         "usage: openepl-designer [project.oir|project.oeproj|dir] [path/to/openepl]\n\n"
                          "With no project, Studio opens its welcome screen.\n\n"
                          "Environment:\n"
                          "  OPENEPL_DESIGNER_SCRIPT   run a scripted session headlessly\n"
                          "  OPENEPL_DESIGNER_DEBUG    report chrome/toolbox diagnostics\n");
             return 2;
         }
-        const bool is_project = arg.size() > 4 && arg.compare(arg.size() - 4, 4, ".oir") == 0;
+        const bool is_project = (arg.size() > 4 && arg.compare(arg.size() - 4, 4, ".oir") == 0) ||
+                                openepl::welcome::is_project_path(arg);
         if (is_project) {
             path = arg;
         } else {
@@ -3127,7 +3925,10 @@ int main(int argc, char** argv) {
             }
         }
     }
-    Rml::SetSystemInterface(Backend::GetSystemInterface());
+    // Ours rather than the backend's, for the directional resize cursors.
+    // Static so it outlives Rml::Shutdown, which still holds the pointer.
+    static StudioSystem* system = new StudioSystem(SDL_GL_GetCurrentWindow());
+    Rml::SetSystemInterface(system);
     Rml::SetRenderInterface(Backend::GetRenderInterface());
     Rml::Initialise();
 
@@ -3170,6 +3971,9 @@ int main(int argc, char** argv) {
     const std::string tile_path = cache_file("openepl_dotgrid.tga");
     const std::string dot_tile = write_dot_tile(tile_path, 10).empty() ? "" : "/" + tile_path;
     g.context = Rml::CreateContext("studio", Rml::Vector2i(INIT_W, INIT_H));
+    // Off by default in RmlUi: without this every `cursor:` rule in the
+    // stylesheet is inert, and a resize handle looks like anything else.
+    g.context->EnableMouseCursor(true);
 
     // Splash first, and painted before the slow part starts. Loading the
     // component registry shells out to `openepl inspect`; done before the
@@ -3288,7 +4092,16 @@ int main(int argc, char** argv) {
     // when idle, but while an app is running the user is clicking in *its*
     // window, not ours — and a blocked loop never drains the app's output pipe,
     // so its prints would only appear when you happened to jiggle Studio.
-    while (Backend::ProcessEvents(g.context, &on_key_down, g.running_app <= 0 && g.build_pid <= 0)) {
+    // Nor while an answer from the language server is awaited, or the pointer
+    // is resting on the editor: the hover fires on a timer, and a loop that
+    // sleeps until the next input event would show the tip on the next
+    // keystroke instead.
+    auto idle = [] {
+        const bool awaiting = g.hover_request || g.def_request || g.refs_request ||
+                              (g.view == "code" && g.hover_x >= 0 && !g.hover_asked);
+        return g.running_app <= 0 && g.build_pid <= 0 && !awaiting;
+    };
+    while (Backend::ProcessEvents(g.context, &on_key_down, idle())) {
         poll_build();
         poll_app();
         if (g.view == "code") sync_highlight_scroll();
@@ -3298,6 +4111,8 @@ int main(int argc, char** argv) {
             g.diagnostics = g.lsp.diagnostics();
             render_diagnostics();
         }
+        hover_tick();
+        poll_answers();
         // Follow the OS window. The backend resizes the context; the layout has
         // to follow or everything past the old size is left unpainted.
         const auto dim = g.context->GetDimensions();

@@ -58,9 +58,10 @@ anything else is a console one.
 ## Editing
 
 `bin/openepl lsp` is a language server: diagnostics as you type, completion,
-hover, go-to-definition and find-references. Point any LSP-capable editor at it
-— `docs/editors.md` has ready-made configuration for Neovim, VS Code, Helix and
-Zed, and `editors/vscode/` is a working extension with syntax highlighting.
+signature help, hover, go-to-definition and find-references. Point any
+LSP-capable editor at it — `docs/editors.md` has ready-made configuration for
+Neovim, VS Code, Helix and Zed, and `editors/vscode/` is a working extension
+with syntax highlighting.
 
 ## What this is not, yet
 
@@ -70,8 +71,17 @@ Zed, and `editors/vscode/` is a working extension with syntax highlighting.
   disassembled — the flag buys a smaller, harder-to-attack program, not secrecy.
 * **No debugger.** You get a program's output and its exit code in the IDE
   console, not breakpoints or stepping.
+* **No TLS in this bundle.** It ships no TLS stack, so `net_http_get` on an
+  `https://` URL fails with a message rather than downgrading to plaintext,
+  and the `httpserver` component is plaintext regardless. Building the
+  toolchain from source with `tools/fetch-mbedtls.sh` run is what adds
+  https.
+* **Memory is reclaimed at exit**, not before. A program that runs for days
+  grows with the work it has done.
 
-The project's design notes, specifications and decision log live in the source
-repository, not in this download.
+The full documentation — a tour of the language, the component model, the
+IDE, and the generated reference for every command and component — is at
+https://axdsan.github.io/openepl/. The project's design notes, specifications
+and decision log live in the source repository, not in this download.
 
 Licensed MIT OR BSD-3-Clause. See `LICENSE` and `THIRD-PARTY.md`.

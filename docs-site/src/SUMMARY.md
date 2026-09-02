@@ -10,8 +10,10 @@
 
 # The language
 
+- [A tour of the language](./tour.md)
 - [Language guide](./language.md)
 - [Forms and events](./forms-and-events.md)
+- [Components](./components.md)
 - [Networking](./networking.md)
 - [Build targets](./build-targets.md)
 - [Kits](./kits.md)

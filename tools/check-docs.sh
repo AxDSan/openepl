@@ -38,6 +38,19 @@ for i, m in enumerate(re.finditer(r'^```([a-zA-Z]*)\n(.*?)^```', text, re.S | re
 PY
 done
 
+# The landing page is hand-written HTML rather than Markdown, and its sample is
+# the first OpenEPL most visitors read. Its <pre> block is highlighted with
+# spans, so strip those and undo the entity escaping before compiling it.
+python3 - docs-site/landing/index.html "$WORK" <<'PY'
+import html, re, sys
+page, work = sys.argv[1], sys.argv[2]
+text = open(page, encoding='utf-8').read()
+for i, m in enumerate(re.finditer(r'<pre>(.*?)</pre>', text, re.S)):
+    body = html.unescape(re.sub(r'</?span[^>]*>', '', m.group(1)))
+    if re.search(r'^module\s+\w+', body, re.M):
+        open(f'{work}/landing_{i}.oir', 'w', encoding='utf-8').write(body + '\n')
+PY
+
 shopt -s nullglob
 for sample in "$WORK"/*.oir; do
     name="$(basename "$sample" .oir)"
@@ -59,4 +72,27 @@ done
 
 echo
 echo "  $pass sample(s) compiled, $fail failed"
-[ "$fail" -eq 0 ]
+
+# The landing page states how many kits, commands and components ship. Those
+# numbers are the kind of claim that goes stale silently, so they are held to
+# what the toolchain answers: bundled kits, and every command and component
+# that core plus those kits declare. A count that included a project or user
+# kit would depend on where the check happened to run.
+counts_ok=1
+kits=$("$OPENEPL" kits | awk '/^kit: / && $4 == "bundled" { print $2 }')
+"$OPENEPL" commands > "$WORK/all.txt"
+for k in $kits; do "$OPENEPL" commands --use "$k" >> "$WORK/all.txt"; done
+want_kits=$(wc -w <<<"$kits")
+want_cmds=$(sed -n 's/^command: //p' "$WORK/all.txt" | sort -u | wc -l)
+want_comps=$(sed -n 's/^component: //p' "$WORK/all.txt" | sort -u | wc -l)
+for pair in "kit-count $want_kits" "command-count $want_cmds" "component-count $want_comps"; do
+    set -- $pair
+    have=$(sed -n "s/.*id=\"$1\">\([0-9]*\)<.*/\1/p" docs-site/landing/index.html)
+    if [ "$have" != "$2" ]; then
+        echo "  landing page says $1 is ${have:-missing}; the toolchain says $2"
+        counts_ok=0
+    fi
+done
+[ "$counts_ok" -eq 1 ] && echo "  landing counts match the toolchain ($want_kits kits, $want_cmds commands, $want_comps components)"
+
+[ "$fail" -eq 0 ] && [ "$counts_ok" -eq 1 ]

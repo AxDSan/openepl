@@ -6,15 +6,20 @@
  *   the section it files under, and the components it declares — including
  *   kits the IDE has never heard of, which is the whole promise of the kit
  *   system: a kit dropped into `kits/` appears in Studio with no IDE change.
+ *   The listing says whether each component is visual and which editor a
+ *   property wants, so a kit's control files under its own heading whether or
+ *   not this build was linked against it.
  *
- *   The linked `ui_libinfo.c` adds what those lines do not carry yet: whether
- *   a component is visual, each property's default, and the `editor` hint the
- *   inspector needs to offer a colour swatch instead of a hex field.
+ *   The linked `ui_libinfo.c` adds what those lines do not carry: each
+ *   property's default, and what every event hands its handler. The listing
+ *   names events but not their parameters, so for a component the linked
+ *   table does not know the parameters stay unknown here — and the language
+ *   server, which does know, is asked instead.
  *
- * A component the CLI reports and the linked table does not know is treated as
- * NON-VISUAL. The two mistakes are not symmetric: a visual component in the
- * tray is a nuisance, and a non-visual one dropped into a form is source the
- * validator rejects.
+ * A component the CLI reports without a `kind:` line and the linked table
+ * does not know is treated as NON-VISUAL. The two mistakes are not symmetric:
+ * a visual component in the tray is a nuisance, and a non-visual one dropped
+ * into a form is source the validator rejects.
  */
 #ifndef OPENEPL_DESIGNER_CATALOG_H
 #define OPENEPL_DESIGNER_CATALOG_H
@@ -37,13 +42,33 @@ struct CatalogProp {
     bool has_default = false;
 };
 
+struct CatalogEvent {
+    std::string name;
+    /// What the event hands its handler, as type names. `known` is false when
+    /// no source could say: the listing does not carry parameters, and only
+    /// the linked table fills them in.
+    bool known = false;
+    std::vector<std::string> params;
+};
+
 struct CatalogComponent {
     std::string type_name;
     std::string kit;             // "" for the ones the runtime itself provides
     std::string section;         // the toolbox heading it files under
     bool visual = false;
+    /// Whether `visual` came from the listing. When it did, the linked table
+    /// must not overrule it: the CLI reads the same descriptor, and reads the
+    /// current one.
+    bool kind_known = false;
     std::vector<CatalogProp> props;
-    std::vector<std::string> events;
+    std::vector<CatalogEvent> events;
+
+    const CatalogEvent* event(const std::string& name) const {
+        for (const auto& e : events) {
+            if (e.name == name) return &e;
+        }
+        return nullptr;
+    }
 };
 
 struct Catalog {
@@ -58,6 +83,15 @@ struct Catalog {
         return nullptr;
     }
 };
+
+/// The OpenEPL spelling of a slot tag, for what the linked table declares.
+inline const char* tag_name(int tag) {
+    return tag == OE_SDT_INT      ? "int"
+           : tag == OE_SDT_INT64  ? "int64"
+           : tag == OE_SDT_DOUBLE ? "double"
+           : tag == OE_SDT_BOOL   ? "bool"
+                                  : "text";
+}
 
 namespace catalog_detail {
 
@@ -125,49 +159,91 @@ inline std::vector<KitLine> read_kits(const std::string& bin) {
     return kits;
 }
 
-/// The components `openepl commands` reports for `uses`, with their declared
-/// properties and events.
-inline std::vector<CatalogComponent> read_components(const std::string& bin,
-                                                     const std::string& use) {
+/// The components in one `openepl commands` listing, with their declared
+/// properties, editors, kind and events. Takes the lines rather than running
+/// the command so the reading can be tested against a listing no installed
+/// kit produces.
+inline std::vector<CatalogComponent> parse_components(const std::vector<std::string>& lines,
+                                                      const std::string& use) {
     std::vector<CatalogComponent> out;
-    const std::string cmd = use.empty() ? bin + " commands" : bin + " commands --use " + use;
-    for (const auto& line : run(cmd)) {
+    auto named = [&](const std::string& type_name) -> CatalogComponent* {
+        for (auto& c : out) {
+            if (c.type_name == type_name) return &c;
+        }
+        return nullptr;
+    };
+    for (const auto& line : lines) {
         std::string rest;
         if (after(line, "component: ", rest)) {
             const auto w = words(rest);
-            if (!w.empty()) out.push_back(CatalogComponent{w[0], use, "", false, {}, {}});
+            if (!w.empty()) {
+                CatalogComponent c;
+                c.type_name = w[0];
+                c.kit = use;
+                out.push_back(c);
+            }
+        } else if (after(line, "kind: ", rest)) {
+            const auto w = words(rest);
+            if (w.size() >= 2) {
+                if (CatalogComponent* c = named(w[0])) {
+                    c->visual = (w[1] == "visual");
+                    c->kind_known = true;
+                }
+            }
         } else if (after(line, "property: ", rest)) {
             const auto w = words(rest);
-            if (w.size() >= 3 && !out.empty()) {
-                for (auto& c : out) {
-                    if (c.type_name == w[0]) c.props.push_back({w[1], w[2], "", "", false});
+            if (w.size() >= 3) {
+                if (CatalogComponent* c = named(w[0])) c->props.push_back({w[1], w[2], "", "", false});
+            }
+        } else if (after(line, "editor: ", rest)) {
+            const auto w = words(rest);
+            if (w.size() >= 3) {
+                if (CatalogComponent* c = named(w[0])) {
+                    for (auto& p : c->props) {
+                        if (p.name == w[1]) p.editor = w[2];
+                    }
                 }
             }
         } else if (after(line, "event: ", rest)) {
             const auto w = words(rest);
             if (w.size() >= 2) {
-                for (auto& c : out) {
-                    if (c.type_name == w[0]) c.events.push_back(w[1]);
-                }
+                if (CatalogComponent* c = named(w[0])) c->events.push_back({w[1], false, {}});
             }
         }
     }
     return out;
 }
 
-/// Fill in what only the linked metadata table knows: visual or not, each
-/// property's default, and the editor hint.
+inline std::vector<CatalogComponent> read_components(const std::string& bin,
+                                                     const std::string& use) {
+    const std::string cmd = use.empty() ? bin + " commands" : bin + " commands --use " + use;
+    return parse_components(run(cmd), use);
+}
+
+/// Fill in what only the linked metadata table knows: each property's
+/// default, what each event hands its handler, and — for a listing old enough
+/// to have no `kind:` line — whether the component is visual.
 inline void enrich_from_libinfo(CatalogComponent& c) {
     const OpenEPL_ComponentDesc* desc = describe(c.type_name.c_str());
     if (!desc) return;
-    c.visual = (desc->kind == OE_COMPONENT_VISUAL);
+    if (!c.kind_known) c.visual = (desc->kind == OE_COMPONENT_VISUAL);
     for (auto& p : c.props) {
         for (int i = 0; i < desc->property_count; i++) {
             if (p.name != desc->properties[i].name) continue;
-            if (desc->properties[i].editor) p.editor = desc->properties[i].editor;
+            if (desc->properties[i].editor && p.editor.empty()) p.editor = desc->properties[i].editor;
             if (desc->properties[i].default_value) {
                 p.default_value = desc->properties[i].default_value;
                 p.has_default = true;
+            }
+        }
+    }
+    for (auto& e : c.events) {
+        for (int i = 0; i < desc->event_count; i++) {
+            if (e.name != desc->events[i].name) continue;
+            e.known = true;
+            e.params.clear();
+            for (int j = 0; j < desc->events[i].param_count; j++) {
+                e.params.push_back(tag_name(desc->events[i].param_tags[j]));
             }
         }
     }
@@ -232,15 +308,12 @@ inline Catalog build_catalog(const std::string& openepl_bin) {
             c.type_name = d.name;
             c.kit = "ui";
             c.visual = (d.kind == OE_COMPONENT_VISUAL);
+            c.kind_known = true;
             c.section = c.visual ? ui_section : "System";
             for (int j = 0; j < d.property_count; j++) {
                 CatalogProp p;
                 p.name = d.properties[j].name;
-                p.type = d.properties[j].tag == OE_SDT_INT      ? "int"
-                         : d.properties[j].tag == OE_SDT_INT64  ? "int64"
-                         : d.properties[j].tag == OE_SDT_DOUBLE ? "double"
-                         : d.properties[j].tag == OE_SDT_BOOL   ? "bool"
-                                                                : "text";
+                p.type = tag_name(d.properties[j].tag);
                 if (d.properties[j].editor) p.editor = d.properties[j].editor;
                 if (d.properties[j].default_value) {
                     p.default_value = d.properties[j].default_value;
@@ -248,7 +321,8 @@ inline Catalog build_catalog(const std::string& openepl_bin) {
                 }
                 c.props.push_back(p);
             }
-            for (int j = 0; j < d.event_count; j++) c.events.push_back(d.events[j].name);
+            for (int j = 0; j < d.event_count; j++) c.events.push_back({d.events[j].name, false, {}});
+            enrich_from_libinfo(c);
             cat.components.push_back(c);
         }
     }

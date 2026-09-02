@@ -107,5 +107,6 @@ underlines is something that would genuinely fail to build.
   first character of a text is at position 1, and `0` is free to mean *not
   found* — which is what `find` answers when there is nothing there.
 
-Continue with [Your first GUI app](./first-gui-app.md), or read the
+Continue with [Your first GUI app](./first-gui-app.md), take
+[A tour of the language](./tour.md), or read the
 [Language guide](./language.md).

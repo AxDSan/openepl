@@ -56,6 +56,12 @@ A module has one form. Component names are unique within the file and share
 one namespace with subroutines and module variables, so nothing can be two
 things at once.
 
+A component with no rectangle — a `timer`, an `action`, a `datasource`, an
+`httpserver` — is not declared inside the form but beside it, at module
+level, in the same block shape. A console program can declare one without any
+form at all; that is how a program waits for something. See
+[Components](./components.md).
+
 ## Properties
 
 Properties are set with literals here, and with ordinary statements once the
@@ -82,9 +88,15 @@ Every component and every property is listed in
   end
 ```
 
-The subroutine takes no parameters. Bindings are resolved when the program is
-built: if the subroutine does not exist, the build fails rather than the button
-quietly doing nothing.
+Bindings are resolved when the program is built: if the subroutine does not
+exist, the build fails rather than the button quietly doing nothing.
+
+Some events hand the handler a value — a `grid`'s `select` hands the row, a
+`timer`'s `tick` hands the tick count. The handler takes exactly that, or
+nothing at all; the compiler makes the two agree and shows the header to paste
+when they do not. `click` hands nothing, so a click handler is always the
+plain shape above. What each event hands over is in
+[Components](./components.md).
 
 ## Doing this visually
 

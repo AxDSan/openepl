@@ -1,5 +1,6 @@
 #include "model.h"
 
+#include <sys/stat.h>
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -67,14 +68,45 @@ std::string render_value(const std::string& type_name, const std::string& proper
 
 } // namespace
 
-bool load_model(const std::string& openepl_bin, const std::string& path, Model& out,
+/// Is `path` a project rather than a source file — a directory, or `.oeproj`?
+static bool is_project(const std::string& path) {
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) return true;
+    const std::string ext = ".oeproj";
+    return path.size() > ext.size() && path.compare(path.size() - ext.size(), ext.size(), ext) == 0;
+}
+
+bool load_model(const std::string& openepl_bin, const std::string& given, Model& out,
                 std::string& error) {
+    std::string path = given;
+    std::string project;
+    if (is_project(given)) {
+        const std::string cmd = openepl_bin + " project " + given + " 2>&1";
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) { error = "could not run openepl project"; return false; }
+        std::string text, line;
+        char buf[4096];
+        while (fgets(buf, sizeof buf, pipe)) text += buf;
+        const int rc = pclose(pipe);
+        std::istringstream lines(text);
+        path.clear();
+        while (std::getline(lines, line)) {
+            if (line.rfind("main: ", 0) == 0) path = line.substr(6);
+            else if (line.rfind("project: ", 0) == 0) project = line.substr(9);
+        }
+        if (rc != 0 || path.empty()) {
+            error = text.empty() ? "openepl project failed" : text;
+            return false;
+        }
+    }
+
     const std::string cmd = openepl_bin + " inspect " + path + " 2>&1";
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) { error = "could not run openepl inspect"; return false; }
 
     out = Model{};
     out.path = path;
+    out.project = project;
     std::string text;
     char buf[4096];
     while (fgets(buf, sizeof buf, pipe)) text += buf;

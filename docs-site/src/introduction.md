@@ -48,6 +48,11 @@ software.
 program, a windowed program, a shared library or a static library — a build
 option rather than a rewrite. See [Build targets](./build-targets.md).
 
+**A program that waits needs no window.** A timer or an HTTP server is a
+component with no rectangle, declared beside the form or without one, and the
+runtime's event loop keeps the program alive while any such source is live.
+See [Components](./components.md).
+
 ## Its relationship to EPL
 
 Easy Programming Language is a Chinese RAD environment with a large following:
@@ -64,6 +69,8 @@ and the whole toolchain is open source, cross-platform and inspectable.
 - [Installation](./installation.md) — download or build it
 - [Quick start](./quick-start.md) — a program in about a minute
 - [Your first GUI app](./first-gui-app.md) — draw a window and wire a button
+- [A tour of the language](./tour.md) — arrays, records, dictionaries,
+  subroutines and the error slot, in the order you meet them
 
 ## What is not here yet
 

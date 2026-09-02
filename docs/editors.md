@@ -1,4 +1,4 @@
-# Editing OpenEPL
+# Editors and the language server
 
 OpenEPL ships a language server, `openepl lsp`, that speaks LSP over stdio. Any
 LSP-capable editor becomes an OpenEPL editor by pointing it at that command —
@@ -10,12 +10,14 @@ the intelligence lives in one server rather than in any single editor.
 | --- | --- |
 | Diagnostics (parse + type/semantic errors, as you type) | ✅ |
 | Completion (commands, components, `id.` properties and events, locals, keywords) | ✅ |
-| Hover (command signatures, declaration sites) | ✅ |
+| Event wiring: `on ` offers the component's events; the handler position offers existing subroutines or creates one | ✅ |
+| Signature help while typing a call | ✅ |
+| Hover (command signatures, subroutine headers, property type and editor, declaration sites) | ✅ |
 | Go to definition | ✅ |
 | Find references (shadowing-aware) | ✅ |
 | Document symbols (outline) | ✅ |
-| Syntax highlighting | ✅ (VS Code grammar in `editors/vscode`) |
-| Rename, formatting, signature help | planned |
+| Syntax highlighting | ✅ (VS Code grammar included) |
+| Rename, formatting | planned |
 
 Navigation is backed by a token-level index rather than the AST, so completion
 and go-to-definition keep working while the file is half-typed and does not
@@ -23,8 +25,41 @@ parse — which is most of the time you are actually editing.
 
 Diagnostics cover the full front end: unknown commands, argument-count and type
 mismatches, assignment to a `let`, undefined variables, non-boolean conditions,
-unknown component types, bad property names and types, and every parse error —
-each reported at the line it occurs on.
+unknown component types, bad property names and types, and every parse error.
+Each is reported at the name it is about, so a line with two calls underlines
+the one that is wrong; a diagnostic that knows only the line underlines the
+line.
+
+A diagnostic names the fix where the toolchain can see one:
+
+- a command from a library the module has not `use`d says which line to add —
+  ``unknown command `file_read_text` — it is in the `file` library: add `use
+  file` to the module``. The server loads every library's metadata the first
+  time this is needed, so the first such diagnostic in a session is slower;
+- a name one typo away from a real one says which — ``did you mean
+  `print_text`?`` — for commands, subroutines, variables, properties, events
+  and handlers;
+- a handler with the wrong signature shows what the event hands over, what
+  the handler takes, and the header to paste;
+- `sys_sleep_ms` in a module that declares a form is refused, and the message
+  points at `timer`: a windowed program does not wait, it declares a timer and
+  does the work in its `on tick` handler.
+
+## Wiring an event
+
+Inside a component block, type `on ` and completion lists that component's
+events, each with what it hands a handler. After the `:`, it lists the
+module's subroutines — and, first, one that does not exist yet, named
+`<id>_<event>`. Accepting it inserts the name and appends
+
+```
+sub countdown_tick(n: int)
+  
+end
+```
+
+at the end of the file, with the parameter list the event declares. That is
+the whole loop: place a component, wire an event, write the body.
 
 The server locates the OpenEPL runtime by walking up from the editor's workspace
 root looking for `runtime/openepl_core.h`. If it can't find one it stays up and
@@ -62,7 +97,7 @@ npm install
 # then either symlink it into your extensions folder…
 ln -s "$PWD" ~/.vscode/extensions/openepl
 # …or package it
-npx @vscode/vsce package && code --install-extension openepl-0.1.0.vsix
+npx @vscode/vsce package && code --install-extension openepl-*.vsix
 ```
 
 Set `openepl.serverPath` if `openepl` is not on your `PATH`.
@@ -103,4 +138,5 @@ corrupts the stream). Watch it with your editor's LSP log, or drive it by hand:
 openepl lsp   # then send framed JSON-RPC on stdin
 ```
 
-`cli/tests/lsp.rs` does exactly that, and is the reference for the wire format.
+The repository's `cli/tests/lsp.rs` does exactly that, and is the reference
+for the wire format.

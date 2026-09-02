@@ -33,8 +33,9 @@ until something calls `quit`. `openepl new web-server mysite` starts you here.
 
 ## The request is a parameter, not a place
 
-An event handler is called with no arguments, so the handler asks for the
-request being dispatched and hands it on:
+`request` is one of the events that hands its handler nothing — deliberately,
+so the request is fetched by the code that is about to use it — and the
+handler asks for the one being dispatched and hands it on:
 
 ```
 sub on_request

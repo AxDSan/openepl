@@ -11,6 +11,7 @@
 #define OPENEPL_DESIGNER_LSPCLIENT_H
 
 #include <fcntl.h>
+#include <map>
 #include <signal.h>
 #include <string>
 #include <sys/wait.h>
@@ -21,12 +22,62 @@
 
 namespace openepl::lsp {
 
+/// A span of the document, 0-based as the protocol reports it. Columns are
+/// UTF-16 units on the wire; the editor treats them as character columns,
+/// which agrees for everything but a line with an astral-plane glyph in it.
+struct Range {
+    int line = 0, character = 0;
+    int end_line = 0, end_character = 0;
+    bool empty() const { return line == end_line && character == end_character; }
+};
+
 /// One diagnostic, flattened to what the editor draws.
 struct Diagnostic {
     int line = 0;        ///< 0-based, as the protocol reports it
     int severity = 1;    ///< 1 = error, 2 = warning
     std::string message;
+    Range range;
 };
+
+struct Location {
+    std::string uri;
+    Range range;
+};
+
+/// `range` out of a JSON Range object. False when the shape is not one.
+inline bool read_range(const json::Value& r, Range& out) {
+    if (r["start"].is_null()) return false;
+    out.line = r["start"]["line"].num(0);
+    out.character = r["start"]["character"].num(0);
+    out.end_line = r["end"]["line"].num(out.line);
+    out.end_character = r["end"]["character"].num(out.character);
+    return true;
+}
+
+/// A definition answer is one Location, a references answer is a list, and
+/// either is null when the server has nothing — a command's definition lives
+/// in C, not in any `.oir`. All three shapes come back as a list.
+inline std::vector<Location> read_locations(const json::Value& v) {
+    std::vector<Location> out;
+    auto one = [&](const json::Value& l) {
+        Location loc;
+        loc.uri = l["uri"].str();
+        if (read_range(l["range"], loc.range)) out.push_back(loc);
+    };
+    if (v.kind == json::Value::Kind::Array) {
+        for (size_t i = 0; i < v.size(); i++) one(v.at(i));
+    } else {
+        one(v);
+    }
+    return out;
+}
+
+/// The text of a hover answer, or "" when there is none to show.
+inline std::string hover_text(const json::Value& v) {
+    const json::Value& c = v["contents"];
+    if (c.kind == json::Value::Kind::String) return c.string;
+    return c["value"].str();
+}
 
 class Client {
 public:
@@ -40,6 +91,8 @@ public:
     const std::vector<Diagnostic>& diagnostics() const { return diagnostics_; }
 
     void clear_update() { updated_ = false; }
+
+    const std::string& uri() const { return uri_; }
 
     /// Launch `<openepl_bin> lsp` and complete the handshake.
     bool start(const std::string& openepl_bin, const std::string& root_dir) {
@@ -98,6 +151,68 @@ public:
              "\"textDocument\":{\"uri\":\"" + json::escape(uri_) + "\",\"version\":" +
              std::to_string(++version_) + "},\"contentChanges\":[{\"text\":\"" +
              json::escape(text) + "\"}]}}");
+    }
+
+    /// Send a request and return its id. The answer arrives through `poll`;
+    /// `take_response` hands it over once. Ids start above the two the
+    /// handshake and shutdown use, so a reply can never be mistaken for one
+    /// of theirs.
+    int request(const std::string& method, const std::string& params_json) {
+        if (!running() || uri_.empty()) return 0;
+        const int id = next_id_++;
+        send("{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id) + ",\"method\":\"" + method +
+             "\",\"params\":" + params_json + "}");
+        return id;
+    }
+
+    /// Position params for the document we opened.
+    std::string at(int line, int character) const {
+        return "{\"textDocument\":{\"uri\":\"" + json::escape(uri_) +
+               "\"},\"position\":{\"line\":" + std::to_string(line) +
+               ",\"character\":" + std::to_string(character) + "}}";
+    }
+
+    int hover(int line, int character) { return request("textDocument/hover", at(line, character)); }
+    int definition(int line, int character) {
+        return request("textDocument/definition", at(line, character));
+    }
+    int completion(int line, int character) {
+        return request("textDocument/completion", at(line, character));
+    }
+    int references(int line, int character) {
+        std::string p = at(line, character);
+        p.insert(p.size() - 1, ",\"context\":{\"includeDeclaration\":true}");
+        return request("textDocument/references", p);
+    }
+
+    /// The reply to `id`, once. False until it has arrived. An error reply
+    /// counts as arrived, with a null result: a request that failed is not a
+    /// request still in flight.
+    bool take_response(int id, json::Value& out) {
+        auto it = responses_.find(id);
+        if (it == responses_.end()) return false;
+        out = std::move(it->second);
+        responses_.erase(it);
+        return true;
+    }
+
+    /// Wait up to `ms` for the reply to `id`, pumping the pipe meanwhile. For
+    /// gestures that need the answer before they can finish — the double-click
+    /// that writes a handler — and for scripted sessions. Diagnostics that
+    /// arrive on the way are kept, not dropped.
+    bool wait(int id, json::Value& out, int ms) {
+        return pump_until(id, ms) && take_response(id, out);
+    }
+
+    /// As `wait`, but the reply stays queued for whoever normally takes it.
+    bool pump_until(int id, int ms) {
+        for (int i = 0; i < ms / 10; i++) {
+            poll();
+            if (responses_.count(id)) return true;
+            if (out_ < 0) return false;
+            usleep(10000);
+        }
+        return responses_.count(id) > 0;
     }
 
     /// Read whatever the server has sent. Call once per frame; never blocks.
@@ -168,6 +283,13 @@ private:
 
     void handle(const std::string& body) {
         const json::Value msg = json::parse(body);
+        // A reply carries an id and no method. Ids below ours belong to the
+        // handshake, whose answers nobody waits for.
+        if (msg["method"].is_null() && msg["id"].kind == json::Value::Kind::Number) {
+            const int id = msg["id"].num(0);
+            if (id >= FIRST_ID) responses_[id] = msg["result"];
+            return;
+        }
         if (msg["method"].str() != "textDocument/publishDiagnostics") return;
         const json::Value& params = msg["params"];
         // Only the document we opened. The server may publish for others.
@@ -178,7 +300,8 @@ private:
         for (size_t i = 0; i < list.size(); i++) {
             const json::Value& d = list.at(i);
             Diagnostic out;
-            out.line = d["range"]["start"]["line"].num(0);
+            read_range(d["range"], out.range);
+            out.line = out.range.line;
             out.severity = d["severity"].num(1);
             out.message = d["message"].str();
             diagnostics_.push_back(std::move(out));
@@ -186,14 +309,18 @@ private:
         updated_ = true;
     }
 
+    static constexpr int FIRST_ID = 100;
+
     pid_t pid_ = 0;
     int in_ = -1;
     int out_ = -1;
     int version_ = 1;
+    int next_id_ = FIRST_ID;
     bool updated_ = false;
     std::string inbuf_;
     std::string uri_;
     std::vector<Diagnostic> diagnostics_;
+    std::map<int, json::Value> responses_;
 };
 
 } // namespace openepl::lsp
