@@ -3690,7 +3690,7 @@ Rml::ElementDocument* show_splash(const std::string& family) {
 /// The welcome screen. Returns the project file to open, or "" if the user
 /// closed the window.
 std::string run_welcome(const std::string& family) {
-    const auto dim = g.context->GetDimensions();
+    auto dim = g.context->GetDimensions();
     const auto templates = openepl::welcome::load_templates(g.openepl_bin);
     const auto recent = openepl::welcome::load_recent();
 
@@ -3709,8 +3709,34 @@ std::string run_welcome(const std::string& family) {
     // Pump the backend first: it is what applies the real window size to the
     // GL viewport. Rendering before it has run leaves part of the frame never
     // written, which reads back as black.
+    if (const char* sz = std::getenv("OPENEPL_DESIGNER_WELCOME_SIZE")) {
+        int nw = 0, nh = 0;
+        if (std::sscanf(sz, "%dx%d", &nw, &nh) == 2 && nw > 0 && nh > 0) {
+            if (SDL_Window* win = SDL_GL_GetCurrentWindow()) SDL_SetWindowSize(win, nw, nh);
+            for (int i = 0; i < 30; i++) Backend::ProcessEvents(g.context, nullptr, false);
+            g.context->SetDimensions(Rml::Vector2i(nw, nh));
+        }
+    }
     for (int i = 0; i < 3; i++) {
         Backend::ProcessEvents(g.context, nullptr, false);
+        g.context->Update();
+        Backend::BeginFrame();
+        g.context->Render();
+        Backend::PresentFrame();
+    }
+    // The window manager's maximize arrives in those first events, after the
+    // document was laid out for the size we asked for. The markup bakes its
+    // size in, so rebuild for the size we actually have — otherwise everything
+    // past 1440x900 stays black until something else forces a relayout.
+    if (const auto now = g.context->GetDimensions(); now != dim) {
+        dim = now;
+        doc->Close();
+        g.context->Update();
+        doc = g.context->LoadDocumentFromMemory(openepl::welcome::welcome_markup(
+            family, dim.x, dim.y, templates, recent, asset_path("openepl-wordmark.png"),
+            g.openepl_bin));
+        if (!doc) return "";
+        doc->Show();
         g.context->Update();
         Backend::BeginFrame();
         g.context->Render();
@@ -3773,6 +3799,7 @@ std::string run_welcome(const std::string& family) {
     // A directory entry carries only its path, so the mode is remembered from
     // the tile that opened the browser.
     std::string browse_mode;
+    std::string browse_dir;
     auto swap_document = [&](const std::string& markup) {
         doc->Close();
         g.context->Update();
@@ -3821,6 +3848,20 @@ std::string run_welcome(const std::string& family) {
             chosen.clear();
             break;
         }
+        // The welcome markup bakes its width and height in, and a window
+        // manager that maximises us does so after the document was laid out
+        // for the size we asked for. Rebuild for the size we actually have,
+        // or everything past 1440x900 stays black.
+        if (const auto now = g.context->GetDimensions(); now != dim) {
+            dim = now;
+            const bool ok = browse_mode.empty()
+                ? swap_document(openepl::welcome::welcome_markup(
+                      family, dim.x, dim.y, templates, recent,
+                      asset_path("openepl-wordmark.png"), g.openepl_bin))
+                : swap_document(openepl::welcome::browse_markup(
+                      family, dim.x, dim.y, browse_dir, browse_mode, g.openepl_bin));
+            if (!ok) break;
+        }
         g.context->Update();
         Backend::BeginFrame();
         g.context->Render();
@@ -3834,6 +3875,7 @@ std::string run_welcome(const std::string& family) {
         } else if (chosen.rfind("browsedir:", 0) == 0) {
             dir = chosen.substr(10);
         } else if (chosen == "cancel") {
+            browse_mode.clear();
             if (!swap_document(openepl::welcome::welcome_markup(
                     family, dim.x, dim.y, templates, recent,
                     asset_path("openepl-wordmark.png"), g.openepl_bin))) break;
@@ -3841,6 +3883,7 @@ std::string run_welcome(const std::string& family) {
         } else {
             break;
         }
+        browse_dir = dir;
         if (!swap_document(openepl::welcome::browse_markup(family, dim.x, dim.y, dir,
                                                            browse_mode, g.openepl_bin))) break;
     }
