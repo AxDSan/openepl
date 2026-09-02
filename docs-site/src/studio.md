@@ -162,3 +162,56 @@ started from. Start it where you keep your work:
 ```sh
 cd ~/projects && openepl-studio
 ```
+
+## Studio on Windows
+
+Studio cross-builds for Windows x86-64 from Linux, the same way a windowed
+program does: `designer/build.sh --os windows` (or `designer/build-windows.sh`)
+writes `designer/windows/openepl-studio.exe` with mingw-w64's g++, links the
+Windows build of RmlUi statically, and copies beside it the SDL2, SDL2_image
+and freetype DLLs it imports — the list read from the images, as
+`openepl build --os windows` reads it. `tools/package-windows.sh` assembles
+that into `dist/openepl-<version>-windows-x86_64/` and a zip: `bin\`,
+`templates\`, `runtime\`, `libs\`, `docs\`, the licences, and DejaVu Sans
+under `assets\fonts\` so Studio's text renders on a machine with no font it
+knows. It needs the packages `openepl build --os windows` needs, plus
+`tools/build-rmlui-windows.sh` run.
+
+What is different there, said here rather than discovered:
+
+- **Studio runs `openepl.exe` beside itself.** The toolbox, the welcome
+  screen's templates and version, `inspect`, the language server and the
+  build all go through it. The compiler cross-builds for
+  `x86_64-pc-windows-gnu` with two `cfg(windows)` shims still to land in
+  `cli/src` (a symlink and the `dlopen` of a library's metadata), and
+  `tools/package-windows.sh` ships it when that build succeeds and says
+  plainly when it does not. Without it the welcome screen lists no templates
+  and the toolbox is empty.
+- **Building a program on Windows needs a toolchain on the machine.**
+  `openepl.exe` shells out to `clang` for the IR and the C, and to
+  mingw-w64's `gcc`/`g++` for the link, so a Windows machine needs
+  [LLVM](https://releases.llvm.org/) (clang on `PATH`) and mingw-w64 —
+  MSYS2's `mingw-w64-x86_64-gcc` — installed. Without clang, `openepl.exe
+  version`, `templates`, `kits`, `project` and `inspect` work, but
+  `commands` does not — it compiles each library's metadata with clang —
+  so the toolbox is empty, and `build` says `invoke clang: program not
+  found`. That is the state as verified under wine; no Windows machine has
+  run it.
+- **Per-user files** go where Windows keeps them: the recent-projects list
+  under `%APPDATA%\openepl\`, the cache under `%LOCALAPPDATA%\openepl\cache\`,
+  and a built program under `%TEMP%`. `XDG_DATA_HOME` and `XDG_CACHE_HOME`
+  still win when set, which is how a test keeps its scratch out of your list.
+- **Accessibility is off**, as it is for a program built for Windows: the
+  AccessKit bridge is Unix-only and compiles to stubs under `_WIN32`.
+- **Headless runs open a window.** `OPENEPL_DESIGNER_SCRIPT` and
+  `OPENEPL_DESIGNER_DUMP` work, but SDL's offscreen driver needs EGL, which
+  the Windows build of SDL has none of, so a scripted session there draws
+  through an ordinary window.
+
+What has been seen: the image loads under wine with every DLL resolved and
+stops where SDL asks a display with its drivers turned off for a window —
+the same point a cross-built program reaches — and the child-process layer
+Studio's build, run, stop and language-server code sit on passes its own
+probe (`designer/test_portable.cpp`) under wine. The drawn Studio window has
+not been seen under wine or on Windows: `cargo test --test studio_windows`
+checks exactly what is written here, and no further.

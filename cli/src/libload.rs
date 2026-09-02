@@ -16,19 +16,57 @@
 //! host == target (x86_64-linux). Cross-compilation needs a sidecar manifest
 //! instead (Phase 4).
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, CStr, CString};
+#[cfg(unix)]
+use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use openepl_ir::registry::{ComponentDesc, ComponentKind, PropertyDesc};
 use openepl_ir::{Registry, Signature, Ty};
 
+#[cfg(unix)]
 extern "C" {
     fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dlclose(handle: *mut c_void) -> c_int;
     fn dlerror() -> *mut c_char;
 }
+
+// The same four calls over the Win32 loader, so the rest of this file reads
+// one way. `dlerror` renders GetLastError as a number: the message text would
+// need FormatMessage and a code is what a search engine wants anyway.
+#[cfg(windows)]
+mod win {
+    use std::ffi::{c_char, c_int, c_void};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+        fn FreeLibrary(module: *mut c_void) -> c_int;
+        fn GetLastError() -> u32;
+    }
+    static mut LAST: [u8; 32] = [0; 32];
+    pub unsafe fn dlopen(filename: *const c_char, _flag: c_int) -> *mut c_void {
+        LoadLibraryA(filename)
+    }
+    pub unsafe fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void {
+        GetProcAddress(handle, symbol)
+    }
+    pub unsafe fn dlclose(handle: *mut c_void) -> c_int {
+        FreeLibrary(handle)
+    }
+    pub unsafe fn dlerror() -> *mut c_char {
+        let msg = format!("Win32 error {}\0", GetLastError());
+        let n = msg.len().min(31);
+        let buf = &mut *std::ptr::addr_of_mut!(LAST);
+        buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
+        buf[n] = 0;
+        std::ptr::addr_of_mut!(LAST) as *mut c_char
+    }
+}
+#[cfg(windows)]
+use win::{dlclose, dlerror, dlopen, dlsym};
 const RTLD_LAZY: c_int = 1;
 
 #[repr(C)]
@@ -107,6 +145,10 @@ pub struct BuildConfig {
     pub link_args: Vec<String>,
     /// Any library needed C++, so the link step must use clang++.
     pub needs_cxx: bool,
+    /// Windows only: DLLs a program must carry beside it that no import table
+    /// names — loaded by hand at run time, so a scan of the image cannot find
+    /// them (see `Manifest::windows_extra_dlls`).
+    pub extra_dlls: Vec<String>,
 }
 
 /// Resolve `core` + each `use`d library under `repo_root`.
@@ -116,12 +158,15 @@ pub fn load(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
 
 /// Resolve for a program that will be linked for ANOTHER operating system.
 ///
-/// The difference is the optional dependencies: `take_optional` decides by
+/// Two differences. The optional dependencies: `take_optional` decides by
 /// whether the vendored files exist, and the files under `vendor/` were built
 /// for this machine. A cross build that found them would hand ELF archives to
 /// a PE linker and define the feature macro on top, so here they are treated
 /// as absent and the library says at run time that the capability is missing —
 /// which is the truth, on that platform, until someone vendors it there too.
+/// And the link itself: a library whose `lib.json` carries `windows_*` keys
+/// has a Windows build of its dependencies, and those keys replace the Linux
+/// ones (`Manifest::take_windows`).
 pub fn load_cross(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
     load_with(repo_root, uses, true, true)
 }
@@ -490,6 +535,11 @@ pub struct Manifest {
     pub link_args: Vec<String>,
     pub requires: Vec<PathBuf>,
     pub requires_hint: String,
+    /// Windows only: DLL names to ship beside a program in addition to what
+    /// its import table says — for a dependency that `LoadLibrary`s another
+    /// by hand (sdl2-compat's `SDL2.dll` loads `SDL3.dll` that way). Copied
+    /// from the mingw sysroot when they are there, and skipped when not.
+    pub extra_dlls: Vec<String>,
     /// The paths that decide whether the optional dependency is here.
     pub optional_requires: Vec<PathBuf>,
     /// Every `optional_requires` path exists, so the `optional_*` build
@@ -539,8 +589,41 @@ impl Manifest {
             .collect();
         if host_deps {
             m.take_optional(&text, repo_root);
+        } else {
+            m.take_windows(&text, repo_root);
         }
         Ok(m)
+    }
+
+    /// A cross build reads the `windows_*` keys in place of the host ones.
+    ///
+    /// Each key REPLACES its counterpart rather than adding to it: the Linux
+    /// `link_args` name `-lGL` and an ELF archive under `vendor/`, and neither
+    /// has any business on a PE link line. A library that declares no
+    /// `windows_*` key keeps what it had — `net`'s Winsock is named by the
+    /// link itself, and a plain C library has nothing to replace. The
+    /// `requires` swap is what turns "fetch RmlUi" into "build RmlUi for
+    /// Windows" when that is the thing actually missing.
+    fn take_windows(&mut self, text: &str, repo_root: &Path) {
+        if json_has(text, "windows_pkg_config") {
+            self.pkg_config = json_array(text, "windows_pkg_config");
+        }
+        if json_has(text, "windows_link_args") {
+            self.link_args = json_array(text, "windows_link_args")
+                .iter()
+                .map(|a| absolutise(repo_root, a))
+                .collect();
+        }
+        if json_has(text, "windows_requires") {
+            self.requires = json_array(text, "windows_requires")
+                .iter()
+                .map(|p| repo_root.join(p))
+                .collect();
+        }
+        if json_has(text, "windows_requires_hint") {
+            self.requires_hint = json_string(text, "windows_requires_hint");
+        }
+        self.extra_dlls = json_array(text, "windows_extra_dlls");
     }
 
     /// Fold in the `optional_*` configuration when the dependency it names is
@@ -624,6 +707,7 @@ impl BuildConfig {
         self.defines.extend(m.defines.iter().cloned());
         self.pkg_config.extend(m.pkg_config.iter().cloned());
         self.link_args.extend(m.link_args.iter().cloned()); // already absolutised
+        self.extra_dlls.extend(m.extra_dlls.iter().cloned());
     }
 }
 
@@ -639,10 +723,90 @@ fn absolutise(repo_root: &Path, arg: &str) -> String {
 
 /// Run `pkg-config <mode> <packages...>` and return the flags.
 pub fn pkg_config_flags(packages: &[String], mode: &str) -> Result<Vec<String>, String> {
+    pkg_config_flags_for(packages, mode, false)
+}
+
+/// The mingw-w64 sysroot's answer, for a Windows build.
+///
+/// The host's `pkg-config` describes the host's libraries, and its `-I` would
+/// point a Windows compile at Linux headers. The cross answer comes from the
+/// wrapper the distributions install beside the compiler
+/// (`x86_64-w64-mingw32-pkg-config`, Fedora and Debian both), or — where only
+/// the sysroot is there — from `pkg-config` itself pointed at the sysroot's
+/// `.pc` files, which is all the wrapper does.
+pub fn pkg_config_flags_cross(packages: &[String], mode: &str) -> Result<Vec<String>, String> {
+    pkg_config_flags_for(packages, mode, true)
+}
+
+/// Where the mingw-w64 sysroot keeps its `.pc` files, on the layouts the
+/// distributions use: `<gcc -print-sysroot>/mingw/lib/pkgconfig` on Fedora,
+/// `/usr/x86_64-w64-mingw32/lib/pkgconfig` on Debian and Ubuntu.
+fn mingw_pkgconfig_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(out) = Command::new("x86_64-w64-mingw32-gcc")
+        .arg("-print-sysroot")
+        .output()
+    {
+        let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !root.is_empty() && root != "/" {
+            dirs.push(PathBuf::from(&root).join("mingw/lib/pkgconfig"));
+            dirs.push(PathBuf::from(&root).join("lib/pkgconfig"));
+        }
+    }
+    dirs.push(PathBuf::from("/usr/x86_64-w64-mingw32/sys-root/mingw/lib/pkgconfig"));
+    dirs.push(PathBuf::from("/usr/x86_64-w64-mingw32/lib/pkgconfig"));
+    dirs.retain(|d| d.is_dir());
+    dirs
+}
+
+fn pkg_config_flags_for(packages: &[String], mode: &str, cross: bool) -> Result<Vec<String>, String> {
     if packages.is_empty() {
         return Ok(Vec::new());
     }
-    let out = Command::new("pkg-config")
+    let mut cmd = if cross {
+        // The wrapper first; failing to start it is the one error that means
+        // "use the sysroot directly", so it is told apart from a package the
+        // wrapper could not find.
+        let mut c = Command::new("x86_64-w64-mingw32-pkg-config");
+        c.arg(mode).args(packages);
+        match c.output() {
+            Ok(out) if out.status.success() => {
+                return Ok(String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect());
+            }
+            Ok(out) => {
+                return Err(format!(
+                    "x86_64-w64-mingw32-pkg-config {mode} {} failed: {} (the mingw-w64 build \
+                     of a library this program uses is not installed)",
+                    packages.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+            Err(_) => {}
+        }
+        let dirs = mingw_pkgconfig_dirs();
+        if dirs.is_empty() {
+            return Err(format!(
+                "no mingw-w64 pkg-config for {} — neither x86_64-w64-mingw32-pkg-config nor a \
+                 sysroot with lib/pkgconfig is on this machine",
+                packages.join(" ")
+            ));
+        }
+        let libdir = dirs
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join(":");
+        let mut c = Command::new("pkg-config");
+        c.env("PKG_CONFIG_LIBDIR", libdir);
+        c.env("PKG_CONFIG_SYSROOT_DIR", "");
+        c
+    } else {
+        Command::new("pkg-config")
+    };
+    let out = cmd
         .arg(mode)
         .args(packages)
         .output()
@@ -667,6 +831,13 @@ fn json_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let start = text.find(&needle)? + needle.len();
     let rest = text[start..].trim_start();
     rest.strip_prefix(':').map(|r| r.trim_start())
+}
+
+/// Is the key present at all? Distinguishes "declared empty" from "not
+/// declared": an absent `windows_link_args` keeps the host list, an empty one
+/// replaces it with nothing.
+fn json_has(text: &str, key: &str) -> bool {
+    json_field(text, key).is_some()
 }
 
 fn json_bool(text: &str, key: &str) -> bool {

@@ -16,11 +16,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <limits.h>
 
-/* Windows has neither gmtime_r nor clock_gettime in its own C library — mingw
- * supplies both, MSVC supplies neither — so the two clocks and the one
- * conversion below go through Win32 there.  Everything else in this file is
- * arithmetic and needs no branch. */
+/* Windows has no clock_gettime in its own C library — mingw supplies one,
+ * MSVC does not — so the two clocks below go through Win32 there.  Everything
+ * else in this file is arithmetic and needs no branch: the calendar is
+ * computed here on every platform rather than asked of gmtime, because
+ * Windows' gmtime_s refuses any instant before 1970. */
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -53,16 +55,42 @@ static int month_length(int y, int m) {
     return len[m - 1];
 }
 
-/* Break a timestamp into UTC fields. Returns 0 when the timestamp is outside
- * what the platform's gmtime_r can represent. */
+/* Break a timestamp into UTC fields — Howard Hinnant's civil_from_days, the
+ * inverse of days_from_civil above, and the same arithmetic the runtime's
+ * year() and format_time() use. It is NOT gmtime: Windows' gmtime_s answers
+ * an error for any instant before 1970, so a birthday in 1969 would be an
+ * empty text there and a date everywhere else. Computing the date answers
+ * the same on every platform for any int64 second, which is what "UTC
+ * everywhere" promises. Returns 0 only when the year does not fit the int
+ * struct tm holds — a timestamp no calendar can name. */
 static int utc_fields(int64_t ts, struct tm *out) {
-    time_t t = (time_t)ts;
     memset(out, 0, sizeof *out);
-#ifdef _WIN32
-    return gmtime_s(out, &t) == 0;
-#else
-    return gmtime_r(&t, out) != NULL;
-#endif
+    int64_t days = ts / 86400;
+    int64_t rem  = ts % 86400;
+    if (rem < 0) { rem += 86400; days -= 1; }
+    out->tm_hour = (int)(rem / 3600);
+    out->tm_min  = (int)(rem % 3600 / 60);
+    out->tm_sec  = (int)(rem % 60);
+    /* Day 0 was a Thursday; the +11 keeps a negative remainder in range. */
+    out->tm_wday = (int)((days % 7 + 11) % 7);
+    int64_t z   = days + 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned doe = (unsigned)(z - era * 146097);                       /* [0, 146096] */
+    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; /* [0, 399] */
+    int64_t  y   = (int64_t)yoe + era * 400;
+    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);             /* [0, 365] */
+    unsigned mp  = (5 * doy + 2) / 153;                                 /* [0, 11] */
+    unsigned d   = doy - (153 * mp + 2) / 5 + 1;                        /* [1, 31] */
+    unsigned m   = mp < 10 ? mp + 3 : mp - 9;                           /* [1, 12] */
+    if (m <= 2) y++;
+    if (y - 1900 > INT_MAX || y - 1900 < INT_MIN) return 0;
+    static const int before_month[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
+    int leap = is_leap((int)(y % 400));   /* leap-ness repeats every 400 years */
+    out->tm_year = (int)(y - 1900);
+    out->tm_mon  = (int)m - 1;
+    out->tm_mday = (int)d;
+    out->tm_yday = before_month[m - 1] + (int)d - 1 + (leap && m > 2 ? 1 : 0);
+    return 1;
 }
 
 static char *time_alloc(long len) { return (char *)oe_malloc(len + 1); }
@@ -111,10 +139,10 @@ void time_monotonic_ms(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
 
 /* --- calendar fields of a timestamp, UTC ----------------------------------
  * Infallible, like core's year(): they never touch the error slot, so an
- * earlier failure survives a line of date arithmetic. A timestamp the platform
- * cannot represent yields 0, which is not a valid month, day, weekday-as-ISO
- * or day-of-year, and is a legitimate hour/minute/second only for a timestamp
- * that was representable anyway. */
+ * earlier failure survives a line of date arithmetic. A timestamp whose year
+ * no calendar can name yields 0, which is not a valid month, day,
+ * weekday-as-ISO or day-of-year, and is a legitimate hour/minute/second only
+ * for a timestamp that was representable anyway. */
 #define TIME_FIELD(fn, expr)                                                  \
     void fn(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {            \
         (void)argc;                                                           \

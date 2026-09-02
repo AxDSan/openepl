@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "portable.h"
 #include "theme.h"
 
 namespace openepl::welcome {
@@ -37,13 +38,9 @@ inline void chomp(std::string& line) {
 /// screen so the product says somewhere what it is; before this it did not.
 inline std::string version_string(const std::string& openepl_bin) {
     if (openepl_bin.empty()) return "";
-    const std::string cmd = openepl_bin + " version 2>/dev/null";
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return "";
-    std::string line;
-    char buf[256];
-    if (fgets(buf, sizeof buf, pipe)) line = buf;
-    pclose(pipe);
+    std::string text;
+    openepl::sys::capture_output(openepl_bin + " version", false, text);
+    std::string line = text.substr(0, text.find('\n'));
     chomp(line);
     return line;
 }
@@ -63,17 +60,14 @@ inline bool is_project_path(const std::string& path) {
 inline std::string resolve_open(const std::string& openepl_bin, const std::string& path) {
     if (!is_project_path(path)) return path;
     if (openepl_bin.empty()) return "";
-    const std::string cmd = openepl_bin + " project " + path + " 2>/dev/null";
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return "";
-    std::string main;
-    char buf[4096];
-    while (fgets(buf, sizeof buf, pipe)) {
-        std::string line(buf);
+    std::string text;
+    openepl::sys::capture_output(openepl_bin + " project " + path, false, text);
+    std::string main, line;
+    std::istringstream lines(text);
+    while (std::getline(lines, line)) {
         chomp(line);
         if (line.rfind("main: ", 0) == 0) main = line.substr(6);
     }
-    pclose(pipe);
     return main;
 }
 
@@ -92,9 +86,9 @@ struct TemplateInfo {
 /// templates directory, this only renders what it reports.
 inline std::vector<TemplateInfo> load_templates(const std::string& openepl_bin) {
     std::vector<TemplateInfo> out;
-    const std::string cmd = openepl_bin + " templates 2>/dev/null";
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return out;
+    std::string text;
+    openepl::sys::capture_output(openepl_bin + " templates", false, text);
+    std::istringstream lines(text);
 
     auto find = [&out](const std::string& id) -> TemplateInfo& {
         for (auto& t : out) {
@@ -104,9 +98,8 @@ inline std::vector<TemplateInfo> load_templates(const std::string& openepl_bin) 
         return out.back();
     };
 
-    char buf[1024];
-    while (fgets(buf, sizeof buf, pipe)) {
-        std::string line(buf);
+    std::string line;
+    while (std::getline(lines, line)) {
         while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
         const size_t colon = line.find(':');
         if (colon == std::string::npos) continue;
@@ -123,7 +116,6 @@ inline std::vector<TemplateInfo> load_templates(const std::string& openepl_bin) 
         else if (key == "desc") t.desc = value;
         else if (key == "entry") t.entry = value;
     }
-    pclose(pipe);
     return out;
 }
 
@@ -342,7 +334,7 @@ inline std::vector<DirEntry> list_dir(const std::string& dir, const std::string&
     while (dirent* e = ::readdir(d)) {
         const std::string name = e->d_name;
         if (name == "." || name == ".." || name[0] == '.') continue;
-        const std::string path = dir == "/" ? "/" + name : dir + "/" + name;
+        const std::string path = openepl::sys::is_root_dir(dir) ? dir + name : dir + "/" + name;
         struct stat st;
         if (::stat(path.c_str(), &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
@@ -358,9 +350,8 @@ inline std::vector<DirEntry> list_dir(const std::string& dir, const std::string&
     std::sort(files.begin(), files.end(), by_name);
 
     std::vector<DirEntry> out;
-    if (dir != "/") {
-        const size_t slash = dir.find_last_of('/');
-        out.push_back(DirEntry{"..", slash == 0 ? "/" : dir.substr(0, slash), true, false});
+    if (!openepl::sys::is_root_dir(dir)) {
+        out.push_back(DirEntry{"..", openepl::sys::parent_dir(dir), true, false});
     }
     out.insert(out.end(), dirs.begin(), dirs.end());
     out.insert(out.end(), files.begin(), files.end());
@@ -425,12 +416,10 @@ inline std::string browse_markup(const std::string& family, int w, int h, const 
 /// Where the recent-projects list lives.
 inline std::string recent_path() {
     // XDG_DATA_HOME first: it is how a test run keeps its scratch files out of
-    // the list a person sees on their next real start.
-    const char* xdg = std::getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) return std::string(xdg) + "/openepl/recent";
-    const char* home = std::getenv("HOME");
-    if (!home) return "";
-    return std::string(home) + "/.local/share/openepl/recent";
+    // the list a person sees on their next real start. Then the platform's
+    // per-user data directory — %APPDATA% on Windows.
+    const std::string dir = openepl::sys::data_dir();
+    return dir.empty() ? "" : dir + "/recent";
 }
 
 inline std::vector<std::string> load_recent(size_t limit = 8) {
@@ -461,10 +450,7 @@ inline std::vector<std::string> load_recent(size_t limit = 8) {
 /// worked on was the project. A loose `.oir` is still recorded as itself.
 inline void remember_recent(const std::string& relative_or_absolute, size_t limit = 8) {
     std::string path = relative_or_absolute;
-    if (char* real = ::realpath(relative_or_absolute.c_str(), nullptr)) {
-        path = real;
-        std::free(real);
-    }
+    if (const std::string real = openepl::sys::real_path(relative_or_absolute); !real.empty()) path = real;
     if (!is_project_path(path)) {
         const size_t slash = path.find_last_of('/');
         const std::string sibling =
@@ -474,14 +460,7 @@ inline void remember_recent(const std::string& relative_or_absolute, size_t limi
     const std::string file = recent_path();
     if (file.empty()) return;
     const size_t slash = file.find_last_of('/');
-    if (slash != std::string::npos) {
-        const std::string dir = file.substr(0, slash);
-        std::string acc;
-        for (size_t i = 0; i < dir.size(); i++) {
-            acc += dir[i];
-            if (dir[i] == '/' || i + 1 == dir.size()) ::mkdir(acc.c_str(), 0755);
-        }
-    }
+    if (slash != std::string::npos) openepl::sys::make_dirs(file.substr(0, slash));
     std::vector<std::string> keep{path};
     for (const auto& r : load_recent(limit * 2)) {
         if (r != path && keep.size() < limit) keep.push_back(r);

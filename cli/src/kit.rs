@@ -408,8 +408,14 @@ pub fn overlay_root(repo_root: &Path, uses: &[String]) -> Result<PathBuf, String
 }
 
 fn link(from: &Path, to: &Path) -> Result<(), String> {
-    std::os::unix::fs::symlink(from, to)
-        .map_err(|e| format!("cannot link {} -> {}: {e}", to.display(), from.display()))
+    // Every entry staged here is a directory; on Windows a directory link
+    // is its own call, and creating one needs Developer Mode or elevation —
+    // the error names the pair so that is diagnosable.
+    #[cfg(unix)]
+    let r = std::os::unix::fs::symlink(from, to);
+    #[cfg(windows)]
+    let r = std::os::windows::fs::symlink_dir(from, to);
+    r.map_err(|e| format!("cannot link {} -> {}: {e}", to.display(), from.display()))
 }
 
 // --- lib.json readers, for the keys the loader does not read ---------------

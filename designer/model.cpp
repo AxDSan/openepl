@@ -336,10 +336,46 @@ bool save_model(Model& m, const std::vector<std::string>& new_subs,
     std::sort(regions.begin(), regions.end(),
               [](const Region& a, const Region& b) { return a.first < b.first; });
 
+    // The header: `module`, then any mix of `target` and `use` lines, which is
+    // what the parser accepts before the first item. A kit the model uses that
+    // the file does not yet name — a `tcpserver` dropped into a module that
+    // only says `use ui` — gets its `use` line here, after the last header
+    // line, so the declaration it makes compiles. Decided against the file
+    // rather than a flag on the model: an undo that took the component and its
+    // kit back out of the model then writes nothing.
+    std::vector<std::string> missing_uses;
+    int header_end = 0;                  // 0-based index of the line new uses go after; -1 = top
+    {
+        std::vector<std::string> in_file;
+        int last_header = -1;
+        for (size_t i = 0; i < lines.size(); i++) {
+            std::string t = lines[i];
+            t.erase(0, t.find_first_not_of(" \t"));
+            if (t.empty() || t[0] == '#') continue;
+            const bool is_module = t.rfind("module", 0) == 0 && (t.size() == 6 || std::isspace((unsigned char)t[6]));
+            const bool is_target = t.rfind("target", 0) == 0 && (t.size() == 6 || std::isspace((unsigned char)t[6]));
+            const bool is_use = t.rfind("use", 0) == 0 && (t.size() == 3 || std::isspace((unsigned char)t[3]));
+            if (!is_module && !is_target && !is_use) break;
+            last_header = (int)i;
+            if (is_use) {
+                std::istringstream w(t.substr(3));
+                std::string name;
+                w >> name;
+                if (!name.empty()) in_file.push_back(name);
+            }
+        }
+        header_end = last_header;
+        for (const auto& u : m.uses) {
+            if (std::find(in_file.begin(), in_file.end(), u) != in_file.end()) continue;
+            if (std::find(missing_uses.begin(), missing_uses.end(), u) != missing_uses.end()) continue;
+            missing_uses.push_back(u);
+        }
+    }
+
     // Nothing to splice and nothing to add. A module with no form is still a
     // project: a console program or a library is edited entirely as text, and
     // reporting a form error for it is both wrong and alarming.
-    bool anything_new = !new_subs.empty() || !m.renames.empty();
+    bool anything_new = !new_subs.empty() || !m.renames.empty() || !missing_uses.empty();
     for (const auto& c : m.module_components) {
         if (c.last_line == 0 && !c.removed) anything_new = true;
     }
@@ -364,12 +400,28 @@ bool save_model(Model& m, const std::vector<std::string>& new_subs,
     // where a renamed component is referred to. The blocks the designer
     // emits already carry the new names, so the renames apply only here —
     // oldest first, since a later one may rename what an earlier one made.
+    // The missing `use` lines go out once, right after the header's last line
+    // (or at the very top of a file with no header). They land inside the
+    // first copy, before any block the designer owns, and the spans below are
+    // recomputed from `out_lines`, so the form and every module component
+    // simply move down with them.
+    bool uses_written = false;
+    auto write_uses = [&]() {
+        if (uses_written) return;
+        uses_written = true;
+        for (const auto& u : missing_uses) {
+            out << "use " << u << "\n";
+            out_lines++;
+        }
+    };
     auto copy_through = [&](int upto) {  // exclusive, 0-based
+        if (header_end < 0) write_uses();
         for (int i = cursor; i < upto; i++) {
             std::string line = lines[i];
             for (const auto& r : m.renames) line = rename_references(line, r.first, r.second);
             out << line << "\n";
             out_lines++;
+            if (i == header_end) write_uses();
         }
         cursor = upto;
     };
@@ -400,6 +452,7 @@ bool save_model(Model& m, const std::vector<std::string>& new_subs,
     // Everything after the last region, verbatim — this is what protects
     // hand-written subroutine bodies from being clobbered by a designer save.
     copy_through((int)lines.size());
+    write_uses();                        // a file too short to have reached the header line
 
     // Components dropped in this session go at the END of the file, never above
     // the form. A module-level declaration is legal anywhere at top level, and

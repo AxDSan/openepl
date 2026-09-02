@@ -14,11 +14,14 @@
 #include <map>
 #include <signal.h>
 #include <string>
+#ifndef _WIN32
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 #include <vector>
 
 #include "json.h"
+#include "portable.h"
 
 namespace openepl::lsp {
 
@@ -109,7 +112,11 @@ class Client {
 public:
     ~Client() { stop(); }
 
+#ifdef _WIN32
+    bool running() const { return child_.running(); }
+#else
     bool running() const { return pid_ > 0; }
+#endif
 
     /// Whether diagnostics have arrived since the last `take_diagnostics`.
     bool has_update() const { return updated_; }
@@ -122,6 +129,12 @@ public:
 
     /// Launch `<openepl_bin> lsp` and complete the handshake.
     bool start(const std::string& openepl_bin, const std::string& root_dir) {
+#ifdef _WIN32
+        // CreateProcess with both pipes; the server's stderr goes to the null
+        // device, since a GUI program has no terminal to let it reach.
+        if (!openepl::sys::spawn(child_, openepl::sys::quote_arg(openepl_bin) + " lsp", false, true))
+            return false;
+#else
         int to_child[2], from_child[2];
         if (::pipe(to_child) != 0) return false;
         if (::pipe(from_child) != 0) {
@@ -153,17 +166,18 @@ public:
         out_ = from_child[0];
         ::fcntl(out_, F_SETFL, O_NONBLOCK);
         pid_ = pid;
+#endif
 
         send("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{"
-             "\"processId\":null,\"capabilities\":{},\"rootUri\":\"file://" +
-             json::escape(root_dir) + "\"}}");
+             "\"processId\":null,\"capabilities\":{},\"rootUri\":\"" +
+             json::escape(openepl::sys::file_uri(root_dir)) + "\"}}");
         send("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
         return true;
     }
 
     void did_open(const std::string& path, const std::string& text) {
         if (!running()) return;
-        uri_ = "file://" + path;
+        uri_ = openepl::sys::file_uri(path);
         send("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{"
              "\"textDocument\":{\"uri\":\"" + json::escape(uri_) +
              "\",\"languageId\":\"openepl\",\"version\":1,\"text\":\"" + json::escape(text) +
@@ -239,7 +253,7 @@ public:
         for (int i = 0; i < ms / 10; i++) {
             poll();
             if (responses_.count(id)) return true;
-            if (out_ < 0) return false;
+            if (!output_open()) return false;
             usleep(10000);
         }
         return responses_.count(id) > 0;
@@ -247,14 +261,21 @@ public:
 
     /// Read whatever the server has sent. Call once per frame; never blocks.
     void poll() {
-        if (out_ < 0) return;
+        if (!output_open()) return;
         char buf[4096];
+#ifdef _WIN32
+        int n;
+        while ((n = openepl::sys::read_nonblocking(child_.out, buf, sizeof buf)) > 0)
+            inbuf_.append(buf, (size_t)n);
+        if (n == 0) openepl::sys::close_output(child_);   // the server closed its end
+#else
         ssize_t n;
         while ((n = ::read(out_, buf, sizeof buf)) > 0) inbuf_.append(buf, (size_t)n);
         if (n == 0) {                    // the server closed its end
             ::close(out_);
             out_ = -1;
         }
+#endif
 
         // Frames are `Content-Length: N\r\n\r\n<N bytes>`; anything short is
         // left in the buffer for the next poll rather than mis-parsed.
@@ -276,9 +297,20 @@ public:
 
     /// Shut the server down the way the protocol says, so it exits cleanly.
     void stop() {
-        if (pid_ <= 0) return;
+        if (!running()) return;
         send("{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\",\"params\":null}");
         send("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
+#ifdef _WIN32
+        openepl::sys::close_stdin(child_);
+        int code = 0;
+        for (int i = 0; i < 100 && !openepl::sys::try_wait(child_, code); i++) Sleep(10);
+        if (!openepl::sys::try_wait(child_, code)) {
+            openepl::sys::terminate(child_);
+            WaitForSingleObject(child_.process, INFINITE);
+        }
+        openepl::sys::release(child_);
+        return;
+#else
         if (in_ >= 0) { ::close(in_); in_ = -1; }
         // Closing stdin is what lets its reader thread finish; without that the
         // server would sit waiting and we would wait for it.
@@ -290,13 +322,26 @@ public:
         }
         if (out_ >= 0) { ::close(out_); out_ = -1; }
         pid_ = 0;
+#endif
     }
 
 private:
+#ifdef _WIN32
+    bool output_open() const { return child_.out != nullptr; }
+#else
+    bool output_open() const { return out_ >= 0; }
+#endif
+
     void send(const std::string& body) {
-        if (in_ < 0) return;
         const std::string frame =
             "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+#ifdef _WIN32
+        if (!child_.in) return;
+        if (!openepl::sys::write_all(child_.in, frame.data(), frame.size()))
+            openepl::sys::close_stdin(child_);   // the server died; drop the pipe
+        return;
+#else
+        if (in_ < 0) return;
         // A short write would corrupt the frame, so keep going until it is all
         // out. EPIPE means the server died; drop the pipe rather than loop.
         size_t sent = 0;
@@ -309,6 +354,7 @@ private:
             }
             sent += (size_t)w;
         }
+#endif
     }
 
     void handle(const std::string& body) {
@@ -341,9 +387,13 @@ private:
 
     static constexpr int FIRST_ID = 100;
 
+#ifdef _WIN32
+    openepl::sys::Child child_;
+#else
     pid_t pid_ = 0;
     int in_ = -1;
     int out_ = -1;
+#endif
     int version_ = 1;
     int next_id_ = FIRST_ID;
     bool updated_ = false;

@@ -280,6 +280,38 @@ static void test_module_components(const std::string& openepl, const NeedsQuotes
     bad.module_components[0].first_line = 1;
     bad.module_components[0].last_line = 9999;
     check("out-of-range span is refused", !save_model(bad, {}, quoted, err));
+
+    // A kit the model uses that the file does not yet name: a `tcpserver`
+    // dropped into a module that only says `use ui`. The save writes the
+    // `use` line after the header, once, and everything below moves down.
+    Model n = back;
+    n.uses.push_back("net");
+    Component srv;
+    srv.id = n.fresh_id("tcpserver");
+    srv.type_name = "tcpserver";
+    srv.set_property("port", "8080");
+    n.module_components.push_back(srv);
+    check("save with a new kit in use", save_model(n, {}, quoted, err));
+    const std::string used = slurp(fixture);
+    check("use line written after the existing one",
+          used.find("module modfixture\nuse ui\nuse net\n\nform win\n") != std::string::npos);
+    check("use line written once", used.find("use net") == used.rfind("use net"));
+    check("form span moved down by the inserted line",
+          n.form_first_line == 5 && n.form_last_line == 9);
+    check("handler body still untouched",
+          used.find("  # A comment the designer must not touch.") != std::string::npos);
+    check("second save does not add a second use", save_model(n, {}, quoted, err));
+    const std::string again = slurp(fixture);
+    check("still one use net", again.find("use net") == again.rfind("use net"));
+    check("still one tcpserver", again.find("tcpserver tcpserver1") == again.rfind("tcpserver tcpserver1"));
+    Model reread;
+    check("file with a new use re-inspects", load_model(openepl, fixture, reread, err));
+    check("inspect agrees on the spans",
+          reread.form_first_line == n.form_first_line && reread.form_last_line == n.form_last_line &&
+              reread.module_components.size() == 2 &&
+              reread.module_components[1].first_line == n.module_components[1].first_line &&
+              reread.module_components[1].last_line == n.module_components[1].last_line);
+    check("inspect reports both uses", reread.uses.size() == 2 && reread.uses[1] == "net");
 }
 
 /* --- the round trip ----------------------------------------------------- *

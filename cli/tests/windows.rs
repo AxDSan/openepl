@@ -250,31 +250,3 @@ fn library_cross_builds_to_dll_and_archive() {
     let bytes = std::fs::read(&archive).unwrap();
     assert!(bytes.starts_with(b"!<arch>\n"), "the static library is not an ar archive");
 }
-
-/// The one target that has no Windows build yet says so in one line, before
-/// anything is compiled.
-#[test]
-fn gui_target_is_refused_for_windows() {
-    if !mingw_present() {
-        return;
-    }
-    let repo = repo();
-    let out = Command::new(env!("CARGO_BIN_EXE_openepl"))
-        .args([
-            "build",
-            repo.join("examples/form.oir").to_str().unwrap(),
-            "--os",
-            "windows",
-            "-o",
-            scratch("gui").join("form.exe").to_str().unwrap(),
-        ])
-        .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
-        .output()
-        .expect("run openepl");
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("target gui is not available for windows yet (no Windows build of the ui library)"),
-        "unexpected refusal:\n{err}"
-    );
-}

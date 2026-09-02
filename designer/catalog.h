@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "descriptors.h"
+#include "portable.h"
 
 namespace openepl::designer {
 
@@ -109,15 +110,14 @@ namespace catalog_detail {
 
 inline std::vector<std::string> run(const std::string& cmd) {
     std::vector<std::string> out;
-    FILE* pipe = popen((cmd + " 2>/dev/null").c_str(), "r");
-    if (!pipe) return out;
-    char buf[4096];
-    while (fgets(buf, sizeof buf, pipe)) {
-        std::string line(buf);
+    std::string text;
+    if (openepl::sys::capture_output(cmd, false, text) == -1 && text.empty()) return out;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
         while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
         out.push_back(line);
     }
-    pclose(pipe);
     return out;
 }
 

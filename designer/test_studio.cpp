@@ -187,6 +187,73 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("timer: the stub takes the tick count",
               has(slurp(path), "\nsub timer1_tick(n: int)\n  \nend\n"));
     }
+    // A component from a kit the module does not yet `use`: the drop writes
+    // the `use` line on save, once, after the header, and the file compiles.
+    // (The timer above needs none — it is the runtime's own.)
+    {
+        std::string path;
+        const std::string out = session(designer, openepl, form,
+                                        "add:tcpserver;save;waitdiag;add:tcpclient;save;waitdiag", &path);
+        const std::string saved = slurp(path);
+        check("use net: written after use ui", has(saved, "module hello_form\nuse ui\nuse net\n\nform main_window\n"));
+        check("use net: written once for two net components",
+              saved.find("use net") == saved.rfind("use net"));
+        check("use net: both components are in the file",
+              has(saved, "\ntcpserver tcpserver1\nend\n") && has(saved, "\ntcpclient tcpclient1\nend\n"));
+        check("use net: the handler body survived both saves",
+              has(saved, "\nsub on_ok_click\n  call print_text(\"button clicked!\")\nend\n"));
+        check("use net: the problems pane is clear after each save",
+              has(out, "designer: saved " + path + "\ndiagnostics: 0\n") &&
+                  out.find("diagnostics: 0") != out.rfind("diagnostics: 0") && !has(out, "diagnostics: 1") &&
+                  !has(out, "diagnostics: 2"));
+        // The spans after two saves are what `openepl inspect` reads back.
+        std::string inspected;
+        for (const auto& l : catalog_detail::run(openepl + " inspect " + path)) inspected += l + "\n";
+        check("use net: inspect agrees the form moved down one line",
+              has(inspected, "form: main_window span=11..35\n"));
+        check("use net: inspect finds both tray components at their spans",
+              has(inspected, "modcomponent: tcpserver1 tcpserver span=43..44\n") &&
+                  has(inspected, "modcomponent: tcpclient1 tcpclient span=46..47\n"));
+        const std::string build_dir = path + ".build";
+        ::mkdir(build_dir.c_str(), 0755);
+        const int rc = std::system((openepl + " build " + path + " -o " + build_dir + "/out >/dev/null 2>&1").c_str());
+        check("use net: the saved file builds", rc == 0);
+    }
+    // The owner's file: a tcpserver already in it, and no `use net`. The
+    // server flags it on open; the drop that adds the use clears the pane
+    // once the save is re-read — which is a real 2 -> 0, not a 0 that was
+    // there all along.
+    {
+        const std::string broken = "/tmp/openepl_studio_test_broken.oir";
+        {
+            std::ofstream f(broken, std::ios::trunc);
+            f << slurp(form) << "\ntcpserver tcpserver1\n  port = 8080\nend\n";
+        }
+        // Two waits after the save: the drop itself told the server about
+        // the not-yet-saved text (still broken), and the save's re-read is
+        // the publish after that one. The frame loop drains both; the pane
+        // shows the last.
+        std::string path;
+        const std::string out =
+            session(designer, openepl, broken, "waitdiag;add:tcpserver;save;waitdiag;waitdiag", &path);
+        check("use net: a file missing it is flagged on open",
+              has(out, "designer: Ready\ndiagnostics: 1\n  line 1: `tcpserver1`: unknown component type `tcpserver`"));
+        const size_t last = out.rfind("diagnostics: ");
+        check("use net: the drop's save clears the problems pane",
+              last != std::string::npos && last > out.find("designer: saved ") &&
+                  out.compare(last, 15, "diagnostics: 0\n") == 0);
+        const std::string saved = slurp(path);
+        check("use net: written once into the already-broken file",
+              has(saved, "use ui\nuse net\n") && saved.find("use net") == saved.rfind("use net"));
+        check("use net: the new id does not collide with the existing one",
+              has(saved, "\ntcpserver tcpserver2\n"));
+    }
+    {
+        std::string path;
+        session(designer, openepl, form, "add:timer;save", &path);
+        check("timer: a runtime component adds no use line",
+              slurp(path).find("use ") == slurp(path).rfind("use "));
+    }
     {
         const std::string out = session(designer, openepl, grid, "dblclick:people");
         check("a component with no events says so", has(out, "datasource has no events"));

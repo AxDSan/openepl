@@ -26,7 +26,8 @@
   ],
   "defines": [
     "RMLUI_SDL_VERSION_MAJOR=2",
-    "SDL_VIDEO_RENDER_OGL=1"
+    "SDL_VIDEO_RENDER_OGL=1",
+    "RMLUI_STATIC_LIB"
   ],
   "pkg_config": [
     "sdl2",
@@ -46,5 +47,24 @@
     "vendor/RmlUi/build/librmlui.a",
     "vendor/accesskit-c/include/accesskit.h"
   ],
-  "requires_hint": "RmlUi and/or accesskit-c are not vendored yet — run tools/fetch-rmlui.sh and tools/fetch-accesskit.sh"
+  "requires_hint": "RmlUi and/or accesskit-c are not vendored yet — run tools/fetch-rmlui.sh and tools/fetch-accesskit.sh",
+  "windows_comment": "A cross build (--os windows) reads these in place of pkg_config, link_args and requires. RmlUi is the same checkout built a second time with mingw-w64 (tools/build-rmlui-windows.sh); SDL2, SDL2_image and freetype come from the distribution's mingw packages and ship as DLLs beside the program. AccessKit has no Windows build here, so a11y_accesskit.cpp compiles to its stubs under _WIN32.",
+  "windows_pkg_config": [
+    "sdl2",
+    "SDL2_image",
+    "freetype2"
+  ],
+  "windows_link_args": [
+    "-Lvendor/RmlUi/build-windows",
+    "-lrmlui",
+    "-lopengl32",
+    "-lgdi32"
+  ],
+  "windows_requires": [
+    "vendor/RmlUi/build-windows/librmlui.a"
+  ],
+  "windows_requires_hint": "RmlUi is not built for Windows yet — run tools/build-rmlui-windows.sh (after tools/fetch-rmlui.sh)",
+  "windows_extra_dlls": [
+    "SDL3.dll"
+  ]
 }

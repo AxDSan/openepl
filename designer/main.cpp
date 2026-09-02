@@ -30,7 +30,9 @@
 #include <time.h>
 #include <signal.h>
 #include <sstream>
+#ifndef _WIN32
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 #include <string>
 #include <vector>
@@ -47,6 +49,7 @@
 #include "dotgrid.h"
 #include "highlight.h"
 #include "model.h"
+#include "portable.h"
 #include "theme.h"
 #include "lspclient.h"
 #include "welcome.h"
@@ -151,6 +154,12 @@ struct Designer {
     /// of streaming as it happens.
     pid_t build_pid = 0;
     int build_output = -1;
+#ifdef _WIN32
+    /// The same two children on Windows, as CreateProcess hands them out;
+    /// `build_pid` and `running_app` still say "> 0 = alive" for everyone
+    /// who only asks that.
+    openepl::sys::Child build_child, app_child;
+#endif
     bool build_then_run = false;
     std::string build_target;
     double build_started = 0.0;
@@ -735,27 +744,20 @@ std::string build_toolbox() {
 /// logo, not the IDE.
 std::string asset_path(const char* name) {
     std::vector<std::string> roots;
-    char buf[4096];
-    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
-    if (n > 0) {
-        buf[n] = 0;
-        std::string exe(buf);
-        const size_t slash = exe.find_last_of('/');
-        if (slash != std::string::npos) {
-            const std::string dir = exe.substr(0, slash);
-            roots.push_back(dir + "/../assets/");   // bundle: bin/ -> ../assets
-            roots.push_back(dir + "/assets/");
-            roots.push_back(dir + "/../../assets/"); // repo: designer/ -> ../assets
-        }
+    const std::string dir = openepl::sys::exe_dir();
+    if (!dir.empty()) {
+        roots.push_back(dir + "/../assets/");   // bundle: bin/ -> ../assets
+        roots.push_back(dir + "/assets/");
+        roots.push_back(dir + "/../../assets/"); // repo: designer/ -> ../assets
     }
     roots.push_back("assets/");
     for (const auto& r : roots) {
         const std::string candidate = r + name;
-        if (::access(candidate.c_str(), R_OK) == 0) {
-            char real[4096];
+        if (openepl::sys::readable(candidate)) {
             // RmlUi resolves a decorator path as a URL and eats the leading
             // slash of an absolute one, so hand it back doubled.
-            if (::realpath(candidate.c_str(), real)) return "/" + std::string(real);
+            const std::string real = openepl::sys::real_path(candidate);
+            if (!real.empty()) return "/" + real;
             return candidate;
         }
     }
@@ -1443,13 +1445,13 @@ std::string form_icon_src() {
     if (const std::string* icon = g.model.form.property("icon")) {
         if (!icon->empty()) {
             std::string path = *icon;
-            if (path[0] != '/') {
+            if (!openepl::sys::is_absolute(path)) {
                 const size_t slash = g.model.path.find_last_of('/');
                 path = (slash == std::string::npos ? std::string() : g.model.path.substr(0, slash + 1)) + path;
             }
-            char real[4096];
-            if (::access(path.c_str(), R_OK) == 0 && ::realpath(path.c_str(), real)) {
-                return "/" + std::string(real);
+            if (openepl::sys::readable(path)) {
+                const std::string real = openepl::sys::real_path(path);
+                if (!real.empty()) return "/" + real;
             }
         }
     }
@@ -2504,16 +2506,19 @@ void add_component(const std::string& type_name) {
         // beside the form, and the tray is where it can be selected.
         g.model.module_components.push_back(c);
     }
-    // The kit has to be in scope for the declaration to compile, and only the
-    // module's own `use` lines can put it there — which is text, not layout,
-    // so say so rather than writing a line the user did not ask for.
+    // The kit has to be in scope for the declaration to compile. Dropping the
+    // component is asking for it, so the module gains the `use` line: the
+    // model records it here (after push_undo, so an undo takes it back out
+    // with the component) and the next save writes it after the header.
     if (!desc->kit.empty()) {
         bool used = false;
         for (const auto& u : g.model.uses) {
             if (u == desc->kit) used = true;
         }
-        if (!used) log(type_name + " needs `use " + desc->kit + "` — add it in the Code view.",
-                       "err");
+        if (!used) {
+            g.model.uses.push_back(desc->kit);
+            log("added `use " + desc->kit + "` for " + type_name + "; it is written on save.");
+        }
     }
     mark_dirty();
     set_status("added " + c.id + (desc->visual ? "" : " (tray)"));
@@ -2757,7 +2762,7 @@ void build_binary(bool then_run) {
     save();
     g.log_lines.clear();
 
-    g.build_target = "/tmp/openepl_studio_app";
+    g.build_target = openepl::sys::temp_dir() + "/" + openepl::sys::program_name("openepl_studio_app");
     const std::string cmd =
         g.openepl_bin + " build " + g.model.path + " -o " + g.build_target + " 2>&1";
 
@@ -2769,6 +2774,20 @@ void build_binary(bool then_run) {
     log("  stage 3/4  clang: assemble + link the runtime", "muted");
     log("  stage 4/4  dead-strip unused commands (--gc-sections)", "muted");
 
+#ifdef _WIN32
+    // No shell: the compiler is started directly, its stderr merged into the
+    // same pipe the `2>&1` above merges it into on POSIX.
+    (void)cmd;
+    using namespace openepl::sys;
+    if (!spawn(g.build_child,
+               quote_arg(g.openepl_bin) + " build " + quote_arg(g.model.path) + " -o " +
+                   quote_arg(g.build_target),
+               true, false)) {
+        log("could not start the build", "err");
+        return;
+    }
+    g.build_pid = (pid_t)g.build_child.pid;
+#else
     int fds[2] = {-1, -1};
     if (::pipe(fds) != 0) { log("could not create the build pipe", "err"); return; }
     const pid_t pid = fork();
@@ -2786,6 +2805,7 @@ void build_binary(bool then_run) {
 
     g.build_pid = pid;
     g.build_output = fds[0];
+#endif
     g.build_then_run = then_run;
     g.build_started = now_seconds();
     set_status("building...");
@@ -2796,6 +2816,31 @@ void build_binary(bool then_run) {
 void poll_build() {
     if (g.build_pid <= 0) return;
 
+#ifdef _WIN32
+    if (g.build_child.out) {
+        char buf[1024];
+        int n;
+        static std::string partial;
+        while ((n = openepl::sys::read_nonblocking(g.build_child.out, buf, sizeof buf)) > 0) {
+            partial.append(buf, (size_t)n);
+            size_t nl;
+            while ((nl = partial.find('\n')) != std::string::npos) {
+                log("  " + partial.substr(0, nl), "muted");
+                partial.erase(0, nl + 1);
+            }
+        }
+        if (n == 0) {
+            if (!partial.empty()) { log("  " + partial, "muted"); partial.clear(); }
+            openepl::sys::close_output(g.build_child);
+        }
+    }
+
+    int rc = -1;
+    if (!openepl::sys::try_wait(g.build_child, rc)) return;
+    const double secs = now_seconds() - g.build_started;
+    g.build_pid = 0;
+    openepl::sys::release(g.build_child);
+#else
     if (g.build_output >= 0) {
         char buf[1024];
         ssize_t n;
@@ -2821,6 +2866,7 @@ void poll_build() {
     const double secs = now_seconds() - g.build_started;
     g.build_pid = 0;
     if (g.build_output >= 0) { ::close(g.build_output); g.build_output = -1; }
+#endif
 
     char line[320];
     if (rc != 0) {
@@ -2858,6 +2904,13 @@ void run_app(const std::string& path) {
     stop_app();
     // Pipe the app's stdout and stderr back to us: its output belongs in the
     // IDE console, not in whatever terminal the IDE happened to start from.
+#ifdef _WIN32
+    if (!openepl::sys::spawn(g.app_child, openepl::sys::quote_arg(path), true, false)) {
+        log("could not start the app");
+        return;
+    }
+    const pid_t pid = (pid_t)g.app_child.pid;
+#else
     int fds[2] = {-1, -1};
     if (::pipe(fds) != 0) { log("could not create the output pipe", "err"); return; }
     const pid_t pid = fork();
@@ -2875,6 +2928,7 @@ void run_app(const std::string& path) {
     // UI waiting for an app that is simply quiet.
     ::fcntl(fds[0], F_SETFL, O_NONBLOCK);
     g.app_output = fds[0];
+#endif
     g.running_app = pid;
     log("> running: " + path + "  (pid " + std::to_string(pid) + ")", "muted");
     log("  output below is the program's own stdout/stderr", "muted");
@@ -2885,6 +2939,20 @@ void run_app(const std::string& path) {
 /// Stop the app started by Run, if it is still alive.
 void stop_app() {
     if (g.running_app <= 0) { set_status("nothing running"); return; }
+#ifdef _WIN32
+    int code = 0;
+    if (openepl::sys::try_wait(g.app_child, code)) {   // already exited
+        openepl::sys::release(g.app_child);
+        g.running_app = 0;
+        set_status("nothing running");
+        return;
+    }
+    openepl::sys::terminate(g.app_child);
+    WaitForSingleObject(g.app_child.process, INFINITE);
+    drain_app_output();
+    log("> stopped (pid " + std::to_string(g.running_app) + ")", "muted");
+    openepl::sys::release(g.app_child);
+#else
     if (::kill(g.running_app, 0) != 0) {   // already exited
         g.running_app = 0;
         set_status("nothing running");
@@ -2896,6 +2964,7 @@ void stop_app() {
     drain_app_output();
     log("> stopped (pid " + std::to_string(g.running_app) + ")", "muted");
     if (g.app_output >= 0) { ::close(g.app_output); g.app_output = -1; }
+#endif
     g.running_app = 0;
     set_status("stopped");
     set_activity(nullptr);
@@ -2903,11 +2972,19 @@ void stop_app() {
 
 /// Reap the app if it exited on its own, so Stop reports honestly.
 void drain_app_output() {
+#ifdef _WIN32
+    if (!g.app_child.out) return;
+    char buf[1024];
+    int n;
+    static std::string partial;
+    while ((n = openepl::sys::read_nonblocking(g.app_child.out, buf, sizeof buf)) > 0) {
+#else
     if (g.app_output < 0) return;
     char buf[1024];
     ssize_t n;
     static std::string partial;
     while ((n = ::read(g.app_output, buf, sizeof buf)) > 0) {
+#endif
         partial.append(buf, (size_t)n);
         size_t nl;
         // Log whole lines only: a write split mid-line would otherwise appear
@@ -2919,18 +2996,29 @@ void drain_app_output() {
     }
     if (n == 0) {   // the app closed its end
         if (!partial.empty()) { log(partial); partial.clear(); }
+#ifdef _WIN32
+        openepl::sys::close_output(g.app_child);
+#else
         ::close(g.app_output);
         g.app_output = -1;
+#endif
     }
 }
 
 void poll_app() {
     drain_app_output();
     if (g.running_app <= 0) return;
+#ifdef _WIN32
+    int code = 0;
+    if (openepl::sys::try_wait(g.app_child, code)) {
+        drain_app_output();      // whatever it printed on the way out
+        openepl::sys::release(g.app_child);
+#else
     int status = 0;
     if (::waitpid(g.running_app, &status, WNOHANG) == g.running_app) {
         drain_app_output();      // whatever it printed on the way out
         const int code = WEXITSTATUS(status);
+#endif
         log("> app exited with code " + std::to_string(code), "muted");
         g.running_app = 0;
         // A console program finishes in milliseconds. Saying "nothing running"
@@ -5640,20 +5728,19 @@ std::string create_project(const std::string& template_id,
         dir = template_id + "-" + std::to_string(n);
     }
 
-    const std::string cmd = g.openepl_bin + " new " + template_id + " " + dir + " 2>&1";
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return "";
-    std::string open_path;
-    char buf[1024];
-    while (fgets(buf, sizeof buf, pipe)) {
-        std::string line(buf);
+    std::string text;
+    if (openepl::sys::capture_output(g.openepl_bin + " new " + template_id + " " + dir, true, text) == -1 &&
+        text.empty())
+        return "";
+    std::string open_path, line;
+    std::istringstream lines(text);
+    while (std::getline(lines, line)) {
         while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
         // `new` reports which file to open, so we do not have to guess it from
         // the template's layout.
         if (line.rfind("open: ", 0) == 0) open_path = line.substr(6);
         std::fprintf(stderr, "designer: %s\n", line.c_str());
     }
-    pclose(pipe);
     (void)templates;
     return open_path;
 }
@@ -5864,9 +5951,9 @@ std::string run_welcome(const std::string& family) {
     };
     auto start_dir = []() {
         char buf[4096];
-        if (::getcwd(buf, sizeof buf)) return std::string(buf);
-        const char* home = std::getenv("HOME");
-        return std::string(home && *home ? home : "/");
+        if (::getcwd(buf, sizeof buf)) return openepl::sys::slashes(buf);
+        const std::string home = openepl::sys::home_dir();
+        return home.empty() ? openepl::sys::root_dir() : home;
     };
 
     if (const char* pick = std::getenv("OPENEPL_DESIGNER_WELCOME_PICK")) {
@@ -5950,21 +6037,8 @@ std::string run_welcome(const std::string& family) {
 
 /// A writable per-user cache path for `name`.
 std::string cache_file(const char* name) {
-    const char* xdg = std::getenv("XDG_CACHE_HOME");
-    const char* home = std::getenv("HOME");
-    std::string dir;
-    if (xdg && *xdg) {
-        dir = std::string(xdg) + "/openepl";
-    } else if (home && *home) {
-        dir = std::string(home) + "/.cache/openepl";
-    } else {
-        dir = "/tmp";
-    }
-    std::string acc;
-    for (size_t i = 0; i < dir.size(); i++) {
-        acc += dir[i];
-        if (dir[i] == '/' || i + 1 == dir.size()) ::mkdir(acc.c_str(), 0755);
-    }
+    const std::string dir = openepl::sys::cache_dir();
+    openepl::sys::make_dirs(dir);
     return dir + "/" + name;
 }
 
@@ -5974,19 +6048,70 @@ std::string cache_file(const char* name) {
 /// found by a fixed relative path. Ours is next to this executable; the repo's
 /// debug build is the fallback for development.
 std::string sibling_openepl() {
-    char buf[4096];
-    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
-    if (n > 0) {
-        buf[n] = 0;
-        std::string exe(buf);
-        const size_t slash = exe.find_last_of('/');
-        if (slash != std::string::npos) {
-            const std::string cand = exe.substr(0, slash) + "/openepl";
-            if (::access(cand.c_str(), X_OK) == 0) return cand;
-        }
+    const std::string dir = openepl::sys::exe_dir();
+    if (!dir.empty()) {
+        const std::string cand = dir + "/" + openepl::sys::openepl_exe_name();
+        if (openepl::sys::executable(cand)) return cand;
     }
-    return "./target/debug/openepl";
+    return "./target/debug/" + std::string(openepl::sys::openepl_exe_name());
 }
+
+#ifdef _WIN32
+/// The faces to try on Windows, where the ui library's list — Linux
+/// distribution paths — finds nothing, and RmlUi text with no loaded face
+/// renders invisibly. The bundle ships DejaVu beside Studio (assets/fonts,
+/// see tools/package-windows.sh), so a Windows machine with no font Studio
+/// knows still gets the one Linux uses; the system's Segoe UI and Consolas
+/// come next, and Tahoma — the one face wine always has — last.
+const openepl::ui::FontCandidate* windows_font_candidates(int* count) {
+    static std::vector<std::string> paths;
+    static std::vector<openepl::ui::FontCandidate> fonts;
+    if (fonts.empty()) {
+        const std::string exe = openepl::sys::exe_dir();
+        const char* win = std::getenv("WINDIR");
+        const std::string sys = openepl::sys::slashes(win && *win ? win : "C:/Windows") + "/Fonts/";
+        std::vector<std::string> roots;
+        if (!exe.empty()) {
+            roots.push_back(exe + "/../assets/fonts/");     // bundle: bin/ -> ../assets
+            roots.push_back(exe + "/assets/fonts/");
+            roots.push_back(exe + "/../../assets/fonts/");  // repo: designer/ -> ../assets
+        }
+        roots.push_back("assets/fonts/");
+        struct Face { const char* regular; const char* family; const char* bold; const char* italic;
+                      const char* bold_italic; bool mono; };
+        const Face dejavu[] = {
+            {"DejaVuSans.ttf", "DejaVu Sans", "DejaVuSans-Bold.ttf", "DejaVuSans-Oblique.ttf",
+             "DejaVuSans-BoldOblique.ttf", false},
+            {"DejaVuSansMono.ttf", "DejaVu Sans Mono", "DejaVuSansMono-Bold.ttf",
+             "DejaVuSansMono-Oblique.ttf", "DejaVuSansMono-BoldOblique.ttf", true},
+        };
+        const Face system[] = {
+            {"segoeui.ttf", "Segoe UI", "segoeuib.ttf", "segoeuii.ttf", "segoeuiz.ttf", false},
+            {"consola.ttf", "Consolas", "consolab.ttf", "consolai.ttf", "consolaz.ttf", true},
+            {"tahoma.ttf", "Tahoma", "tahomabd.ttf", nullptr, nullptr, false},
+            {"cour.ttf", "Courier New", "courbd.ttf", "couri.ttf", "courbi.ttf", true},
+        };
+        // The vector is sized once, up front: the FontCandidate pointers
+        // into `paths` must not move after they are taken.
+        paths.reserve((roots.size() * 2 + 4) * 4);
+        auto add = [&](const std::string& root, const Face& f) {
+            auto keep = [&](const char* name) -> const char* {
+                if (!name) return nullptr;
+                paths.push_back(root + name);
+                return paths.back().c_str();
+            };
+            const char* regular = keep(f.regular);
+            fonts.push_back({regular, f.family, keep(f.bold), keep(f.italic), keep(f.bold_italic), f.mono});
+        };
+        for (const auto& r : roots) {
+            for (const auto& f : dejavu) add(r, f);
+        }
+        for (const auto& f : system) add(sys, f);
+    }
+    *count = (int)fonts.size();
+    return fonts.data();
+}
+#endif
 
 int main(int argc, char** argv) {
     g.openepl_bin = sibling_openepl();
@@ -6021,10 +6146,14 @@ int main(int argc, char** argv) {
      * with no window at all, and a caller who set SDL_VIDEODRIVER
      * knows better than this default, as does OPENEPL_UI_WINDOW=1 — the
      * one test that reads the manager's own flags back needs a real window. */
+    // Not on Windows: SDL's offscreen driver draws through EGL, which the
+    // Windows build of SDL has none of (libs/ui/ui_rmlui.cpp says the same).
+#ifndef _WIN32
     if (!std::getenv("SDL_VIDEODRIVER") && !std::getenv("OPENEPL_UI_WINDOW") &&
         (std::getenv("OPENEPL_DESIGNER_SCRIPT") || std::getenv("OPENEPL_DESIGNER_DUMP") ||
          std::getenv("OPENEPL_DESIGNER_WELCOME_DUMP")))
         setenv("SDL_VIDEODRIVER", "offscreen", 1);
+#endif
     if (!Backend::Initialize("OpenEPL Studio", INIT_W, INIT_H, true)) return 1;
 
     // The window icon: what a task switcher and a dock show. SDL owns the
@@ -6034,7 +6163,7 @@ int main(int argc, char** argv) {
         if (!icon.empty()) {
             // asset_path returns the URL form (doubled leading slash) for
             // RmlUi; SDL wants the plain filesystem path.
-            const std::string file = icon.compare(0, 2, "//") == 0 ? icon.substr(1) : icon;
+            const std::string file = openepl::sys::path_of_url(icon);
             if (SDL_Surface* s = IMG_Load(file.c_str())) {
                 SDL_SetWindowIcon(win, s);
                 SDL_FreeSurface(s);
@@ -6062,7 +6191,11 @@ int main(int argc, char** argv) {
     Rml::Initialise();
 
     int font_count = 0;
+#ifdef _WIN32
+    const auto* fonts = windows_font_candidates(&font_count);
+#else
     const auto* fonts = openepl::ui::font_candidates(&font_count);
+#endif
     std::string family = "sans-serif";
     for (int i = 0; i < font_count; i++) {
         if (!Rml::LoadFontFace(fonts[i].path)) continue;
@@ -6146,8 +6279,8 @@ int main(int argc, char** argv) {
     // The language server, started on the project's directory so it finds the
     // runtime and the component library the same way the compiler does.
     {
-        char real[4096];
-        const std::string abs = ::realpath(path.c_str(), real) ? real : path;
+        std::string abs = openepl::sys::real_path(path);
+        if (abs.empty()) abs = path;
         const size_t slash = abs.find_last_of('/');
         g.lsp.start(g.openepl_bin, slash == std::string::npos ? "." : abs.substr(0, slash));
         std::string text;

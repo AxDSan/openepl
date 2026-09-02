@@ -2,9 +2,18 @@
 # Build the OpenEPL designer. No CMake: this mirrors libs/ui/lib.json's flags.
 #   designer/build.sh          -> build designer/openepl-designer
 #   designer/build.sh test     -> run the model tests, then the Studio tests (needs a display)
+#   designer/build.sh --os windows -> designer/windows/openepl-studio.exe, via build-windows.sh
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+
+if [ "${1:-}" = "--os" ]; then
+  case "${2:-}" in
+    windows) exec designer/build-windows.sh ;;
+    linux) shift 2 ;;
+    *) echo "unknown --os ${2:-}: linux or windows" >&2; exit 1 ;;
+  esac
+fi
 
 if [ ! -f vendor/RmlUi/build/librmlui.a ]; then
   echo "RmlUi is not vendored — run tools/fetch-rmlui.sh" >&2
@@ -23,6 +32,11 @@ if [ "${1:-}" = "test" ]; then
   export XDG_CACHE_HOME=/tmp/openepl_test_cache XDG_DATA_HOME=/tmp/openepl_test_data
   clang++ -std=c++17 -O1 -I designer designer/model.cpp designer/test_model.cpp -o /tmp/openepl_designer_test
   /tmp/openepl_designer_test ./target/debug/openepl
+  # The platform layer (portable.h): the process and path shims Studio's
+  # build, run and language-server code sit on. The same probe runs under
+  # wine for the Windows half (cli/tests/studio_windows.rs).
+  clang++ -std=c++17 -O1 -I designer designer/test_portable.cpp -o /tmp/openepl_portable_probe
+  /tmp/openepl_portable_probe
   # The Studio tests drive the built designer through its scripted verbs, so
   # they need the binary and a display; a headless checkout still gets the
   # model tests above rather than a failure it cannot act on.

@@ -232,11 +232,24 @@ impl Os {
 const MINGW_TRIPLE: &str = "x86_64-w64-mingw32";
 const MINGW_GCC: &str = "x86_64-w64-mingw32-gcc";
 const MINGW_AR: &str = "x86_64-w64-mingw32-ar";
+/// C++ is compiled by mingw's own g++ rather than by clang retargeted: the
+/// vendored RmlUi archive is g++'s, and the two compilers disagree about the
+/// size of C++ COMDAT type-info sections, which mingw's linker refuses to
+/// merge. C and the IR stay with clang, whose objects have no such sections.
+const MINGW_GXX: &str = "x86_64-w64-mingw32-g++";
+const MINGW_OBJDUMP: &str = "x86_64-w64-mingw32-objdump";
 
-/// The one Windows target that does not exist yet, in the words a build
-/// answers with wherever it discovers the fact.
-const GUI_NOT_ON_WINDOWS: &str =
-    "target gui is not available for windows yet (no Windows build of the ui library)";
+/// The resource table a Windows program carries when it names no picture.
+///
+/// On Linux `libs/ui` declares the table weak and reads a null pointer as
+/// empty. PE has no weak undefined symbol — a reference resolves or the link
+/// fails — so a Windows program always defines the table, empty here, and the
+/// library there declares an ordinary extern. Defined for every Windows
+/// executable rather than only a form's: a console program that says `use ui`
+/// references it too, and one nothing references is dead-stripped.
+const EMPTY_RESOURCE_TABLE: &str = "\n; No resources to embed; the table is defined anyway because a PE link has no\n\
+     ; weak undefined symbol for libs/ui to read as \"none\".\n\
+     @oe_embedded_resources = constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } zeroinitializer]\n";
 
 /// Parse `<in.oir> [-o out] [--target kind] [--os name] [--release]` from an
 /// argument slice.
@@ -630,13 +643,6 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
             return 1;
         }
     };
-    // The UI stack is vendored for Linux only, so a form has no Windows build
-    // to link against. Said in the program's terms: the target, not the
-    // library, is what the person asked for.
-    if io.os == Os::Windows && (target == Target::Gui || plan.build.needs_cxx) {
-        eprintln!("openepl: {GUI_NOT_ON_WINDOWS}");
-        return 1;
-    }
     let out_bin = match io.output {
         Some(p) => output_for_os(p, target, io.os),
         None => default_output(&input, io.project_output.as_deref(), target, io.os),
@@ -646,7 +652,11 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
     if target.is_executable() {
         match embed_resources(&module, &input) {
             Ok(Some(table)) => ll.push_str(&table),
-            Ok(None) => {}
+            Ok(None) => {
+                if io.os == Os::Windows {
+                    ll.push_str(EMPTY_RESOURCE_TABLE);
+                }
+            }
             Err(e) => {
                 eprintln!("openepl: {e}");
                 return 1;
@@ -728,14 +738,6 @@ fn compile_with(
         module.target = Some(t);
     }
     let target = module.target();
-    // Before a single library is introspected: the UI library's own
-    // prerequisite check would otherwise answer first, and "fetch RmlUi" is
-    // the wrong advice for a form nobody can build for Windows yet. The
-    // console module that merely says `use ui` is caught after the load, by
-    // the C++ the plan then needs.
-    if require_impl && os == Os::Windows && target == Target::Gui {
-        return Err(GUI_NOT_ON_WINDOWS.to_string());
-    }
 
     let repo_root = find_repo_root().ok_or_else(|| {
         "could not locate the OpenEPL runtime (runtime/openepl_core.h); \
@@ -1180,7 +1182,8 @@ fn clang_link(
 }
 
 /// Build for Windows x86-64: clang compiles the IR and every C source against
-/// the mingw-w64 target, one object each, and mingw's gcc links them.
+/// the mingw-w64 target, mingw's g++ compiles the C++, and mingw's gcc (g++
+/// when there is C++ to carry) links them.
 ///
 /// Separate from the host link on purpose. The host path is one command and a
 /// PIE retry that both assume the compiler and the linker are the same driver;
@@ -1197,28 +1200,12 @@ fn mingw_link(
     release: bool,
 ) -> Result<(), i32> {
     let cfg = &plan.build;
-    // Host `pkg-config` answers for the host's libraries; its flags would
-    // point mingw at Linux headers. Nothing a console program uses asks for
-    // it today, and the day one does it needs a cross answer, not a wrong one.
-    if !cfg.pkg_config.is_empty() {
-        eprintln!(
-            "openepl: a library this program uses needs pkg-config ({}), which has no \
-             Windows answer on this machine",
-            cfg.pkg_config.join(", ")
-        );
-        return Err(1);
-    }
     let driver = "clang";
     let driver_args = vec![format!("--target={MINGW_TRIPLE}")];
 
     let mut common: Vec<String> = vec![
         "-ffunction-sections".into(),
         "-fdata-sections".into(),
-        "-Wno-override-module".into(),
-        // One object per input means the `.ll` is compiled on its own, and
-        // an include path is meaningless to it; clang says so for every
-        // build otherwise.
-        "-Wno-unused-command-line-argument".into(),
         "-I".into(),
         repo_root.join("abi").display().to_string(),
         "-I".into(),
@@ -1230,6 +1217,16 @@ fn mingw_link(
     }
     for d in &cfg.defines {
         common.push(format!("-D{d}"));
+    }
+    // The sysroot's pkg-config, never the host's: its `-I` names the mingw
+    // SDL2 and freetype headers, which is what the ui library compiles
+    // against for Windows (libs/ui/lib.json, `windows_pkg_config`).
+    match libload::pkg_config_flags_cross(&cfg.pkg_config, "--cflags") {
+        Ok(flags) => common.extend(flags),
+        Err(e) => {
+            eprintln!("openepl: {e}");
+            return Err(1);
+        }
     }
     // No -fPIC: every PE image is relocatable already, and clang's mingw
     // target says so — with a warning — when asked for it.
@@ -1243,35 +1240,95 @@ fn mingw_link(
         Vec::new()
     };
 
-    let mut inputs: Vec<(PathBuf, Option<&'static str>)> = vec![(ll_path.to_path_buf(), None)];
+    // clang's flags, and g++'s: the same list minus what only clang knows.
+    // The release flags are gcc's own vocabulary and both take them.
+    let mut clang_common = common.clone();
+    clang_common.push("-Wno-override-module".into());
+    // One object per input means the `.ll` is compiled on its own, and an
+    // include path is meaningless to it; clang says so for every build
+    // otherwise.
+    clang_common.push("-Wno-unused-command-line-argument".into());
+    let mut gxx_common = common.clone();
+    gxx_common.push("-std=gnu++17".into());
+
+    let mut c_inputs: Vec<(PathBuf, Option<&'static str>)> = vec![(ll_path.to_path_buf(), None)];
+    let mut cxx_inputs: Vec<(PathBuf, Option<&'static str>)> = Vec::new();
     for s in &plan.impl_sources {
         // As on the host: the entry object belongs to a program only.
         if !target.is_executable() && s.file_name().and_then(|f| f.to_str()) == Some("oe_start.c") {
             continue;
         }
-        inputs.push((s.clone(), None));
+        let is_cxx = matches!(
+            s.extension().and_then(|e| e.to_str()),
+            Some("cpp") | Some("cc") | Some("cxx")
+        );
+        if is_cxx {
+            cxx_inputs.push((s.clone(), None));
+        } else {
+            c_inputs.push((s.clone(), Some("c")));
+        }
     }
 
     if target == Target::StaticLib {
-        return build_archive(driver, &driver_args, MINGW_AR, &common, &inputs, out_bin);
+        if !cxx_inputs.is_empty() {
+            // An archive is one compile per object and one `ar`; two
+            // compilers would need two passes into one archive, and no
+            // library target has asked for it — a library cannot declare a
+            // form, and `use ui` without one is a program's mistake to make.
+            eprintln!(
+                "openepl: a static library for windows cannot carry C++ sources (this \
+                 program uses a library that needs them)"
+            );
+            return Err(1);
+        }
+        return build_archive(driver, &driver_args, MINGW_AR, &clang_common, &c_inputs, out_bin);
     }
 
     let dir = std::env::temp_dir().join(format!("openepl_mingw_{}", std::process::id()));
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    let c_dir = dir.join("c");
+    let cxx_dir = dir.join("cxx");
+    if let Err(e) = std::fs::create_dir_all(&c_dir).and_then(|_| std::fs::create_dir_all(&cxx_dir)) {
         eprintln!("openepl: cannot create {}: {e}", dir.display());
         return Err(1);
     }
-    let objects = match compile_objects(driver, &driver_args, &common, &inputs, &dir) {
+    let mut objects = match compile_objects(driver, &driver_args, &clang_common, &c_inputs, &c_dir) {
         Ok(o) => o,
         Err(code) => {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(code);
         }
     };
+    if !cxx_inputs.is_empty() {
+        match compile_objects(MINGW_GXX, &[], &gxx_common, &cxx_inputs, &cxx_dir) {
+            Ok(o) => objects.extend(o),
+            Err(code) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(code);
+            }
+        }
+    }
 
-    let mut cmd = Command::new(MINGW_GCC);
+    // The link driver follows the sources: g++ knows where libstdc++ is.
+    let linker = if cxx_inputs.is_empty() { MINGW_GCC } else { MINGW_GXX };
+    let mut cmd = Command::new(linker);
     cmd.args(&objects);
     cmd.args(&cfg.link_args);
+    match libload::pkg_config_flags_cross(&cfg.pkg_config, "--libs") {
+        // `-mwindows` is a fact about the TARGET, said below for a form and
+        // not for a console program that merely uses the library; and
+        // `SDL2main` is the entry SDL offers a program without one, which a
+        // program with `main` in runtime/oe_start.c does not want.
+        Ok(flags) => cmd.args(
+            flags
+                .iter()
+                .filter(|f| !matches!(f.as_str(), "-mwindows" | "-lmingw32" | "-lSDL2main")),
+        ),
+        Err(e) => {
+            eprintln!("openepl: {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(1);
+        }
+    };
     cmd.arg("-lm");
     // Winsock is not among the libraries mingw links by default, and `net`
     // is the one library that needs it (libs/net/net_internal.h). Always
@@ -1279,6 +1336,12 @@ fn mingw_link(
     // costs the link nothing, and the link does not have to know which
     // library is which.
     cmd.arg("-lws2_32");
+    if !cxx_inputs.is_empty() {
+        // The C++ runtime goes into the image: two DLLs fewer to ship, and
+        // the ones mingw would otherwise want are the ones most often
+        // missing on the machine the program lands on.
+        cmd.arg("-static-libgcc").arg("-static-libstdc++");
+    }
     if target == Target::SharedLib {
         cmd.arg("-shared");
         // A Windows consumer links against `greet.lib`, never the DLL itself,
@@ -1289,21 +1352,129 @@ fn mingw_link(
     } else {
         cmd.arg("-Wl,--gc-sections");
     }
+    if target == Target::Gui {
+        // The GUI subsystem: Windows opens no console for the program. The
+        // entry stays `main` — mingw's CRT runs it under either subsystem.
+        cmd.arg("-mwindows");
+    }
     cmd.args(&ldflags);
     cmd.arg("-o").arg(out_bin);
     let status = cmd.status();
     let _ = std::fs::remove_dir_all(&dir);
     match status {
-        Ok(s) if s.success() => Ok(()),
+        Ok(s) if s.success() => {}
         Ok(s) => {
-            eprintln!("openepl: {MINGW_GCC} failed with status {s}");
-            Err(1)
+            eprintln!("openepl: {linker} failed with status {s}");
+            return Err(1);
         }
         Err(e) => {
-            eprintln!("openepl: could not invoke {MINGW_GCC}: {e}");
-            Err(1)
+            eprintln!("openepl: could not invoke {linker}: {e}");
+            return Err(1);
         }
     }
+
+    // A program that links the sysroot's DLLs cannot start without them, and
+    // the machine it is copied to has no mingw sysroot. So they go beside
+    // it, transitively: what the image imports, what those import, and the
+    // ones a library loads by hand and names in its manifest.
+    if target.is_executable() {
+        match copy_windows_dlls(out_bin, &cfg.extra_dlls) {
+            Ok(dlls) if dlls.is_empty() => {}
+            Ok(dlls) => eprintln!(
+                "openepl: copied beside it, because the program imports them: {}",
+                dlls.join(" ")
+            ),
+            Err(e) => {
+                eprintln!("openepl: {e}");
+                return Err(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where the mingw-w64 sysroot keeps its DLLs: `<gcc -print-sysroot>/mingw/bin`
+/// on Fedora, `/usr/x86_64-w64-mingw32/bin` on Debian and Ubuntu (and `lib`
+/// there, for the packages that put them beside the import libraries).
+fn mingw_dll_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(out) = Command::new(MINGW_GCC).arg("-print-sysroot").output() {
+        let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !root.is_empty() && root != "/" {
+            dirs.push(PathBuf::from(&root).join("mingw/bin"));
+            dirs.push(PathBuf::from(&root).join("bin"));
+        }
+    }
+    dirs.push(PathBuf::from("/usr/x86_64-w64-mingw32/sys-root/mingw/bin"));
+    dirs.push(PathBuf::from("/usr/x86_64-w64-mingw32/bin"));
+    dirs.push(PathBuf::from("/usr/x86_64-w64-mingw32/lib"));
+    dirs.retain(|d| d.is_dir());
+    dirs.dedup();
+    dirs
+}
+
+/// The DLLs a PE image imports, by name, from its own import table.
+fn pe_imports(image: &Path) -> Result<Vec<String>, String> {
+    let out = Command::new(MINGW_OBJDUMP)
+        .arg("-p")
+        .arg(image)
+        .output()
+        .map_err(|e| format!("could not invoke {MINGW_OBJDUMP}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{MINGW_OBJDUMP} could not read {}", image.display()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("DLL Name:"))
+        .map(|n| n.trim().to_string())
+        .collect())
+}
+
+/// Copy beside `image` every DLL from the mingw sysroot it needs, following
+/// each copied DLL's own imports in turn, plus `extra` when the sysroot has
+/// them. Returns the names copied, in the order found. A DLL the sysroot does
+/// not have is Windows' own (`KERNEL32.dll`) and is left alone; a name in
+/// `extra` the sysroot does not have is skipped, not an error — it was a
+/// courtesy for one distribution's packaging.
+fn copy_windows_dlls(image: &Path, extra: &[String]) -> Result<Vec<String>, String> {
+    let dirs = mingw_dll_dirs();
+    // Windows resolves DLL names without regard to case; the sysroot spells
+    // them one way and an import table may spell them another.
+    let mut available: HashMap<String, PathBuf> = HashMap::new();
+    for d in &dirs {
+        if let Ok(rd) = std::fs::read_dir(d) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.to_ascii_lowercase().ends_with(".dll") {
+                    available.entry(name.to_ascii_lowercase()).or_insert(e.path());
+                }
+            }
+        }
+    }
+    let dest_dir = image.parent().unwrap_or(Path::new("."));
+    let mut copied: Vec<String> = Vec::new();
+    let mut queue: Vec<PathBuf> = vec![image.to_path_buf()];
+    let mut wanted: Vec<String> = extra.to_vec();
+    while let Some(next) = queue.pop() {
+        wanted.extend(pe_imports(&next)?);
+        while let Some(name) = wanted.pop() {
+            let key = name.to_ascii_lowercase();
+            if copied.iter().any(|c| c.to_ascii_lowercase() == key) {
+                continue;
+            }
+            let Some(src) = available.get(&key) else { continue };
+            let real = src
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or(name);
+            let dest = dest_dir.join(&real);
+            std::fs::copy(src, &dest)
+                .map_err(|e| format!("cannot copy {} to {}: {e}", src.display(), dest.display()))?;
+            copied.push(real);
+            queue.push(dest);
+        }
+    }
+    Ok(copied)
 }
 
 /// The import library a Windows DLL is linked through: `greet.dll` → `greet.lib`.

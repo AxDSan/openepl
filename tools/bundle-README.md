@@ -63,9 +63,36 @@ LSP-capable editor at it — `docs/editors.md` has ready-made configuration for
 Neovim, VS Code, Helix and Zed, and `editors/vscode/` is a working extension
 with syntax highlighting.
 
+## On Windows
+
+The Windows bundle (`openepl-__VERSION__-windows-x86_64.zip`) is cross-built
+from Linux and has the same layout: `bin\openepl-studio.exe` with the DLLs it
+needs beside it, `bin\openepl.exe` when the compiler cross-built (this file
+ends with a line saying so when it did not), and the same `templates\`,
+`runtime\`, `libs\` and `docs\`. Unzip it anywhere and run
+`bin\openepl-studio.exe`.
+
+Building a program there needs a toolchain on the machine, the same two
+`openepl build --os windows` uses on Linux:
+
+| For | You need on the Windows machine |
+| --- | --- |
+| Any build | LLVM's `clang` on `PATH` — https://releases.llvm.org/ |
+| The link | mingw-w64's `gcc` and `g++` on `PATH` — MSYS2's `mingw-w64-x86_64-gcc` |
+| GUI programs | the mingw-w64 SDL2, SDL2_image and freetype packages (MSYS2: `mingw-w64-x86_64-SDL2`, `-SDL2_image`, `-freetype`) |
+
+Without `clang`, Studio opens and shows the templates, but the toolbox is
+empty — it is filled from `openepl commands`, which compiles each library's
+metadata with clang — and Build says `invoke clang: program not found`. This is a first Windows build:
+it has been run under wine, not on Windows, and the IDE's window has not yet
+been seen drawn there. Accessibility is off on Windows, and `https://` is
+off in a Windows build.
+
 ## What this is not, yet
 
-* **Linux x86-64 only.** Windows, macOS and arm64 are not supported yet.
+* **x86-64 only, and Windows is new.** The Linux bundle is what has been
+  used; the Windows one is cross-built and run under wine only (see above).
+  macOS and arm64 are not supported yet.
 * **A release build is hardened, not hidden.** `openepl build --release`
   optimises, hardens and strips what you build. A native binary can still be
   disassembled — the flag buys a smaller, harder-to-attack program, not secrecy.

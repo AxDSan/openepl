@@ -7,12 +7,15 @@ you to ignore the page.
 
 ## Platforms
 
-**Linux on x86-64, plus a cross build for Windows.** Console programs and
-libraries cross-build for Windows x86-64 from Linux with `--os windows` (see
-[Build targets](./build-targets.md)); the result is tested under wine, and
-has not yet been tried on a Windows machine. GUI programs and Studio itself are
-Linux-only: the UI stack has no Windows build yet, so `gui` refuses. Nothing
-is built natively *on* Windows — the toolchain runs on Linux — and macOS and
+**Linux on x86-64, plus a cross build for Windows.** Programs — windowed
+and console — and libraries cross-build for Windows x86-64 from Linux with
+`--os windows` (see [Build targets](./build-targets.md)). A console program
+is tested under wine and runs; a windowed one is tested under wine as far as
+a machine without a display allows — it loads with its DLLs and reaches the
+UI library — and its drawn window has not been checked under wine or on a
+Windows machine. Accessibility is off in a Windows build: the a11y bridge
+has no AccessKit Windows adapter yet. Studio itself is Linux-only, nothing is
+built natively *on* Windows — the toolchain runs on Linux — and macOS and
 arm64 are not supported at all.
 
 ## Programs you build
@@ -91,6 +94,6 @@ fill one from a query.
 ## What does work
 
 Design a form, wire an event, build it, run it, and ship the binary — plus
-console programs, servers and libraries, on Linux, today — and a console
-program or a library cross-built for Windows. Everything above is what is
+console programs, servers and libraries, on Linux, today — and the same
+program or library cross-built for Windows. Everything above is what is
 missing from that, not a warning that the core does not function.

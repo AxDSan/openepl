@@ -5,6 +5,14 @@
  * substrate swappable (D10). Swapping backends means replacing this file.
  *
  */
+/* abi/openepl_abi.h checks its slot layout with C11's `_Static_assert`, which
+ * clang also takes in C++ and g++ does not. The Windows build of this file is
+ * g++'s — it has to be, the vendored RmlUi archive is g++'s and the two
+ * compilers disagree about C++ COMDAT sizes — so the C spelling is mapped to
+ * the C++ one before the header is read. */
+#if defined(__GNUC__) && !defined(__clang__) && !defined(_Static_assert)
+    #define _Static_assert static_assert
+#endif
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/ElementInstancer.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
@@ -37,6 +45,17 @@
 #include "openepl_ui.h"
 
 namespace {
+
+/* The one place this file knows the platform (libs/README.md, Portability):
+ * setting a variable in our own environment, which POSIX spells setenv and
+ * the Microsoft CRT spells _putenv_s. Everything below reads the same on both. */
+void ui_setenv(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
 
 struct UiState {
     Rml::Context* context = nullptr;
@@ -322,6 +341,11 @@ ShortcutListener g_shortcuts;
  * built binary carries them instead of a promise about a path on the machine it
  * was built on. The table is weak: a program that names none defines neither
  * the symbol nor an empty stand-in, and a null table is the empty one. */
+/* Outside the unnamed namespace, on purpose: g++ gives a variable declared
+ * inside one internal linkage even under `extern "C"`, and then a mangled name
+ * the linker has never heard of; clang does not. Outside, both spell it the
+ * way the compiler emits it. */
+} // namespace
 extern "C" {
 struct OpenEPL_Resource {
     const char*          name;
@@ -329,9 +353,17 @@ struct OpenEPL_Resource {
     long long            size;
 };
 /* Terminated by a null `name` rather than carrying a count, because a weak
- * COUNT would have to be read through a null pointer to discover it is absent. */
+ * COUNT would have to be read through a null pointer to discover it is absent.
+ * PE has no weak undefined symbol — a reference either resolves or the link
+ * fails — so a Windows program always carries the table, empty when it names
+ * nothing (cli/src/main.rs), and the declaration there is an ordinary extern. */
+#ifdef _WIN32
+extern const OpenEPL_Resource oe_embedded_resources[];
+#else
 __attribute__((weak)) extern const OpenEPL_Resource oe_embedded_resources[];
+#endif
 }
+namespace {
 
 std::string file_name_of(const std::string& path) {
     const size_t slash = path.find_last_of("/\\");
@@ -1123,9 +1155,14 @@ int oe_ui_init(const char* title, int width, int height) {
      * the machine otherwise. SDL's offscreen driver renders through EGL
      * with no window at all, and a caller who set SDL_VIDEODRIVER
      * knows better than this default, as does OPENEPL_UI_WINDOW=1 — the
-     * one test that reads the manager's own flags back needs a real window. */
+     * one test that reads the manager's own flags back needs a real window.
+     * A Linux fact, so a Linux default: the offscreen driver draws through
+     * EGL, which Windows has no build of, and a Windows program asked for a
+     * frame count keeps its ordinary window and stops after that many. */
+#ifndef _WIN32
     if (!std::getenv("SDL_VIDEODRIVER") && !std::getenv("OPENEPL_UI_WINDOW") && (std::getenv("OPENEPL_UI_EXIT_AFTER_FRAMES") || std::getenv("OPENEPL_UI_DUMP")))
-        setenv("SDL_VIDEODRIVER", "offscreen", 1);
+        ui_setenv("SDL_VIDEODRIVER", "offscreen");
+#endif
     /* OPENEPL_UI_SIZE sizes the window at creation rather than after: an
      * offscreen surface cannot grow, so a resize there paints nothing new.
      * The form still declares its own size, which is what anchors measure

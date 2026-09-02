@@ -204,10 +204,12 @@ clang++ consumer.cpp -I. libgreet.a -lm -o consumer
 
 ## Building for Windows
 
-A console program or a library cross-builds for Windows x86-64 from Linux:
+A program — windowed or console — or a library cross-builds for Windows
+x86-64 from Linux:
 
 ```sh
 openepl build hello.oir --os windows          # hello.exe
+openepl build form.oir --os windows           # form.exe, and the DLLs it needs beside it
 openepl build greet.oir --os windows --target sharedlib   # greet.dll
 openepl build greet.oir --os windows --target staticlib   # libgreet.a
 ```
@@ -243,15 +245,94 @@ What comes out is the same program: the same source, the same commands, the
 same dead-stripping. `--release` applies too, with the hardening PE has in
 place of what ELF has — ASLR (`--dynamicbase`, `--high-entropy-va`) and DEP
 (`--nxcompat`) stand in for PIE and RELRO, and the symbol table is stripped
-the same way.
+the same way. The IR and the C go through `clang` retargeted; C++ — the ui
+library and RmlUi's backend — goes through mingw's own `g++`, the compiler
+the vendored RmlUi archive was built with, because the two disagree about
+the layout of C++ type information and mingw's linker will not merge them.
+
+### A windowed program
+
+A module with a form builds to a `.exe` for the Windows GUI subsystem — no
+console window opens behind it — and its `print_text` output goes nowhere,
+as it does for any Windows GUI program. The UI stack is linked in: RmlUi
+statically, and SDL2, SDL2_image and freetype as the DLLs the distribution's
+mingw packages provide. Those DLLs and everything they in turn import are
+copied beside the program, and the build lists them:
+
+```
+openepl: copied beside it, because the program imports them: libwinpthread-1.dll
+  libfreetype-6.dll SDL2_image.dll SDL2.dll SDL3.dll libwebpdemux-2.dll libwebp-7.dll
+  libtiff-5.dll zlib1.dll libjpeg-62.dll libgcc_s_seh-1.dll libsharpyuv-0.dll
+  libpng16-16.dll libbz2-1.dll
+openepl: wrote form.exe
+```
+
+Ship the directory, not the file: the program loads those by name from
+beside itself, and a Windows machine has none of them. The exact list is
+whatever the mingw packages on the build machine import — read from the
+images, not from a list kept by hand — so it is right for the sysroot it was
+built from. On Fedora, SDL2 is `sdl2-compat` over SDL3, which is why
+`SDL3.dll` is there; it is loaded by hand rather than imported, and the ui
+library's manifest names it so it ships. The C++ runtime is linked in, so
+`libstdc++-6.dll` is not on the list.
+
+What it needs on the build machine, beyond the cross compiler:
+
+```sh
+sudo dnf install mingw64-gcc-c++ mingw64-sdl2-compat mingw64-SDL2_image mingw64-freetype
+tools/fetch-rmlui.sh              # the vendored RmlUi, if not already there
+tools/build-rmlui-windows.sh      # the same checkout, built a second time with mingw-w64
+```
+
+`tools/build-rmlui-windows.sh` is the Windows counterpart of
+`tools/fetch-rmlui.sh`: it builds the pinned checkout into
+`vendor/RmlUi/build-windows` with a CMake toolchain file it writes itself,
+against the sysroot's SDL2 and freetype (`SYSROOT=` points it elsewhere).
+Debian and Ubuntu ship the compiler but not those cross packages; a sysroot
+with them is needed there. A build without the Windows RmlUi says so in one
+line and names the script.
+
+Two things are different on Windows, and both are said here rather than
+discovered:
+
+- **Accessibility is off.** The a11y bridge is AccessKit's Unix adapter
+  (AT-SPI over D-Bus), and AccessKit has no Windows build vendored here yet.
+  Under `_WIN32` the bridge compiles to stubs: the program runs, the
+  accessibility tree the component model carries is built as always, and
+  nothing on Windows can read it. UI Automation through AccessKit's Windows
+  adapter is the piece that is missing.
+- **Headless rendering is a Linux thing.** On Linux,
+  `OPENEPL_UI_EXIT_AFTER_FRAMES` and `OPENEPL_UI_DUMP` default to SDL's
+  offscreen driver, which draws through EGL; the Windows build of SDL has no
+  EGL, so a Windows program does not switch drivers. The frame count and the
+  dump are the same code on both platforms and should work through an
+  ordinary window there — but that has not been observed: no Windows run
+  made here has got past opening a window.
+
+To run the result under wine, put it beside its DLLs and run it there:
+
+```sh
+cd build/ && wine form.exe
+```
+
+With a display, wine's driver would open the window on your desktop and
+draw through its OpenGL; that has not been tried here. What has: with no
+display — `WINEDLLOVERRIDES="winex11.drv,winewayland.drv=d"` turns wine's
+drivers off on purpose, which is how the test suite runs so that it never
+puts a window on a developer's screen — the program loads with every DLL
+resolved, runs the runtime's entry, and stops where SDL asks for a window,
+with `SDL error on create window` on stderr and exit status 1. That is
+exactly what the suite checks, and no further: a console program that says
+`use ui` runs to completion under wine the same way, which is what proves
+the DLL list complete. The drawn window itself has not been seen under wine
+or on Windows.
 
 The limits, stated plainly:
 
-- **`gui` is not available for Windows yet.** The UI stack is vendored for
-  Linux only, and a form has nothing to link against; the build refuses
-  rather than producing a program that cannot start.
 - **Nothing is built natively on Windows yet.** This is a cross build from
   Linux; there is no Windows build of the toolchain or of Studio.
+- **A windowed program for Windows has been run under wine, not on Windows.**
+  See above for what that proves.
 - **`https://` is off in a Windows build.** The vendored mbedTLS was built
   for Linux, so a cross build leaves it out and `net_http_get` says so at run
   time; `http://` works.
