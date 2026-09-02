@@ -20,10 +20,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::sema::{
-    callee, check_args_labeled, field_type, property_type, type_of_expr_hinted, type_of_expr_in,
+    callee, check_args_labeled, field_type, property_desc, type_of_expr_hinted, type_of_expr_in,
     Components,
 };
-use crate::registry::ComponentKind;
+use crate::registry::{ComponentKind, PropertyDesc};
 use crate::{
     Component, Elem, Expr, Item, Module, RecordDef, Registry, Span, Stmt, StmtKind, Sub, Target,
     Ty,
@@ -727,14 +727,21 @@ pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Ve
                         component,
                         property,
                         value,
-                    } => match property_type(component, property, reg, &components) {
+                    } => match property_desc(component, property, reg, &components) {
                         Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
-                        Ok(expected) => match type_of_expr_in(value, &vars, reg, &components) {
-                            Ok(got) if got == expected => {}
+                        Ok(prop) => match type_of_expr_in(value, &vars, reg, &components) {
+                            Ok(got) if got == prop.ty => {
+                                if let Some(why) = colour_literal_fault(prop, value) {
+                                    push(format!(
+                                        "in `{}`: `{component}.{property}` {why}",
+                                        sub.name
+                                    ), stmt.span);
+                                }
+                            }
                             Ok(got) => push(format!(
                                 "in `{}`: `{component}.{property}` expects {}, got {}",
                                 sub.name,
-                                expected.as_str(),
+                                prop.ty.as_str(),
                                 got.as_str()
                             ), stmt.span),
                             Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
@@ -1135,6 +1142,34 @@ fn did_you_mean<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> St
     }
 }
 
+/// Why a literal written into a colour property is not a colour, or `None`.
+///
+/// A colour property is text as far as the type system goes, so `"#44444"` —
+/// five digits, one short — type-checks and then fails at run time in whatever
+/// way the renderer fails, usually by painting nothing and saying nothing.
+/// Only a literal is checked: a variable or a call is whatever it turns out to
+/// be, and guessing about it would either miss it or cry wolf. The descriptor's
+/// editor hint, not the property name, decides what is a colour — that is the
+/// one place a library says so, and the inspector reads the same word.
+fn colour_literal_fault(prop: &PropertyDesc, value: &Expr) -> Option<String> {
+    if prop.editor != "color" {
+        return None;
+    }
+    let Expr::TextLit(text) = value else {
+        return None;
+    };
+    let is_colour = text.strip_prefix('#').is_some_and(|hex| {
+        matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    });
+    if is_colour {
+        None
+    } else {
+        Some(format!(
+            "value \"{text}\" is not a colour (use #rgb, #rrggbb or #rrggbbaa)"
+        ))
+    }
+}
+
 /// Shared checking for a form root or a child component: the type must exist,
 /// every property must be declared by that type with a matching value type, and
 /// every event must exist and bind to a real subroutine.
@@ -1183,7 +1218,11 @@ fn check_component_like(
             continue;
         };
         match type_of_expr_in(value, &empty, reg, &Components::new()) {
-            Ok(got) if got == prop.ty => {}
+            Ok(got) if got == prop.ty => {
+                if let Some(why) = colour_literal_fault(prop, value) {
+                    push(format!("`{where_}`: property `{name}` {why}"), at);
+                }
+            }
             Ok(got) => push(format!(
                 "`{where_}`: property `{name}` expects {}, got {}",
                 prop.ty.as_str(),

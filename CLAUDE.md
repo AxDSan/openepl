@@ -51,6 +51,10 @@ tools/fetch-mbedtls.sh       # optional: https in `net`
 - **Verify UI work by rendering it.** Studio bugs pass tests and fail on screen.
   `OPENEPL_DESIGNER_DUMP=x.ppm OPENEPL_DESIGNER_SCRIPT='view:code' ...` writes a
   frame you can look at; the scripted verbs are in `designer/main.cpp`.
+  A headless run (those variables, or `OPENEPL_UI_EXIT_AFTER_FRAMES` /
+  `OPENEPL_UI_DUMP` for a built app) defaults to `SDL_VIDEODRIVER=offscreen`, so
+  it opens no window and steals no focus. Set `SDL_VIDEODRIVER` yourself to
+  override. Never run a UI test or a scripted session without one of them.
 - **Never open a tracked example in Studio.** It saves on exit, and the change
   lands in your next commit.
 - Support libraries are plain C: add `libs/<name>/<name>_libinfo.c` (metadata)

@@ -996,6 +996,14 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // make the component under it impossible to select.
     s << ".handle,.fgrip,.badge.live{pointer-events:auto}";
     s << ".selbox{border:1px " << ACCENT << "}";
+    // The anchors editor: a box a side, before the field, lit when set.
+    s << ".anchbox{display:inline-block;width:88px;height:24px;vertical-align:top;margin-right:6px}";
+    s << ".anch{display:inline-block;width:18px;height:18px;margin:2px 2px 0 0;text-align:center;"
+         "padding-top:2px;font-size:10px;border:1px " << BORDER << ";border-radius:3px;background-color:"
+      << PANEL << ";color:" << TEXT_MUTED << "}";
+    s << ".anch:hover{border:1px " << ACCENT << "}";
+    s << ".anch.on{background-color:" << ACCENT << ";border:1px " << ACCENT << ";color:#ffffff}";
+    s << ".prow input.withanch{display:inline-block;width:" << (INSPECT_W - 40 - 94) << "px}";
     s << ".selbox.alt{border:1px #9db8ea}";
     s << ".guide{background-color:#ff4d9a}";
     s << ".fgrip{background-color:#00000000}";
@@ -1367,6 +1375,21 @@ std::string form_icon_src() {
     return asset_path("openepl-icon-64.png");
 }
 
+/* The offscreen driver applies SDL_SetWindowSize and tells nobody: no
+ * SIZE_CHANGED event reaches the backend, so its GL viewport keeps the old
+ * size and everything past it is painted black. A real window manager sends
+ * the event; a scripted resize sends it itself. */
+static void announce_window_size(SDL_Window* win, int w, int h) {
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = SDL_WINDOWEVENT;
+    ev.window.event = SDL_WINDOWEVENT_SIZE_CHANGED;
+    ev.window.windowID = SDL_GetWindowID(win);
+    ev.window.data1 = w;
+    ev.window.data2 = h;
+    SDL_PushEvent(&ev);
+}
+
 void rebuild_canvas() {
     Rml::Element* formwin = by_id("formwin");
     Rml::Element* canvas = by_id("canvas");
@@ -1538,9 +1561,26 @@ void rebuild_canvas() {
         d->SetProperty("height", Rml::String(std::to_string(sh + 2) + "px"));
     }
 
+    // The form itself, selected: its frame takes the accent, and a box just
+    // inside the client area — the canvas clips what it holds, so one drawn
+    // around it would not be seen. No anchors: the form is resized by its own
+    // grips, and it has no position on the canvas to drag.
+    const bool form_selected = !g.selected.empty() && g.selected == g.model.form_name;
+    formwin->SetProperty("border-color", form_selected ? theme::ACCENT : "#b9c0c8");
+    if (form_selected) {
+        Rml::Element* d = overlay->AppendChild(g.doc->CreateElement("div"));
+        d->SetId("formsel");
+        d->SetProperty("position", "absolute");
+        d->SetAttribute("class", Rml::String("selbox"));
+        d->SetProperty("left", "0px");
+        d->SetProperty("top", "0px");
+        d->SetProperty("width", Rml::String(std::to_string(fw - 2) + "px"));
+        d->SetProperty("height", Rml::String(std::to_string(fh - 2) + "px"));
+    }
+
     // Selection chrome lives in an overlay so it never perturbs the components
     // themselves — what you see on the canvas is exactly what the app renders.
-    if (g.model.find(g.selected)) {
+    if (!form_selected && g.model.find(g.selected)) {
         // Measure the RENDERED element rather than deriving the rect from the
         // model's width/height: those size the CONTENT box, so a component with
         // padding or a border (a groupbox has both) draws larger than its
@@ -1743,6 +1783,43 @@ void set_edited_property(const std::string& value) {
     refresh_all();
 }
 
+/// The sides an `anchors` value names: `left,top,right`, in any order, with
+/// or without spaces.
+std::vector<std::string> anchor_sides(const std::string& value) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : value + ",") {
+        if (c == ',') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else if (c != ' ') {
+            cur += c;
+        }
+    }
+    return out;
+}
+bool has_anchor(const std::string& value, const std::string& side) {
+    for (const auto& s : anchor_sides(value)) {
+        if (s == side) return true;
+    }
+    return false;
+}
+/// `value` with `side` added or removed, written in the order the sides are
+/// read — left, top, right, bottom — so two ways of clicking the same set
+/// give the same text.
+std::string toggle_anchor(const std::string& value, const std::string& side) {
+    std::vector<std::string> sides = anchor_sides(value);
+    if (has_anchor(value, side)) sides.erase(std::remove(sides.begin(), sides.end(), side), sides.end());
+    else sides.push_back(side);
+    std::string out;
+    for (const char* s : {"left", "top", "right", "bottom"}) {
+        for (const auto& have : sides) {
+            if (have == s) out += std::string(out.empty() ? "" : ",") + s;
+        }
+    }
+    return out;
+}
+
 void rebuild_inspector() {
     Rml::Element* ctx = by_id("ctxlabel");
     Rml::Element* grid = by_id("grid");
@@ -1801,6 +1878,21 @@ void rebuild_inspector() {
                 // the markup: a paragraph with a newline in it is not an
                 // attribute value.
                 html += "<textarea class='pvm' name='" + esc(p.name) + "'/>";
+            } else if (p.editor == "anchors") {
+                // Four boxes, one a side, lit when the value names that side;
+                // the field stays beside them so the value can still be typed.
+                static const char* SIDES[4] = {"left", "top", "right", "bottom"};
+                static const char* LETTERS[4] = {"L", "T", "R", "B"};
+                std::string boxes;
+                for (int i = 0; i < 4; i++) {
+                    boxes += std::string("<div class='anch") +
+                             (has_anchor(val, SIDES[i]) ? " on" : "") + "' id='anch-" + SIDES[i] +
+                             "' oe-anchor='" + SIDES[i] + "' oe-prop='" + esc(p.name) + "'>" +
+                             LETTERS[i] + "</div>";
+                }
+                html += "<div class='anchbox'>" + boxes + "</div>"
+                        "<input type='text' class='pv withanch' name='" + esc(p.name) +
+                        "' value='" + esc(val) + "'/>";
             } else {
                 html += "<input type='text' class='pv' name='" + esc(p.name) + "' value='" +
                         esc(val) + "'/>";
@@ -2308,6 +2400,9 @@ void begin_drag(const std::string& id, int mx, int my) {
     Rml::Element* canvas = by_id("canvas");
     const Component* comp = g.model.find(id);
     if (!canvas || !comp) return;
+    // The form's left/top say where its window opens on the screen, not
+    // where the preview sits on the canvas: a drag must not move it here.
+    if (id == g.model.form_name) { select(id); return; }
     // A tray component has no left/top to move, and dragging one would invent
     // both — which the compiler then rejects. So would a canvas component
     // whose descriptor declares neither.
@@ -2381,6 +2476,7 @@ bool is_selected(const std::string& id) {
 /// Delete every selected component.
 void delete_selection() {
     if (g.selection.empty()) { set_status("nothing selected"); return; }
+    if (is_selected(g.model.form_name)) { set_status("the form cannot be deleted"); return; }
     push_undo();
     int gone = 0;
     std::vector<Component> kept;
@@ -2451,6 +2547,39 @@ void save() {
     g.dirty = false;
     set_status("saved " + g.model.path);
     rebuild_code();
+}
+
+/// Give the selection a new id, from the Name field or the `rename:` verb.
+/// Nothing is written until the next save, which is when the file's other
+/// lines are renamed too; the grid is left alone so the field keeps its caret.
+void rename_selected(const std::string& new_id) {
+    Component* comp = g.model.find(g.selected);
+    if (!comp) { set_status("nothing selected"); return; }
+    if (g.code_dirty) { set_status("cannot rename while the code view has unsaved text"); return; }
+    const std::string old_id = comp->id;
+    const std::string type_name = comp->type_name;   // comp dies with the model below
+    if (old_id == new_id) return;
+    Model trial = g.model;
+    std::string err;
+    if (!rename_id(trial, old_id, new_id, err)) {
+        set_status("cannot rename " + old_id + ": " + err);
+        return;
+    }
+    push_undo();
+    g.model = trial;
+    for (auto& id : g.selection) {
+        if (id == old_id) id = new_id;
+    }
+    g.selected = new_id;
+    mark_dirty();
+    if (Rml::Element* ctx = by_id("ctxlabel")) {
+        ctx->SetInnerRML(esc(new_id) + " <span style='color:#656d76;font-weight:normal'>(" +
+                         esc(type_name) + ")</span>");
+    }
+    rebuild_canvas();
+    rebuild_tray();
+    rebuild_code();
+    set_status("renamed " + old_id + " to " + new_id);
 }
 
 /// Seconds since an arbitrary origin, for step timings.
@@ -3588,7 +3717,7 @@ struct Listener : Rml::EventListener {
             if (!comp) return;
             const Rml::String name = src->GetAttribute<Rml::String>("name", "");
             if (cls.find("cid") != Rml::String::npos) {
-                set_status("renaming components is not supported yet");
+                rename_selected(value);
                 return;
             }
             if (name.empty()) return;
@@ -3653,6 +3782,7 @@ struct Listener : Rml::EventListener {
                 if (shift) { dx *= GRID; dy *= GRID; }
                 push_undo();
                 for (const auto& id : g.selection) {
+                    if (id == g.model.form_name) continue;   // not on the canvas to nudge
                     if (Component* c = g.model.find(id)) {
                         write_int(*c, "left", std::max(0, prop_int(*c, "left", 0) + dx));
                         write_int(*c, "top", std::max(0, prop_int(*c, "top", 0) + dy));
@@ -3720,6 +3850,18 @@ struct Listener : Rml::EventListener {
             }
 
             for (Rml::Element* e = el; e; e = e->GetParentNode()) {
+                if (e->HasAttribute("oe-anchor")) {
+                    if (Component* c = g.model.find(g.selected)) {
+                        const std::string prop = e->GetAttribute<Rml::String>("oe-prop", "anchors");
+                        const std::string* cur = c->property(prop);
+                        push_undo();
+                        c->set_property(prop, toggle_anchor(cur ? *cur : "",
+                                                            e->GetAttribute<Rml::String>("oe-anchor", "")));
+                        mark_dirty();
+                        refresh_all();
+                    }
+                    return;
+                }
                 if (e->HasAttribute("oe-swatch")) {
                     g.editing_id = g.selected;
                     g.editing_prop = e->GetAttribute<Rml::String>("oe-swatch", "");
@@ -3882,9 +4024,18 @@ struct Listener : Rml::EventListener {
             // a caption) deliver mousedown on the CHILD, which carries no id —
             // so walk up to the component. Without this, whether a component
             // could be dragged depended on which part you grabbed.
+            //
+            // Past the components is the form: its title bar, its buttons and
+            // the bare client area all select it, the way any RAD tool's do.
+            // Not through a badge, though — a badge is a way into a handler,
+            // and selecting the form under it would rebuild the canvas and
+            // take the badge away before its click arrived.
             for (Rml::Element* e = el; e; e = e->GetParentNode()) {
-                if (!e->HasAttribute("oe-id")) continue;
-                const std::string id = e->GetAttribute<Rml::String>("oe-id", "");
+                if (e->HasAttribute("oe-jump")) break;
+                std::string id;
+                if (e->HasAttribute("oe-id")) id = e->GetAttribute<Rml::String>("oe-id", "");
+                else if (e->GetId() == "formwin") id = g.model.form_name;
+                if (id.empty()) continue;
                 // A second press on the same component, soon and close: the
                 // handler gesture, and not the start of a drag.
                 const double t = now_seconds();
@@ -4155,6 +4306,68 @@ void run_script(const char* script) {
             const std::string arg = colon == std::string::npos ? "" : cmd.substr(colon + 1);
             if (verb == "add") add_component(arg);
             else if (verb == "select") select(arg);
+            else if (verb == "rename") {
+                // No caret to keep here, so the grid can show the new name.
+                rename_selected(arg);
+                rebuild_inspector();
+            }
+            else if (verb == "clickform") {
+                // A press on the preview's title bar, through the context, as
+                // the mouse does it; then what the press selected.
+                g.context->Update();
+                if (Rml::Element* t = by_id("formtitle")) {
+                    const auto at = t->GetAbsoluteOffset(Rml::BoxArea::Border);
+                    const auto size = t->GetBox().GetSize(Rml::BoxArea::Border);
+                    g.context->ProcessMouseMove((int)(at.x + size.x / 2), (int)(at.y + size.y / 2), 0);
+                    g.context->ProcessMouseButtonDown(0, 0);
+                    g.context->ProcessMouseButtonUp(0, 0);
+                    g.context->Update();
+                }
+                std::printf("clickform: selected %s\n", g.selected.c_str());
+                std::fflush(stdout);
+            }
+            else if (verb == "props") {
+                // The inspector as the user reads it: the header, then each
+                // property row's field and value — and, for an anchors row,
+                // which of its boxes are lit.
+                g.context->Update();
+                auto plain = [](std::string h) {
+                    for (size_t a; (a = h.find('<')) != std::string::npos;) {
+                        const size_t b = h.find('>', a);
+                        h.erase(a, b == std::string::npos ? std::string::npos : b - a + 1);
+                    }
+                    return h;
+                };
+                std::string out;
+                if (Rml::Element* ctx = by_id("ctxlabel")) out += plain(ctx->GetInnerRML());
+                if (Rml::Element* grid = by_id("grid")) {
+                    for (int i = 0; i < grid->GetNumChildren(); i++) {
+                        Rml::Element* row = grid->GetChild(i);
+                        for (int j = 0; j < row->GetNumChildren(); j++) {
+                            Rml::Element* f = row->GetChild(j);
+                            const Rml::String cls = f->GetAttribute<Rml::String>("class", "");
+                            if (cls == "cid") {
+                                out += " name=" + f->GetAttribute<Rml::String>("value", "");
+                            } else if (cls.rfind("pv", 0) == 0) {
+                                out += " " + f->GetAttribute<Rml::String>("name", "") + "=" +
+                                       f->GetAttribute<Rml::String>("value", "");
+                            } else if (cls == "anchbox") {
+                                out += " [";
+                                for (int k = 0; k < f->GetNumChildren(); k++) {
+                                    if (f->GetChild(k)->GetAttribute<Rml::String>("class", "") ==
+                                        "anch on") {
+                                        out += f->GetChild(k)->GetAttribute<Rml::String>("oe-anchor", "") + " ";
+                                    }
+                                }
+                                out += "]";
+                            }
+                        }
+                    }
+                }
+                if (by_id("formsel")) out += " formsel=yes";
+                std::printf("props: %s\n", out.c_str());
+                std::fflush(stdout);
+            }
             else if (verb == "set" || verb == "wire") {
                 const size_t eq = arg.find('=');
                 if (eq != std::string::npos && !g.selected.empty()) {
@@ -4237,9 +4450,15 @@ void run_script(const char* script) {
                     // margins that the running IDE would not have.
                     if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
                         SDL_SetWindowSize(win, nw, nh);
+                        announce_window_size(win, nw, nh);
                         // Let the backend see the resize, so the renderer's
                         // viewport follows; otherwise only the layout changes.
                         for (int i = 0; i < 30; i++) Backend::ProcessEvents(g.context);
+                        // And the viewport by hand: the offscreen driver's
+                        // event does not always arrive, and a viewport left
+                        // at the old size paints the new margin black.
+                        static_cast<RenderInterface_GL3*>(Backend::GetRenderInterface())
+                            ->SetViewport(nw, nh);
                     }
                     g.win_w = nw;
                     g.win_h = nh;
@@ -4365,6 +4584,12 @@ void run_script(const char* script) {
                     }
                 }
                 if (e) {
+                    // A row far down the inspector is clipped by the grid's
+                    // scroll: a press at its centre would land on whatever is
+                    // drawn there instead. Bring it on screen first, as the
+                    // user's scrolling would.
+                    e->ScrollIntoView(false);
+                    g.context->Update();
                     const auto at = e->GetAbsoluteOffset(Rml::BoxArea::Border);
                     const auto size = e->GetBox().GetSize(Rml::BoxArea::Border);
                     const int cx = (int)(at.x + size.x / 2), cy = (int)(at.y + size.y / 2);
@@ -5370,6 +5595,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* A headless run must not open a window: a test or an agent that
+     * renders a frame to a file steals focus from whoever is working on
+     * the machine otherwise. SDL's offscreen driver renders through EGL
+     * with no window at all, and a caller who set SDL_VIDEODRIVER
+     * knows better than this default, as does OPENEPL_UI_WINDOW=1 — the
+     * one test that reads the manager's own flags back needs a real window. */
+    if (!std::getenv("SDL_VIDEODRIVER") && !std::getenv("OPENEPL_UI_WINDOW") && (std::getenv("OPENEPL_DESIGNER_SCRIPT") || std::getenv("OPENEPL_DESIGNER_DUMP")))
+        setenv("SDL_VIDEODRIVER", "offscreen", 1);
     if (!Backend::Initialize("OpenEPL Studio", INIT_W, INIT_H, true)) return 1;
 
     // The window icon: what a task switcher and a dock show. SDL owns the

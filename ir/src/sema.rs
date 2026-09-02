@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::registry::PropertyDesc;
 use crate::{intern, Elem, Expr, Registry, Signature, Ty};
 
 /// Maps a form's component ids to their component type names. Component ids are
@@ -448,6 +449,20 @@ pub fn property_type(
     reg: &Registry,
     components: &Components,
 ) -> Result<Ty, SemaError> {
+    property_desc(component, property, reg, components).map(|p| p.ty)
+}
+
+/// The whole descriptor of `component.property`, or a diagnostic.
+///
+/// The type is what most callers want; the validator also needs the editor
+/// hint, because a property the inspector edits as a colour is one whose
+/// literal can be checked for being a colour.
+pub fn property_desc<'r>(
+    component: &str,
+    property: &str,
+    reg: &'r Registry,
+    components: &Components,
+) -> Result<&'r PropertyDesc, SemaError> {
     let Some(type_name) = components.get(component) else {
         return err(format!(
             "unknown component `{component}` (component ids come from the form)"
@@ -459,7 +474,7 @@ pub fn property_type(
         ));
     };
     match desc.property(property) {
-        Some(p) => Ok(p.ty),
+        Some(p) => Ok(p),
         None => {
             let mut known: Vec<&str> = desc.properties.iter().map(|p| p.name.as_str()).collect();
             known.sort_unstable();

@@ -9,6 +9,7 @@ USAGE:
   openepl build <in.oir> [-o <out>]   compile to a native binary
   openepl run   <in.oir> [-o <out>]   compile and run
   openepl build|run --release         …optimised, hardened and stripped
+  openepl build --os windows          …for Windows x86-64 (needs mingw-w64)
   openepl emit  <in.oir>              print generated LLVM IR
   openepl inspect <in.oir>            dump the form model (for the designer)
   openepl lsp                         language server over stdio (see docs/editors.md)

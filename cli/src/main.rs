@@ -138,6 +138,7 @@ fn usage() {
          openepl build <in.oir> [-o <out>]   compile to a native binary\n  \
          openepl run   <in.oir> [-o <out>]   compile and run\n  \
          openepl build|run --release         …optimised, hardened and stripped\n  \
+         openepl build --os windows          …for Windows x86-64 (needs mingw-w64)\n  \
          openepl emit  <in.oir>              print generated LLVM IR\n  \
          openepl inspect <in.oir>            dump the form model (for the designer)\n  \
          openepl lsp                         language server over stdio (see docs/editors.md)\n  \
@@ -176,6 +177,8 @@ struct Io {
     target: Option<Target>,
     /// Optimise, harden and strip the built program.
     release: bool,
+    /// The operating system the output is for.
+    os: Os,
     /// Where the output goes when the input came through a project file: the
     /// project's directory and name. Naming it after the entry would call
     /// every program `main`, and putting it in the working directory would
@@ -183,7 +186,52 @@ struct Io {
     project_output: Option<PathBuf>,
 }
 
-/// Parse `<in.oir> [-o out] [--target kind] [--release]` from an argument slice.
+/// The operating system a build is for.
+///
+/// Only the two the toolchain can actually produce: the host, and Windows
+/// x86-64 through mingw-w64. Everything the target OS changes — the compiler
+/// invocation, the artifact names, which hardening flags mean anything — is
+/// decided by matching on this, so a third OS is a third arm in each match
+/// and not a scattering of string comparisons.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Os {
+    Linux,
+    Windows,
+}
+
+impl Os {
+    /// The machine this toolchain is running on: the default, and the only
+    /// one whose output `openepl run` can execute.
+    fn host() -> Os {
+        Os::Linux
+    }
+
+    fn parse(s: &str) -> Option<Os> {
+        match s {
+            "linux" | "host" => Some(Os::Linux),
+            "windows" | "win" | "win64" => Some(Os::Windows),
+            _ => None,
+        }
+    }
+}
+
+/// The mingw-w64 cross toolchain, by the names the distributions install.
+///
+/// The IR goes through clang, which knows the target from a flag, and every C
+/// source goes through the same clang so one set of flags compiles the whole
+/// program. The link is gcc's, because that driver knows where the mingw
+/// start files and import libraries live and clang's does not always.
+const MINGW_TRIPLE: &str = "x86_64-w64-mingw32";
+const MINGW_GCC: &str = "x86_64-w64-mingw32-gcc";
+const MINGW_AR: &str = "x86_64-w64-mingw32-ar";
+
+/// The one Windows target that does not exist yet, in the words a build
+/// answers with wherever it discovers the fact.
+const GUI_NOT_ON_WINDOWS: &str =
+    "target gui is not available for windows yet (no Windows build of the ui library)";
+
+/// Parse `<in.oir> [-o out] [--target kind] [--os name] [--release]` from an
+/// argument slice.
 ///
 /// The input may be a project file or its directory. Resolved here, in the one
 /// place every subcommand parses its input, so that build, run, emit and
@@ -207,6 +255,7 @@ fn parse_io_args(rest: &[String]) -> Result<Io, String> {
     let mut output: Option<PathBuf> = None;
     let mut target: Option<Target> = None;
     let mut release = false;
+    let mut os = Os::host();
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -223,6 +272,12 @@ fn parse_io_args(rest: &[String]) -> Result<Io, String> {
                 })?);
             }
             "--release" => release = true,
+            "--os" => {
+                i += 1;
+                let v = rest.get(i).ok_or("`--os` needs a name")?;
+                os = Os::parse(v)
+                    .ok_or_else(|| format!("unknown os `{v}` — expected linux or windows"))?;
+            }
             s if s.starts_with('-') => return Err(format!("unknown flag `{s}`")),
             s => {
                 if input.is_some() {
@@ -239,6 +294,7 @@ fn parse_io_args(rest: &[String]) -> Result<Io, String> {
         output,
         target,
         release,
+        os,
         project_output: None,
     })
 }
@@ -251,7 +307,7 @@ fn cmd_emit(rest: &[String]) -> i32 {
             return 2;
         }
     };
-    match compile_with(&io.input, io.target, false) {
+    match compile_with(&io.input, io.target, io.os, false) {
         Ok((ll, _plan, _t, _m)) => {
             print!("{ll}");
             0
@@ -537,16 +593,39 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
         }
     };
     let input = io.input;
-    let (mut ll, plan, target, module) = match compile(&input, io.target) {
+    if io.os == Os::Windows {
+        // Before any compiling: the one-line answer beats the same fact
+        // arriving as a clang error after the IR has been generated.
+        if let Err(e) = mingw_available() {
+            eprintln!("openepl: {e}");
+            return 1;
+        }
+        if then_run {
+            eprintln!(
+                "openepl: cannot run a Windows program here — build it, then run it under \
+                 wine or on Windows"
+            );
+            return 2;
+        }
+    }
+    let (mut ll, plan, target, module) = match compile(&input, io.target, io.os) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
             return 1;
         }
     };
-    let out_bin = io
-        .output
-        .unwrap_or_else(|| default_output(&input, io.project_output.as_deref(), target));
+    // The UI stack is vendored for Linux only, so a form has no Windows build
+    // to link against. Said in the program's terms: the target, not the
+    // library, is what the person asked for.
+    if io.os == Os::Windows && (target == Target::Gui || plan.build.needs_cxx) {
+        eprintln!("openepl: {GUI_NOT_ON_WINDOWS}");
+        return 1;
+    }
+    let out_bin = match io.output {
+        Some(p) => output_for_os(p, target, io.os),
+        None => default_output(&input, io.project_output.as_deref(), target, io.os),
+    };
 
     // Only a program builds a form, so only a program has pictures to carry.
     if target.is_executable() {
@@ -567,7 +646,9 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
     }
 
     let repo_root = find_repo_root().expect("runtime located during compile()");
-    if let Err(code) = clang_link(&ll_path, &repo_root, &plan, &out_bin, target, io.release) {
+    if let Err(code) = clang_link(
+        &ll_path, &repo_root, &plan, &out_bin, target, io.os, io.release,
+    ) {
         return code;
     }
     eprintln!("openepl: wrote {}", out_bin.display());
@@ -591,8 +672,9 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
 fn compile(
     input: &Path,
     target_override: Option<Target>,
+    os: Os,
 ) -> Result<(String, libload::LibPlan, Target, Module), String> {
-    compile_with(input, target_override, true)
+    compile_with(input, target_override, os, true)
 }
 
 /// `require_impl` is false when the caller only wants the IR: emitting it
@@ -602,6 +684,7 @@ fn compile(
 fn compile_with(
     input: &Path,
     target_override: Option<Target>,
+    os: Os,
     require_impl: bool,
 ) -> Result<(String, libload::LibPlan, Target, Module), String> {
     let src = std::fs::read_to_string(input)
@@ -613,6 +696,14 @@ fn compile_with(
         module.target = Some(t);
     }
     let target = module.target();
+    // Before a single library is introspected: the UI library's own
+    // prerequisite check would otherwise answer first, and "fetch RmlUi" is
+    // the wrong advice for a form nobody can build for Windows yet. The
+    // console module that merely says `use ui` is caught after the load, by
+    // the C++ the plan then needs.
+    if require_impl && os == Os::Windows && target == Target::Gui {
+        return Err(GUI_NOT_ON_WINDOWS.to_string());
+    }
 
     let repo_root = find_repo_root().ok_or_else(|| {
         "could not locate the OpenEPL runtime (runtime/openepl_core.h); \
@@ -625,10 +716,12 @@ fn compile_with(
     // A kit resolved outside `libs/` is presented to the loader through a
     // staged root, so listing a command and calling it agree by construction.
     let lib_root = kit::overlay_root(&repo_root, &module.uses)?;
-    let plan = if require_impl {
+    let plan = if !require_impl {
+        libload::load_metadata(&lib_root, &module.uses)?
+    } else if os == Os::host() {
         libload::load(&lib_root, &module.uses)?
     } else {
-        libload::load_metadata(&lib_root, &module.uses)?
+        libload::load_cross(&lib_root, &module.uses)?
     };
 
     if let Err(errs) = validate_hinted(&module, &plan.registry, &repo_root) {
@@ -817,7 +910,7 @@ fn llvm_bytes(bytes: &[u8]) -> String {
     out
 }
 
-fn default_output(input: &Path, project_output: Option<&Path>, target: Target) -> PathBuf {
+fn default_output(input: &Path, project_output: Option<&Path>, target: Target, os: Os) -> PathBuf {
     let (dir, stem) = match project_output {
         Some(p) => (
             p.parent().unwrap_or(Path::new(".")).to_path_buf(),
@@ -829,12 +922,44 @@ fn default_output(input: &Path, project_output: Option<&Path>, target: Target) -
         ),
     };
     // Libraries follow the platform convention, so a host's linker finds them
-    // by the name it expects (`-lgreet` wants `libgreet.so`).
-    dir.join(match target {
-        Target::Console | Target::Gui => stem,
-        Target::SharedLib => format!("lib{stem}.so"),
-        Target::StaticLib => format!("lib{stem}.a"),
+    // by the name it expects (`-lgreet` wants `libgreet.so`, and on Windows
+    // `greet.dll` beside a `libgreet.a` — mingw's archives keep the Unix name).
+    dir.join(match (os, target) {
+        (Os::Linux, Target::Console | Target::Gui) => stem,
+        (Os::Linux, Target::SharedLib) => format!("lib{stem}.so"),
+        (Os::Windows, Target::Console | Target::Gui) => format!("{stem}.exe"),
+        (Os::Windows, Target::SharedLib) => format!("{stem}.dll"),
+        (_, Target::StaticLib) => format!("lib{stem}.a"),
     })
+}
+
+/// An explicit `-o` for a Windows program gets `.exe` when it has no
+/// extension: Windows will not run a file without one, and `-o hello` is
+/// what everyone types. A name that carries an extension is left as given.
+fn output_for_os(out: PathBuf, target: Target, os: Os) -> PathBuf {
+    if os == Os::Windows && target.is_executable() && out.extension().is_none() {
+        out.with_extension("exe")
+    } else {
+        out
+    }
+}
+
+/// Is the mingw-w64 cross compiler installed? One line naming the package
+/// when it is not, because the alternative is a screen of "cannot find
+/// crt2.o" from a driver that was never there.
+fn mingw_available() -> Result<(), String> {
+    match Command::new(MINGW_GCC)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(s) if s.success() => Ok(()),
+        _ => Err(format!(
+            "building for windows needs the mingw-w64 cross compiler `{MINGW_GCC}` \
+             (package mingw64-gcc on Fedora, gcc-mingw-w64-x86-64 on Debian and Ubuntu)"
+        )),
+    }
 }
 
 /// Invoke clang to assemble the `.ll` and static-link the library implementation
@@ -845,10 +970,14 @@ fn clang_link(
     plan: &libload::LibPlan,
     out_bin: &Path,
     target: Target,
+    os: Os,
     release: bool,
 ) -> Result<(), i32> {
     let cfg = &plan.build;
     let driver = if cfg.needs_cxx { "clang++" } else { "clang" };
+    if os == Os::Windows {
+        return mingw_link(ll_path, repo_root, plan, out_bin, target, release);
+    }
 
     // Flags every invocation needs, whether we are linking a program or
     // compiling one object at a time for an archive.
@@ -915,7 +1044,7 @@ fn clang_link(
     }
 
     if target == Target::StaticLib {
-        return build_archive(driver, &common, &inputs, out_bin);
+        return build_archive(driver, &[], "ar", &common, &inputs, out_bin);
     }
 
     // Everything after the inputs, in the order the link has always used it.
@@ -1018,6 +1147,234 @@ fn clang_link(
     }
 }
 
+/// Build for Windows x86-64: clang compiles the IR and every C source against
+/// the mingw-w64 target, one object each, and mingw's gcc links them.
+///
+/// Separate from the host link on purpose. The host path is one command and a
+/// PIE retry that both assume the compiler and the linker are the same driver;
+/// here they are not, and PIE does not exist — a PE is relocated by the loader
+/// whenever the image says it may be (`--dynamicbase`). Sharing the code would
+/// mean threading the OS through every line of it; keeping it apart keeps the
+/// Linux build exactly what it was.
+fn mingw_link(
+    ll_path: &Path,
+    repo_root: &Path,
+    plan: &libload::LibPlan,
+    out_bin: &Path,
+    target: Target,
+    release: bool,
+) -> Result<(), i32> {
+    let cfg = &plan.build;
+    // Host `pkg-config` answers for the host's libraries; its flags would
+    // point mingw at Linux headers. Nothing a console program uses asks for
+    // it today, and the day one does it needs a cross answer, not a wrong one.
+    if !cfg.pkg_config.is_empty() {
+        eprintln!(
+            "openepl: a library this program uses needs pkg-config ({}), which has no \
+             Windows answer on this machine",
+            cfg.pkg_config.join(", ")
+        );
+        return Err(1);
+    }
+    let driver = "clang";
+    let driver_args = vec![format!("--target={MINGW_TRIPLE}")];
+
+    let mut common: Vec<String> = vec![
+        "-ffunction-sections".into(),
+        "-fdata-sections".into(),
+        "-Wno-override-module".into(),
+        // One object per input means the `.ll` is compiled on its own, and
+        // an include path is meaningless to it; clang says so for every
+        // build otherwise.
+        "-Wno-unused-command-line-argument".into(),
+        "-I".into(),
+        repo_root.join("abi").display().to_string(),
+        "-I".into(),
+        repo_root.join("runtime").display().to_string(),
+    ];
+    for d in &cfg.include_dirs {
+        common.push("-I".into());
+        common.push(d.display().to_string());
+    }
+    for d in &cfg.defines {
+        common.push(format!("-D{d}"));
+    }
+    // No -fPIC: every PE image is relocatable already, and clang's mingw
+    // target says so — with a warning — when asked for it.
+
+    let ldflags = if release {
+        let cflags = mingw_release_cflags(&driver_args);
+        common.splice(0..0, cflags.iter().cloned());
+        mingw_release_ldflags(&driver_args, &cflags)
+    } else {
+        common.insert(0, "-O0".into());
+        Vec::new()
+    };
+
+    let mut inputs: Vec<(PathBuf, Option<&'static str>)> = vec![(ll_path.to_path_buf(), None)];
+    for s in &plan.impl_sources {
+        // As on the host: the entry object belongs to a program only.
+        if !target.is_executable() && s.file_name().and_then(|f| f.to_str()) == Some("oe_start.c") {
+            continue;
+        }
+        inputs.push((s.clone(), None));
+    }
+
+    if target == Target::StaticLib {
+        return build_archive(driver, &driver_args, MINGW_AR, &common, &inputs, out_bin);
+    }
+
+    let dir = std::env::temp_dir().join(format!("openepl_mingw_{}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("openepl: cannot create {}: {e}", dir.display());
+        return Err(1);
+    }
+    let objects = match compile_objects(driver, &driver_args, &common, &inputs, &dir) {
+        Ok(o) => o,
+        Err(code) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(code);
+        }
+    };
+
+    let mut cmd = Command::new(MINGW_GCC);
+    cmd.args(&objects);
+    cmd.args(&cfg.link_args);
+    cmd.arg("-lm");
+    // Winsock is not among the libraries mingw links by default, and `net`
+    // is the one library that needs it (libs/net/net_internal.h). Always
+    // named rather than only then: an import library nothing references
+    // costs the link nothing, and the link does not have to know which
+    // library is which.
+    cmd.arg("-lws2_32");
+    if target == Target::SharedLib {
+        cmd.arg("-shared");
+    } else {
+        cmd.arg("-Wl,--gc-sections");
+    }
+    cmd.args(&ldflags);
+    cmd.arg("-o").arg(out_bin);
+    let status = cmd.status();
+    let _ = std::fs::remove_dir_all(&dir);
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => {
+            eprintln!("openepl: {MINGW_GCC} failed with status {s}");
+            Err(1)
+        }
+        Err(e) => {
+            eprintln!("openepl: could not invoke {MINGW_GCC}: {e}");
+            Err(1)
+        }
+    }
+}
+
+/// The compile-time half of the Windows release profile: the same three the
+/// host gets, minus `-fPIE`, which has no meaning for a PE.
+///
+/// Probed compile-only, against mingw's clang target, because the compile is
+/// the only stage this driver runs here.
+fn mingw_release_cflags(driver_args: &[String]) -> Vec<String> {
+    let want = vec![
+        req(&[&["-O2"]]),
+        req(&[&["-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2"]]),
+        req(&[&["-fstack-protector-strong"]]),
+    ];
+    let dir = mingw_probe_dir();
+    let Some(src) = mingw_probe_src(&dir) else { return Vec::new() };
+    let obj = dir.join("probe.o");
+    let taken = probe_each("clang", &want, |taken, alt| {
+        Command::new("clang")
+            .args(driver_args)
+            .args(taken)
+            .args(alt)
+            .arg("-Werror")
+            .arg("-c")
+            .arg(&src)
+            .arg("-o")
+            .arg(&obj)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    taken
+}
+
+/// The link-time half for Windows. RELRO and `-z now` are ELF dynamic-loader
+/// facts with no PE counterpart, so they are not offered — a flag dropped
+/// with a warning on every build is noise, not honesty. What PE has instead:
+/// `--dynamicbase` (ASLR, the role PIE plays on Linux), `--nxcompat` (DEP),
+/// `--high-entropy-va` (64-bit ASLR), and the strip.
+///
+/// Probed by linking an object compiled with the cflags already taken, so a
+/// stack protector whose support library is missing shows up here, at the
+/// link, the way it would in the real build.
+fn mingw_release_ldflags(driver_args: &[String], cflags: &[String]) -> Vec<String> {
+    let want: Vec<Requirement> = vec![
+        req(&[&["-Wl,--dynamicbase"]]),
+        req(&[&["-Wl,--nxcompat"]]),
+        req(&[&["-Wl,--high-entropy-va"]]),
+        req(&[&["-Wl,-s"]]),
+    ];
+    let dir = mingw_probe_dir();
+    let Some(src) = mingw_probe_src(&dir) else { return Vec::new() };
+    let obj = dir.join("probe.o");
+    let compiled = Command::new("clang")
+        .args(driver_args)
+        .args(cflags)
+        .arg("-c")
+        .arg(&src)
+        .arg("-o")
+        .arg(&obj)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !compiled {
+        eprintln!("openepl: cannot compile a probe program — linking the release unhardened");
+        let _ = std::fs::remove_dir_all(&dir);
+        return Vec::new();
+    }
+    let out = dir.join("probe.exe");
+    let taken = probe_each(MINGW_GCC, &want, |taken, alt| {
+        Command::new(MINGW_GCC)
+            .args(taken)
+            .args(alt)
+            .arg("-Wl,--fatal-warnings")
+            .arg(&obj)
+            .arg("-o")
+            .arg(&out)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    taken
+}
+
+fn mingw_probe_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("openepl_probe_win_{}", std::process::id()))
+}
+
+/// The probe source, or nothing — with the same words the host probe uses —
+/// when the scratch directory cannot be written.
+fn mingw_probe_src(dir: &Path) -> Option<PathBuf> {
+    let src = dir.join("probe.c");
+    if std::fs::create_dir_all(dir).is_err()
+        || std::fs::write(&src, "int main(void){return 0;}\n").is_err()
+    {
+        eprintln!("openepl: cannot write a probe program — building the release unhardened");
+        return None;
+    }
+    Some(src)
+}
+
 /// One hardening requirement, as the argument lists that would satisfy it,
 /// best first. `-pie` and `-Wl,-pie` ask the same thing of the driver and of
 /// the linker, and which of them works is a property of the local install:
@@ -1093,24 +1450,38 @@ fn probe(driver: &str, base: &[String], want: &[Requirement], extra: &[String]) 
     }
     let out = dir.join("probe");
 
+    let taken = probe_each(driver, want, |taken, alt| {
+        Command::new(driver)
+            .args(base)
+            .args(taken)
+            .args(alt)
+            .args(extra)
+            .arg("-Werror")
+            .arg(&src)
+            .arg("-o")
+            .arg(&out)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    taken
+}
+
+/// The probing itself, over whatever "try these flags" means for the tool at
+/// hand: one command on the host, two — a compile and a separate link — for
+/// the cross toolchain. `accept` is handed the flags taken so far and the
+/// alternative on offer, and says whether the tool took them together.
+fn probe_each(
+    driver: &str,
+    want: &[Requirement],
+    accept: impl Fn(&[String], &[String]) -> bool,
+) -> Vec<String> {
     let mut taken: Vec<String> = Vec::new();
     for alternatives in want {
-        let accepted = alternatives.iter().find(|alt| {
-            Command::new(driver)
-                .args(base)
-                .args(&taken)
-                .args(*alt)
-                .args(extra)
-                .arg("-Werror")
-                .arg(&src)
-                .arg("-o")
-                .arg(&out)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        });
+        let accepted = alternatives.iter().find(|alt| accept(&taken, alt));
         match accepted {
             Some(alt) => taken.extend(alt.iter().cloned()),
             None => eprintln!(
@@ -1119,8 +1490,42 @@ fn probe(driver: &str, base: &[String], want: &[Requirement], extra: &[String]) 
             ),
         }
     }
-    let _ = std::fs::remove_dir_all(&dir);
     taken
+}
+
+/// Compile each input to its own object in `dir`, in order.
+///
+/// `driver_args` come before everything else: the cross target flag, when
+/// there is one, has to reach every compile the same way.
+fn compile_objects(
+    driver: &str,
+    driver_args: &[String],
+    common: &[String],
+    inputs: &[(PathBuf, Option<&'static str>)],
+    dir: &Path,
+) -> Result<Vec<PathBuf>, i32> {
+    let mut objects: Vec<PathBuf> = Vec::new();
+    for (i, (path, lang)) in inputs.iter().enumerate() {
+        let obj = dir.join(format!("{i}.o"));
+        let mut cmd = Command::new(driver);
+        cmd.args(driver_args).args(common).arg("-c");
+        if let Some(l) = lang {
+            cmd.arg("-x").arg(l);
+        }
+        cmd.arg(path).arg("-o").arg(&obj);
+        match cmd.status() {
+            Ok(s) if s.success() => objects.push(obj),
+            Ok(s) => {
+                eprintln!("openepl: clang failed with status {s} on {}", path.display());
+                return Err(1);
+            }
+            Err(e) => {
+                eprintln!("openepl: could not invoke {driver}: {e}");
+                return Err(1);
+            }
+        }
+    }
+    Ok(objects)
 }
 
 /// Compile each input to its own object and archive them.
@@ -1129,6 +1534,8 @@ fn probe(driver: &str, base: &[String], want: &[Requirement], extra: &[String]) 
 /// built one object at a time rather than in one command like a link.
 fn build_archive(
     driver: &str,
+    driver_args: &[String],
+    ar_tool: &str,
     common: &[String],
     inputs: &[(PathBuf, Option<&'static str>)],
     out_lib: &Path,
@@ -1139,34 +1546,18 @@ fn build_archive(
         return Err(1);
     }
 
-    let mut objects: Vec<PathBuf> = Vec::new();
-    for (i, (path, lang)) in inputs.iter().enumerate() {
-        let obj = dir.join(format!("{i}.o"));
-        let mut cmd = Command::new(driver);
-        cmd.args(common).arg("-c");
-        if let Some(l) = lang {
-            cmd.arg("-x").arg(l);
+    let objects = match compile_objects(driver, driver_args, common, inputs, &dir) {
+        Ok(o) => o,
+        Err(code) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(code);
         }
-        cmd.arg(path).arg("-o").arg(&obj);
-        match cmd.status() {
-            Ok(s) if s.success() => objects.push(obj),
-            Ok(s) => {
-                eprintln!("openepl: clang failed with status {s} on {}", path.display());
-                let _ = std::fs::remove_dir_all(&dir);
-                return Err(1);
-            }
-            Err(e) => {
-                eprintln!("openepl: could not invoke {driver}: {e}");
-                let _ = std::fs::remove_dir_all(&dir);
-                return Err(1);
-            }
-        }
-    }
+    };
 
     // `ar rcs` replaces rather than appends, so a stale archive of the same name
     // cannot leave old objects behind.
     let _ = std::fs::remove_file(out_lib);
-    let mut ar = Command::new("ar");
+    let mut ar = Command::new(ar_tool);
     ar.arg("rcs").arg(out_lib).args(&objects);
     let status = ar.status();
     let _ = std::fs::remove_dir_all(&dir);
@@ -1177,7 +1568,7 @@ fn build_archive(
             Err(1)
         }
         Err(e) => {
-            eprintln!("openepl: could not invoke ar: {e}");
+            eprintln!("openepl: could not invoke {ar_tool}: {e}");
             Err(1)
         }
     }

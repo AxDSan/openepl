@@ -8,7 +8,7 @@ all of them. Only the entry contract changes.
 | --- | --- | --- |
 | `console` | a terminal program | `main` |
 | `gui` | a windowed program | the form, then `main`, then the event loop |
-| `sharedlib` | `.so` (`.dll` / `.dylib` elsewhere) | none — subroutines are exported |
+| `sharedlib` | `.so` (`.dll` on Windows) | none — subroutines are exported |
 | `staticlib` | `.a` archive | none — subroutines are exported |
 
 Declare it in the module:
@@ -109,11 +109,49 @@ openepl build greet.oir --target staticlib -o libgreet.a
 clang host.c libgreet.a -lm -o host
 ```
 
+## Building for Windows
+
+A console program or a library cross-builds for Windows x86-64 from Linux:
+
+```sh
+openepl build hello.oir --os windows          # hello.exe
+openepl build greet.oir --os windows --target sharedlib   # greet.dll
+openepl build greet.oir --os windows --target staticlib   # libgreet.a
+```
+
+`--os linux` is the default and means the machine you are on. `--os windows`
+needs the mingw-w64 cross compiler on the build machine — `mingw64-gcc` on
+Fedora, `gcc-mingw-w64-x86-64` on Debian and Ubuntu — and the build says so in
+one line when it is missing. The IR still goes through `clang`, retargeted;
+mingw's `gcc` does the link.
+
+What comes out is the same program: the same source, the same commands, the
+same dead-stripping. `--release` applies too, with the hardening PE has in
+place of what ELF has — ASLR (`--dynamicbase`, `--high-entropy-va`) and DEP
+(`--nxcompat`) stand in for PIE and RELRO, and the symbol table is stripped
+the same way.
+
+The limits, stated plainly:
+
+- **`gui` is not available for Windows yet.** The UI stack is vendored for
+  Linux only, and a form has nothing to link against; the build refuses
+  rather than producing a program that cannot start.
+- **Nothing is built natively on Windows yet.** This is a cross build from
+  Linux; there is no Windows build of the toolchain or of Studio.
+- **`https://` is off in a Windows build.** The vendored mbedTLS was built
+  for Linux, so a cross build leaves it out and `net_http_get` says so at run
+  time; `http://` works.
+- `openepl run --os windows` refuses: the machine you are on cannot run the
+  result. Run it under `wine`, or on Windows.
+
 ## Naming
 
 Without `-o`, an output is named after the source: a program takes the file's
 stem, and libraries follow the platform convention (`libgreet.so`,
-`libgreet.a`) so a linker finds them by the name it expects.
+`libgreet.a`) so a linker finds them by the name it expects. Built for
+Windows, a program is `hello.exe`, a shared library `greet.dll`, and a static
+library keeps mingw's `libgreet.a`. A Windows program given `-o hello` gets
+its `.exe` added — Windows will not run a file without one.
 
 ## What a library may not do
 

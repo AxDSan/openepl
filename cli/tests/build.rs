@@ -937,6 +937,9 @@ fn layout_follows_the_window_size() {
     let out = Command::new(&designer)
         .arg(&project)
         .arg(repo.join("target/debug/openepl"))
+        // A real window: the offscreen surface a headless run defaults to
+        // cannot grow, and growing is the whole test.
+        .env("OPENEPL_UI_WINDOW", "1")
         .env("OPENEPL_DESIGNER_SCRIPT", "winsize:1700x1000")
         .env("OPENEPL_DESIGNER_DUMP", &dump)
         .output()
@@ -1490,6 +1493,60 @@ fn a_zero_index_is_a_compile_error() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A colour literal one digit short is a compile error, in a declaration and
+/// in an assignment alike.
+///
+/// `"#44444"` is text, so the type check passes it, and at run time the
+/// renderer paints nothing and says nothing — the kind of mistake that costs an
+/// afternoon. The same program with six digits builds.
+#[test]
+fn a_malformed_colour_literal_is_a_compile_error() {
+    // A `ui` program checks the library's prerequisites before it validates
+    // anything, so without the vendored stack the failure is the missing
+    // dependency, not the diagnostic under test.
+    let repo = repo();
+    if !repo.join("vendor/RmlUi/build/librmlui.a").exists() {
+        eprintln!("RmlUi not vendored; skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join("openepl_colour");
+    let _ = std::fs::create_dir_all(&dir);
+    let program = |declared: &str, assigned: &str| {
+        format!(
+            "module tint\ntarget gui\nuse ui\n\nform win\n  title = \"t\"\n  label greeting\n    \
+             text = \"hi\"\n    color = \"{declared}\"\n  end\nend\n\nsub recolour\n  \
+             greeting.color = \"{assigned}\"\nend\n"
+        )
+    };
+    let build = |file: &str, src: &str| {
+        let path = dir.join(file);
+        std::fs::write(&path, src).expect("write");
+        Command::new(env!("CARGO_BIN_EXE_openepl"))
+            .args(["build", path.to_str().unwrap(), "-o", dir.join(file).with_extension("").to_str().unwrap()])
+            .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+            .output()
+            .expect("run openepl")
+    };
+
+    let bad = build("bad.oir", &program("#44444", "#12345"));
+    assert!(!bad.status.success(), "a five-digit colour must not compile");
+    let msg = String::from_utf8_lossy(&bad.stderr);
+    for want in [
+        "`win.greeting`: property `color` value \"#44444\" is not a colour (use #rgb, #rrggbb or #rrggbbaa)",
+        "in `recolour`: `greeting.color` value \"#12345\" is not a colour (use #rgb, #rrggbb or #rrggbbaa)",
+    ] {
+        assert!(msg.contains(want), "expected {want:?} in: {msg}");
+    }
+
+    let good = build("good.oir", &program("#444444", "#123456"));
+    assert!(
+        good.status.success(),
+        "a six-digit colour must build: {}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A CONSOLE program with no form outlives `main` and exits on `quit`.
 ///
 /// This is the property the whole event loop exists for: `main` prints one line
@@ -2019,6 +2076,7 @@ end
     // turns of the loop that a request has somewhere to arrive.
     let child = Command::new(&bin)
         .env("OPENEPL_UI_EXIT_AFTER_FRAMES", "30000")
+        .env("OPENEPL_UI_FRAME_MS", "0")
         .env("OPENEPL_UI_DUMP_A11Y", "1")
         .stdout(std::process::Stdio::piped())
         .spawn()

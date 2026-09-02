@@ -955,12 +955,187 @@ int env_int(const char* name, int fallback) {
     return v ? std::atoi(v) : fallback;
 }
 
+bool ui_debug() { return std::getenv("OPENEPL_UI_DEBUG") != nullptr; }
+
+/* --- anchors ------------------------------------------------------------ *
+ *
+ * Every control remembers the rectangle the form gave it, in the coordinates
+ * of the form's DECLARED size, and the window's growth since then is what an
+ * anchor answers to. The base is kept apart from the element's live style on
+ * purpose: reading the style back after a resize would give the moved
+ * rectangle, and anchoring that again on the next resize would move the
+ * control twice. The form's size at creation is the origin the deltas are
+ * measured from — a form that follows its window (ui_pump) is the same form
+ * with a different `dw`,`dh`.
+ */
+struct Placement {
+    int         left = 0, top = 0, width = 0, height = 0;
+    /* Only an axis the form actually wrote can be anchored: a control that
+     * never had a `width` has nothing to stretch. */
+    bool        has_left = false, has_top = false, has_width = false, has_height = false;
+    unsigned    mask = openepl::ui::ANCHOR_DEFAULT;
+    std::string anchors = "left,top";   /* as written, for reading back */
+};
+std::unordered_map<uint64_t, Placement> g_placement;
+int g_form_width = 0, g_form_height = 0;   /* the size the form declared */
+
+/* How far the controls have been moved from the form's declared size — the
+ * delta apply_anchors last applied, not the window's current size. Zero until
+ * the first frame, so a property set while the form is being built records
+ * exactly what the form wrote even when the window was created larger than
+ * the form declared (OPENEPL_UI_SIZE does that, and so may a manager). */
+int g_applied_dw = 0, g_applied_dh = 0;
+void resize_delta(int* dw, int* dh) {
+    *dw = g_applied_dw;
+    *dh = g_applied_dh;
+}
+
+/* The rectangle a control shows right now: its base, moved by its anchors. */
+void visible_rect(const Placement& p, int* l, int* t, int* w, int* h) {
+    int dw, dh;
+    resize_delta(&dw, &dh);
+    *l = p.left; *t = p.top; *w = p.width; *h = p.height;
+    openepl::ui::anchored_rect(p.mask, dw, dh, l, t, w, h);
+}
+
+/* Re-derive the base from a rectangle the program wants on screen NOW.
+ * `anchored_rect` is its own inverse under a negated delta, so a control set
+ * to `left = 500` in a window already 200 wider is stored as 300 — and stays
+ * at 500 through the next resize instead of jumping by the whole delta. */
+void rebase(Placement& p, int l, int t, int w, int h) {
+    int dw, dh;
+    resize_delta(&dw, &dh);
+    openepl::ui::anchored_rect(p.mask, -dw, -dh, &l, &t, &w, &h);
+    p.left = l; p.top = t; p.width = w; p.height = h;
+}
+
+/* A numeric left/top/width/height has been set on a control: keep the base
+ * in step so a later resize starts from where the program just put it. */
+void record_geometry(OpenEPL_Widget w, const char* prop, int value) {
+    Placement& p = g_placement[w];
+    int l, t, wd, ht;
+    visible_rect(p, &l, &t, &wd, &ht);
+    if (std::strcmp(prop, "left") == 0)        { l = value;  p.has_left = true; }
+    else if (std::strcmp(prop, "top") == 0)    { t = value;  p.has_top = true; }
+    else if (std::strcmp(prop, "width") == 0)  { wd = value; p.has_width = true; }
+    else if (std::strcmp(prop, "height") == 0) { ht = value; p.has_height = true; }
+    rebase(p, l, t, wd, ht);
+}
+
+/* The window's size moved: put every anchored control where its anchors say.
+ * A control with the default anchors is left alone — its rectangle is what
+ * the form wrote and nothing here needs to touch it. */
+void apply_anchors(int dw, int dh) {
+    g_applied_dw = dw;
+    g_applied_dh = dh;
+    for (auto& kv : g_placement) {
+        const Placement& p = kv.second;
+        if (!(p.mask & (openepl::ui::ANCHOR_RIGHT | openepl::ui::ANCHOR_BOTTOM))) continue;
+        Rml::Element* e = resolve((OpenEPL_Widget)kv.first);
+        if (!e) continue;
+        int l = p.left, t = p.top, w = p.width, h = p.height;
+        openepl::ui::anchored_rect(p.mask, dw, dh, &l, &t, &w, &h);
+        if (p.has_left)   e->SetProperty("left",   Rml::String(std::to_string(l) + "px"));
+        if (p.has_top)    e->SetProperty("top",    Rml::String(std::to_string(t) + "px"));
+        if (p.has_width)  e->SetProperty("width",  Rml::String(std::to_string(w) + "px"));
+        if (p.has_height) e->SetProperty("height", Rml::String(std::to_string(h) + "px"));
+        /* By handle, never by name: component identifiers do not reach the
+         * binary (G8), and the handle is what a test can address. */
+        if (ui_debug())
+            std::fprintf(stderr, "ui: anchored %llu -> %d,%d %dx%d\n",
+                         (unsigned long long)kv.first, l, t, w, h);
+    }
+}
+
+/* --- the window's place on the screen ------------------------------------ *
+ *
+ * The three form properties are held together and applied from the set,
+ * because a form writes them in whichever order its lines happen to be in
+ * and `position = "manual"` must mean the same thing above `left` as below
+ * it. After the window is up (oe_ui_run), `left`/`top` move a manual window
+ * and `position` is ignored: a window that switched from centred to manual
+ * mid-run would jump to a corner the form never asked to see.
+ *
+ * The substrate creates the window centred, and that file is not this
+ * library's to change — so `default` means "where the substrate put it",
+ * which is the centre of the screen today, and a window manager may still
+ * override any of this (Wayland ignores a client's position entirely).
+ */
+struct WindowPlace {
+    std::string mode = "default";
+    int left = 0, top = 0;
+};
+WindowPlace g_window;
+bool g_running = false;   /* oe_ui_run has begun; the window is on screen */
+
+void apply_window_position() {
+    SDL_Window* win = SDL_GL_GetCurrentWindow();
+    if (!win) return;
+    if (g_window.mode == "center")
+        SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    else if (g_window.mode == "manual")
+        SDL_SetWindowPosition(win, g_window.left, g_window.top);
+    if (ui_debug())
+        std::fprintf(stderr, "ui: window position %s %d,%d\n",
+                     g_window.mode.c_str(), g_window.left, g_window.top);
+}
+
+/* -1 when the property is not one of the window's; else the set's status. */
+int window_set(const char* prop, const char* value) {
+    if (std::strcmp(prop, "position") == 0) {
+        if (g_running) return 0;   /* ignored once the window exists; see above */
+        if (std::strcmp(value, "default") != 0 && std::strcmp(value, "center") != 0 &&
+            std::strcmp(value, "manual") != 0) {
+            oe_error_set(OE_ERR_INVALID_ARG, "position: expected default, center or manual");
+            return 1;
+        }
+        g_window.mode = value;
+    } else if (std::strcmp(prop, "left") == 0) {
+        g_window.left = (int)std::strtol(value, nullptr, 10);
+    } else if (std::strcmp(prop, "top") == 0) {
+        g_window.top = (int)std::strtol(value, nullptr, 10);
+    } else {
+        return -1;
+    }
+    if (!g_running || g_window.mode == "manual") apply_window_position();
+    return 0;
+}
+
+bool window_get(const char* prop, std::string* out) {
+    if (std::strcmp(prop, "position") == 0)  { *out = g_window.mode; return true; }
+    if (std::strcmp(prop, "left") == 0)      { *out = std::to_string(g_window.left); return true; }
+    if (std::strcmp(prop, "top") == 0)       { *out = std::to_string(g_window.top); return true; }
+    return false;
+}
+
 } // namespace
 
 extern "C" {
 
 int oe_ui_init(const char* title, int width, int height) {
     if (g.initialised) return 0;
+    /* A headless run must not open a window: a test or an agent that
+     * renders a frame to a file steals focus from whoever is working on
+     * the machine otherwise. SDL's offscreen driver renders through EGL
+     * with no window at all, and a caller who set SDL_VIDEODRIVER
+     * knows better than this default, as does OPENEPL_UI_WINDOW=1 — the
+     * one test that reads the manager's own flags back needs a real window. */
+    if (!std::getenv("SDL_VIDEODRIVER") && !std::getenv("OPENEPL_UI_WINDOW") && (std::getenv("OPENEPL_UI_EXIT_AFTER_FRAMES") || std::getenv("OPENEPL_UI_DUMP")))
+        setenv("SDL_VIDEODRIVER", "offscreen", 1);
+    /* OPENEPL_UI_SIZE sizes the window at creation rather than after: an
+     * offscreen surface cannot grow, so a resize there paints nothing new.
+     * The form still declares its own size, which is what anchors measure
+     * against, so the first frame sees the difference as a resize. */
+    g_form_width = width;    /* the DECLARED size: what anchors measure against */
+    g_form_height = height;
+    {
+        int nw = 0, nh = 0;
+        const char* sz = std::getenv("OPENEPL_UI_SIZE");
+        if (sz && std::sscanf(sz, "%dx%d", &nw, &nh) == 2 && nw > 0 && nh > 0) {
+            width = nw;
+            height = nh;
+        }
+    }
     if (!Backend::Initialize(title ? title : "OpenEPL", width, height, true)) return 1;
     Rml::SetSystemInterface(Backend::GetSystemInterface());
     Rml::SetRenderInterface(Backend::GetRenderInterface());
@@ -999,6 +1174,10 @@ int oe_ui_init(const char* title, int width, int height) {
     g.document = g.context->LoadDocumentFromMemory(seed);
     if (!g.document) return 1;
     g.document->Show();
+
+    /* The origin every anchor measures from, kept from the declared size and
+     * not read back from the window: a window manager may have already made
+     * the window something else by the first frame. */
 
     g.widgets.clear();
     publish(g.document);          // handle 1 == the form root
@@ -1081,8 +1260,32 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
         set_widget_enabled(w, std::strcmp(value, "true") == 0 || std::strcmp(value, "1") == 0);
         return 0;
     }
+    /* The form's `left`/`top` place the WINDOW, not a box in the document —
+     * a form has no parent to be offset in. Caught before the generic path
+     * would write them into the stylesheet as pixel lengths. */
+    if (w == 1) {
+        if (const int status = window_set(property, value); status >= 0) return status;
+    }
 
     const std::string type = g.type_of.count(w) ? g.type_of[w] : std::string("form");
+
+    if (std::strcmp(property, "anchors") == 0) {
+        unsigned mask = 0;
+        if (w == 1 || !openepl::ui::parse_anchors(value, &mask)) {
+            oe_error_set(OE_ERR_INVALID_ARG,
+                         "anchors: expected a comma-separated subset of left, top, right, bottom");
+            return 1;
+        }
+        /* The control must not move on the spot: what shows now stays, and the
+         * new anchors decide only what the NEXT resize does with it. */
+        Placement& p = g_placement[w];
+        int l, t, wd, ht;
+        visible_rect(p, &l, &t, &wd, &ht);
+        p.mask = mask;
+        p.anchors = value;
+        rebase(p, l, t, wd, ht);
+        return 0;
+    }
 
     // Values that live behind a typed element interface rather than on an
     // attribute or in the stylesheet.
@@ -1150,6 +1353,26 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
         return 0;
     }
 
+    /* Refused here rather than handed on: the substrate's answer to `#44444`
+     * is a syntax error on stderr and a SetProperty that still says yes, so
+     * nothing a program can read would ever know. */
+    if (openepl::ui::is_colour_property(property) && !openepl::ui::is_hex_colour(value)) {
+        char msg[160];
+        std::snprintf(msg, sizeof msg, "%s: '%.32s' is not a colour (#rgb, #rrggbb or #rrggbbaa)",
+                      property, value);
+        oe_error_set(OE_ERR_INVALID_ARG, msg);
+        return 1;
+    }
+
+    /* A control's geometry is also its anchor base (see Placement). Only a
+     * bare number counts: `50%` is a length the stylesheet understands and
+     * an anchor cannot add pixels to. */
+    if (w != 1 && openepl::ui::is_length_property(property) &&
+        std::strcmp(property, "border_radius") != 0 && *value &&
+        std::strspn(value, "-0123456789") == std::strlen(value)) {
+        record_geometry(w, property, (int)std::strtol(value, nullptr, 10));
+    }
+
     bool ok = e->SetProperty(openepl::ui::rcss_name(property), v);
 
     if (ok && std::strcmp(property, "background_color") == 0 && g.interactive.count(w)) {
@@ -1178,6 +1401,12 @@ const char* oe_ui_get(OpenEPL_Widget w, const char* property) {
     std::string special;
     if (control_get(type, w, property, &special)) {
         value = special;
+    } else if (w == 1 && window_get(property, &special)) {
+        value = special;
+    } else if (w != 1 && std::strcmp(property, "anchors") == 0) {
+        /* As written, or the default a form that wrote nothing has. */
+        const auto it = g_placement.find(w);
+        value = it == g_placement.end() ? "left,top" : it->second.anchors;
     } else if (const char* attr = openepl::ui::attribute_for(type.c_str(), property)) {
         // Attribute-backed properties must be READ from the attribute too, or
         // an editbox reports its markup instead of what the user typed.
@@ -1348,6 +1577,21 @@ int oe_ui_set_a11y(OpenEPL_Widget w, int32_t role, const char* name) {
  * it can get, and deliberately does not power-save, or an app whose window is
  * not focused stops updating and its timers and animation stop with it.
  */
+/* The offscreen driver applies SDL_SetWindowSize and tells nobody: no
+ * SIZE_CHANGED event reaches the backend, so its GL viewport keeps the old
+ * size and everything past it is painted black. A real window manager sends
+ * the event; a scripted resize sends it itself. */
+static void announce_window_size(SDL_Window* win, int w, int h) {
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = SDL_WINDOWEVENT;
+    ev.window.event = SDL_WINDOWEVENT_SIZE_CHANGED;
+    ev.window.windowID = SDL_GetWindowID(win);
+    ev.window.data1 = w;
+    ev.window.data2 = h;
+    SDL_PushEvent(&ev);
+}
+
 static int32_t ui_pump(void *) {
     const int max_frames = env_int("OPENEPL_UI_EXIT_AFTER_FRAMES", 0);
     const char* dump_path = std::getenv("OPENEPL_UI_DUMP");
@@ -1367,8 +1611,12 @@ static int32_t ui_pump(void *) {
         int nw = 0, nh = 0;
         const char* sz = std::getenv("OPENEPL_UI_SIZE");
         if (sz && std::sscanf(sz, "%dx%d", &nw, &nh) == 2 && nw > 0 && nh > 0) {
-            if (SDL_Window* win = SDL_GL_GetCurrentWindow()) SDL_SetWindowSize(win, nw, nh);
+            if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
+                SDL_SetWindowSize(win, nw, nh);
+                announce_window_size(win, nw, nh);
+            }
             for (int i = 0; i < 30; i++) Backend::ProcessEvents(g.context, nullptr, false);
+            static_cast<RenderInterface_GL3*>(Backend::GetRenderInterface())->SetViewport(nw, nh);
             g.context->SetDimensions(Rml::Vector2i(nw, nh));
         }
     }
@@ -1382,6 +1630,9 @@ static int32_t ui_pump(void *) {
         last_dims = now;
         g.document->SetProperty("width", Rml::String(std::to_string(now.x) + "px"));
         g.document->SetProperty("height", Rml::String(std::to_string(now.y) + "px"));
+        /* Same moment, same delta: the controls follow the window the way
+         * their anchors say, before this frame is laid out. */
+        apply_anchors(now.x - g_form_width, now.y - g_form_height);
     }
     sync_grids();
     g.context->Update();
@@ -1414,6 +1665,11 @@ static int32_t ui_pump(void *) {
     Backend::BeginFrame();
     g.context->Render();
 
+    /* A frame-limited run counts frames and a timer counts time: with no
+     * vsync (the offscreen driver has none) eight frames take a millisecond
+     * and a 20 ms timer never fires. Pace headless frames as a display would;
+     * OPENEPL_UI_FRAME_MS=0 for a run that counts frames as a lifetime. */
+    if (max_frames > 0) SDL_Delay(env_int("OPENEPL_UI_FRAME_MS", 16));
     if (max_frames > 0 && ++g_frames >= max_frames) {
         /* Test hook: print the accessibility tree. Substrate-independent
          * and needs no accessibility bus, so it works in CI. */
@@ -1449,6 +1705,7 @@ static int32_t ui_pump(void *) {
 
 int oe_ui_run(void) {
     if (!g.initialised) return 1;
+    g_running = true;   /* from here on, the form's `position` is settled */
 
     const char* synth_click = std::getenv("OPENEPL_UI_SYNTH_CLICK");
     const char* mouse_at = std::getenv("OPENEPL_UI_MOUSE");   /* "x,y" — drives hover */
@@ -1558,6 +1815,11 @@ void oe_ui_shutdown(void) {
     g_action_of.clear();
     g_pending_bindings.clear();
     g_disabled.clear();
+    g_placement.clear();
+    g_window = WindowPlace{};
+    g_running = false;
+    g_form_width = g_form_height = 0;
+    g_applied_dw = g_applied_dh = 0;
     g.interactive.clear();
     g.widgets.clear();
     g.type_of.clear();

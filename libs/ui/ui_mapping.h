@@ -241,6 +241,88 @@ inline bool is_length_property(const char* p) {
 /// `text` is an OpenEPL concept (element content), not an RCSS property.
 inline bool is_text_property(const char* p) { return std::strcmp(p, "text") == 0; }
 
+/// Whether a property carries a colour: `color`, `background_color`,
+/// `border_color` and whatever `_color` is declared next. The name is the
+/// rule rather than a list, so a library adding a colour property gets the
+/// check without registering it anywhere.
+inline bool is_colour_property(const char* p) {
+    const size_t n = std::strlen(p);
+    return n >= 5 && std::strcmp(p + n - 5, "color") == 0;
+}
+
+/// Whether a value is a colour the stylesheet will take: `#rgb`, `#rrggbb`
+/// or `#rrggbbaa`, hex digits only.
+///
+/// Checked here, before the substrate sees it, because RmlUi's answer to a
+/// bad colour is a "Syntax error parsing inline property declaration" line
+/// on stderr and a `SetProperty` that still returns true — so a program
+/// could not tell, and a designer inspector could not warn. Shared with the
+/// designer so the inspector and the running program refuse the same values.
+inline bool is_hex_colour(const char* value) {
+    if (!value || value[0] != '#') return false;
+    size_t digits = 0;
+    for (const char* c = value + 1; *c; c++, digits++) {
+        const bool hex = (*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'f') ||
+                         (*c >= 'A' && *c <= 'F');
+        if (!hex) return false;
+    }
+    return digits == 3 || digits == 6 || digits == 8;
+}
+
+/// The edges a control keeps its distance from when the window is resized —
+/// Delphi's `Anchors`. Bits, so a set can be tested by masking.
+enum Anchor : unsigned {
+    ANCHOR_LEFT   = 1,
+    ANCHOR_TOP    = 2,
+    ANCHOR_RIGHT  = 4,
+    ANCHOR_BOTTOM = 8,
+    ANCHOR_DEFAULT = ANCHOR_LEFT | ANCHOR_TOP,
+};
+
+/// Parse `anchors` text — a comma-separated subset of left, top, right and
+/// bottom, in any order, spaces allowed — into its bits. Returns false for
+/// anything else, leaving `*out` untouched: a misspelled edge must refuse,
+/// not quietly anchor to nothing. An empty text is the empty set, which lays
+/// out like `left,top` (see `anchored_rect`).
+inline bool parse_anchors(const char* text, unsigned* out) {
+    unsigned mask = 0;
+    std::string word;
+    auto take = [&](void) {
+        if (word.empty()) return true;
+        if (word == "left")        mask |= ANCHOR_LEFT;
+        else if (word == "top")    mask |= ANCHOR_TOP;
+        else if (word == "right")  mask |= ANCHOR_RIGHT;
+        else if (word == "bottom") mask |= ANCHOR_BOTTOM;
+        else return false;
+        word.clear();
+        return true;
+    };
+    for (const char* c = text ? text : ""; *c; c++) {
+        if (*c == ' ' || *c == '\t') continue;
+        if (*c == ',') { if (!take()) return false; continue; }
+        word += (char)((*c >= 'A' && *c <= 'Z') ? *c + ('a' - 'A') : *c);
+    }
+    if (!take()) return false;
+    *out = mask;
+    return true;
+}
+
+/// Where an anchored control sits once the window has grown by `dw`,`dh`
+/// from the size the form declared. Per axis: the far edge alone moves the
+/// control; both edges stretch it; the near edge alone — or neither — keeps
+/// it where the form put it. One function in the shared header, so the
+/// designer can show a resized form exactly as the built program will lay it
+/// out.
+inline void anchored_rect(unsigned mask, int dw, int dh,
+                          int* left, int* top, int* width, int* height) {
+    const bool l = mask & ANCHOR_LEFT, r = mask & ANCHOR_RIGHT;
+    const bool t = mask & ANCHOR_TOP,  b = mask & ANCHOR_BOTTOM;
+    if (l && r)       *width += dw;
+    else if (r)       *left += dw;
+    if (t && b)       *height += dh;
+    else if (b)       *top += dh;
+}
+
 /// Convert an OpenEPL property value to what RCSS expects.
 inline std::string rcss_value(const char* property, const char* value) {
     std::string v(value ? value : "");

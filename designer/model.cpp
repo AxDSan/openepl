@@ -2,6 +2,7 @@
 
 #include <sys/stat.h>
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -220,6 +221,80 @@ std::string emit_module_component(const Component& c, const NeedsQuotes& needs_q
     return o.str();
 }
 
+bool is_identifier(const std::string& id) {
+    if (id.empty()) return false;
+    auto start = [](char c) { return c == '_' || std::isalpha((unsigned char)c); };
+    auto cont = [](char c) { return c == '_' || std::isalnum((unsigned char)c); };
+    if (!start(id[0])) return false;
+    for (char c : id) {
+        if (!cont(c)) return false;
+    }
+    // The words ir/src/lexer.rs turns into tokens rather than identifiers. A
+    // component called `end` would parse as the end of its own form.
+    static const char* KEYWORDS[] = {"module", "sub",   "end",  "let",   "var",  "if",   "else",
+                                     "while",  "for",   "break", "continue", "and", "or",  "not",
+                                     "true",   "false", "call", "use",   "form", "on",   "return"};
+    for (const char* k : KEYWORDS) {
+        if (id == k) return false;
+    }
+    return true;
+}
+
+bool rename_id(Model& m, const std::string& old_id, const std::string& new_id, std::string& error) {
+    if (old_id == new_id) return true;
+    if (!is_identifier(new_id)) {
+        error = new_id.empty() ? "a name is required" : new_id + " is not a valid name";
+        return false;
+    }
+    if (m.has_id(new_id)) { error = new_id + " is already taken"; return false; }
+    if (m.has_sub(new_id)) { error = new_id + " is a subroutine"; return false; }
+    Component* c = m.find(old_id);
+    if (!c) { error = "nothing is called " + old_id; return false; }
+    c->id = new_id;
+    if (c == &m.form) m.form_name = new_id;
+    // Renaming what was itself renamed since the last save is one rename of
+    // the file — a name typed a letter at a time is a chain of them.
+    if (!m.renames.empty() && m.renames.back().second == old_id) {
+        m.renames.back().second = new_id;
+        if (m.renames.back().first == new_id) m.renames.pop_back();
+    } else {
+        m.renames.emplace_back(old_id, new_id);
+    }
+    return true;
+}
+
+std::string rename_references(const std::string& line, const std::string& old_id,
+                              const std::string& new_id) {
+    auto word = [](char c) { return c == '_' || std::isalnum((unsigned char)c); };
+    std::string out;
+    out.reserve(line.size());
+    bool in_string = false;
+    for (size_t i = 0; i < line.size();) {
+        const char c = line[i];
+        if (in_string) {
+            // A backslash pair is one unit, so an escaped quote does not end
+            // the literal — the same escapes ir/src/lexer.rs reads.
+            if (c == '\\' && i + 1 < line.size()) { out += line.substr(i, 2); i += 2; continue; }
+            if (c == '"') in_string = false;
+            out += c;
+            i++;
+            continue;
+        }
+        if (c == '"') { in_string = true; out += c; i++; continue; }
+        if (c == '#') { out += line.substr(i); break; }   // a comment runs to the end
+        if (word(c) && (i == 0 || !word(line[i - 1])) &&
+            line.compare(i, old_id.size(), old_id) == 0 && i + old_id.size() < line.size() &&
+            line[i + old_id.size()] == '.') {
+            out += new_id;
+            i += old_id.size();
+            continue;
+        }
+        out += c;
+        i++;
+    }
+    return out;
+}
+
 namespace {
 
 int count_lines(const std::string& block) {
@@ -264,7 +339,7 @@ bool save_model(Model& m, const std::vector<std::string>& new_subs,
     // Nothing to splice and nothing to add. A module with no form is still a
     // project: a console program or a library is edited entirely as text, and
     // reporting a form error for it is both wrong and alarming.
-    bool anything_new = !new_subs.empty();
+    bool anything_new = !new_subs.empty() || !m.renames.empty();
     for (const auto& c : m.module_components) {
         if (c.last_line == 0 && !c.removed) anything_new = true;
     }
@@ -285,8 +360,17 @@ bool save_model(Model& m, const std::vector<std::string>& new_subs,
     std::ostringstream out;
     int out_lines = 0;                   // written so far, so spans can be recomputed
     int cursor = 0;                      // 0-based index of the next original line to copy
+    // The lines copied verbatim are the hand-written ones, and they are
+    // where a renamed component is referred to. The blocks the designer
+    // emits already carry the new names, so the renames apply only here —
+    // oldest first, since a later one may rename what an earlier one made.
     auto copy_through = [&](int upto) {  // exclusive, 0-based
-        for (int i = cursor; i < upto; i++) { out << lines[i] << "\n"; out_lines++; }
+        for (int i = cursor; i < upto; i++) {
+            std::string line = lines[i];
+            for (const auto& r : m.renames) line = rename_references(line, r.first, r.second);
+            out << line << "\n";
+            out_lines++;
+        }
         cursor = upto;
     };
 
@@ -358,6 +442,8 @@ bool save_model(Model& m, const std::vector<std::string>& new_subs,
         if (!c.removed) kept.push_back(c);
     }
     m.module_components = kept;
+    // The file now says the new names everywhere; nothing is left to rename.
+    m.renames.clear();
     return true;
 }
 

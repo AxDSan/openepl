@@ -111,7 +111,19 @@ pub struct BuildConfig {
 
 /// Resolve `core` + each `use`d library under `repo_root`.
 pub fn load(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
-    load_with(repo_root, uses, true)
+    load_with(repo_root, uses, true, false)
+}
+
+/// Resolve for a program that will be linked for ANOTHER operating system.
+///
+/// The difference is the optional dependencies: `take_optional` decides by
+/// whether the vendored files exist, and the files under `vendor/` were built
+/// for this machine. A cross build that found them would hand ELF archives to
+/// a PE linker and define the feature macro on top, so here they are treated
+/// as absent and the library says at run time that the capability is missing —
+/// which is the truth, on that platform, until someone vendors it there too.
+pub fn load_cross(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
+    load_with(repo_root, uses, true, true)
 }
 
 /// Introspect libraries without requiring what only a *link* needs.
@@ -122,10 +134,15 @@ pub fn load(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
 /// ability to build a window — which is also what lets the documentation be
 /// generated on a machine that has never fetched the UI stack.
 pub fn load_metadata(repo_root: &Path, uses: &[String]) -> Result<LibPlan, String> {
-    load_with(repo_root, uses, false)
+    load_with(repo_root, uses, false, false)
 }
 
-fn load_with(repo_root: &Path, uses: &[String], require_impl: bool) -> Result<LibPlan, String> {
+fn load_with(
+    repo_root: &Path,
+    uses: &[String],
+    require_impl: bool,
+    cross: bool,
+) -> Result<LibPlan, String> {
     let mut registry = Registry::new();
     let mut impl_sources = Vec::new();
     let mut build = BuildConfig::default();
@@ -143,7 +160,7 @@ fn load_with(repo_root: &Path, uses: &[String], require_impl: bool) -> Result<Li
                 dir.display()
             ));
         }
-        let manifest = Manifest::load(dir, repo_root)?;
+        let manifest = Manifest::load(dir, repo_root, !cross)?;
         if require_impl {
             manifest
                 .check_requirements()
@@ -484,7 +501,10 @@ pub struct Manifest {
 impl Manifest {
     /// Load `<dir>/lib.json` if present; an absent manifest is not an error
     /// (plain C libraries like `core` need no configuration).
-    fn load(dir: &Path, repo_root: &Path) -> Result<Manifest, String> {
+    ///
+    /// `host_deps` is false for a cross build, whose vendored dependencies
+    /// are the wrong architecture by definition; see `load_cross`.
+    fn load(dir: &Path, repo_root: &Path, host_deps: bool) -> Result<Manifest, String> {
         let path = dir.join("lib.json");
         if !path.is_file() {
             return Ok(Manifest::default());
@@ -517,7 +537,9 @@ impl Manifest {
             .iter()
             .map(|a| absolutise(repo_root, a))
             .collect();
-        m.take_optional(&text, repo_root);
+        if host_deps {
+            m.take_optional(&text, repo_root);
+        }
         Ok(m)
     }
 

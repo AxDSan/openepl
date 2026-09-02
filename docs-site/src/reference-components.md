@@ -56,6 +56,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `background_color` | text |
 | `color` | text |
 | `border_radius` | int |
@@ -74,6 +75,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `color` | text |
 
 **Events:** `change`
@@ -89,6 +91,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `enabled` | bool |
 
 **Events:** `change`
@@ -113,6 +116,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `color` | text |
 
 **Events:** `change`
@@ -126,6 +130,9 @@ list.
 | `height` | int |
 | `background_color` | text |
 | `icon` | text |
+| `position` | text |
+| `left` | int |
+| `top` | int |
 
 **Events:** `load`
 
@@ -143,6 +150,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `enabled` | bool |
 
 **Events:** `select`,`activate`
@@ -156,6 +164,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `border_color` | text |
 
 **Events:** none
@@ -169,6 +178,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 
 **Events:** none
 
@@ -181,6 +191,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `color` | text |
 
 **Events:** none
@@ -196,6 +207,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `enabled` | bool |
 
 **Events:** `change`
@@ -209,6 +221,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `color` | text |
 | `enabled` | bool |
 
@@ -223,6 +236,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 
 **Events:** none
 
@@ -237,6 +251,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `color` | text |
 
 **Events:** `change`
@@ -252,6 +267,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `enabled` | bool |
 
 **Events:** `change`
@@ -268,6 +284,7 @@ list.
 | `top` | int |
 | `width` | int |
 | `height` | int |
+| `anchors` | text |
 | `enabled` | bool |
 
 **Events:** `change`

@@ -26,6 +26,7 @@ static void test_json();
 static void test_module_components(const std::string& openepl, const NeedsQuotes& quoted);
 static void test_multiline(const std::string& openepl);
 static void test_round_trip(const std::string& openepl, const NeedsQuotes& quoted);
+static void test_rename(const std::string& openepl, const NeedsQuotes& quoted);
 
 int main(int argc, char** argv) {
     const std::string openepl = argc > 1 ? argv[1] : "./target/debug/openepl";
@@ -160,6 +161,7 @@ int main(int argc, char** argv) {
     test_multiline(openepl);
     test_module_components(openepl, quoted);
     test_round_trip(openepl, quoted);
+    test_rename(openepl, quoted);
     test_json();
 
 
@@ -342,6 +344,87 @@ static void test_round_trip(const std::string& openepl, const NeedsQuotes& quote
 }
 
 /* --- JSON: the LSP wire format ------------------------------------------ */
+
+/// A rename travels with the model and is written by the save: the block the
+/// designer emits carries the new name, the hand-written lines that refer to
+/// the component are rewritten as they are copied, and a literal, a comment
+/// and a longer word that merely ends in the old name are left alone.
+static void test_rename(const std::string& openepl, const NeedsQuotes& quoted) {
+    std::printf("rename\n");
+    check("a plain word is an identifier", is_identifier("go_button") && is_identifier("_x1"));
+    check("a digit first, a dash or a keyword is not",
+          !is_identifier("9abc") && !is_identifier("go-button") && !is_identifier("end") &&
+              !is_identifier("form") && !is_identifier(""));
+    check("references are rewritten on word boundaries only",
+          rename_references("  go.text = my_go.text + go.text", "go", "run") ==
+              "  run.text = my_go.text + run.text");
+    check("a literal and a comment are left alone",
+          rename_references("  x.text = \"go.text\"   # go.text", "go", "run") ==
+              "  x.text = \"go.text\"   # go.text");
+    check("an escaped quote does not end the literal",
+          rename_references("  x.text = \"a\\\"go.text\" + go.text", "go", "run") ==
+              "  x.text = \"a\\\"go.text\" + run.text");
+    check("a handler line names a sub, not an id",
+          rename_references("    on click: go", "go", "run") == "    on click: go");
+
+    const std::string fixture = "/tmp/openepl_designer_renamefixture.oir";
+    const char* source =
+        "module renamefixture\n"
+        "use ui\n"
+        "\n"
+        "form win\n"
+        "  title = \"Rename\"\n"
+        "  width = 300\n"
+        "\n"
+        "  button go\n"
+        "    text = \"Go\"\n"
+        "    left = 10\n"
+        "    on click: on_go\n"
+        "  end\n"
+        "end\n"
+        "\n"
+        "timer tick\n"
+        "  interval = 100\n"
+        "end\n"
+        "\n"
+        "# go.text is what the button says\n"
+        "sub on_go\n"
+        "  go.text = \"go.text\"   # go.text\n"
+        "  call print_text(go.text)\n"
+        "  call timer_stop(tick.name)\n"
+        "end\n";
+    { std::ofstream f(fixture, std::ios::trunc); f << source; }
+    Model m;
+    std::string err;
+    check("load", load_model(openepl, fixture, m, err));
+    check("a taken id is refused", !rename_id(m, "go", "tick", err) && m.find("go"));
+    check("a sub's name is refused", !rename_id(m, "go", "on_go", err) && m.find("go"));
+    check("a keyword is refused", !rename_id(m, "go", "sub", err) && m.find("go"));
+    check("an unknown id is refused", !rename_id(m, "nope", "x", err));
+    check("nothing pending after refusals", m.renames.empty());
+    check("rename the button", rename_id(m, "go", "run", err) && m.find("run") && !m.find("go"));
+    check("rename it again: one rename of the file",
+          rename_id(m, "run", "start", err) && m.renames.size() == 1 &&
+              m.renames[0].first == "go" && m.renames[0].second == "start");
+    check("rename the form", rename_id(m, "win", "main", err) && m.form_name == "main" &&
+                                 m.find("main") == &m.form);
+    check("rename a tray component", rename_id(m, "tick", "clock", err) && m.find("clock"));
+    check("save", save_model(m, {}, quoted, err));
+    const std::string saved = slurp(fixture);
+    check("the block carries the new name", saved.find("  button start\n") != std::string::npos);
+    check("the form carries its new name", saved.find("form main\n") != std::string::npos);
+    check("the tray block carries its new name", saved.find("timer clock\n") != std::string::npos);
+    check("references in the handler are rewritten",
+          saved.find("  call print_text(start.text)\n") != std::string::npos &&
+              saved.find("  start.text = \"go.text\"   # go.text\n") != std::string::npos &&
+              saved.find("  call timer_stop(clock.name)\n") != std::string::npos);
+    check("the comment above the sub is untouched",
+          saved.find("# go.text is what the button says\n") != std::string::npos);
+    check("the handler line still names the sub", saved.find("    on click: on_go\n") != std::string::npos);
+    check("nothing pending after the save", m.renames.empty());
+    check("the file still inspects", load_model(openepl, fixture, m, err) && m.find("start") &&
+                                         m.form_name == "main");
+}
 
 static void test_json() {
     using namespace openepl;

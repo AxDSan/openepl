@@ -76,8 +76,16 @@ struct Model {
     /// rejects it), so they are a separate list rather than children with a
     /// flag, and they are spliced into the file at their own line spans.
     std::vector<Component> module_components;
+    /// Ids renamed in the designer but not yet in the file, oldest first.
+    /// A rename is not written when it is made: the hand-written lines that
+    /// name the component are outside every span the designer owns, and only
+    /// the save that copies them past knows where they are — so the rename
+    /// travels with the model, is applied to those lines as they are copied,
+    /// and an undo that restores the model before it simply never writes it.
+    std::vector<std::pair<std::string, std::string>> renames;
 
     Component* find(const std::string& id) {
+        if (!form_name.empty() && id == form_name) return &form;
         for (auto& c : children) {
             if (c.id == id) return &c;
         }
@@ -87,6 +95,18 @@ struct Model {
         return nullptr;
     }
     bool is_module_level(const std::string& id) const {
+        for (const auto& c : module_components) {
+            if (c.id == id) return true;
+        }
+        return false;
+    }
+    /// Is `id` the form, a component, or a subroutine — anything a new id
+    /// would collide with.
+    bool has_id(const std::string& id) const {
+        if (!form_name.empty() && id == form_name) return true;
+        for (const auto& c : children) {
+            if (c.id == id) return true;
+        }
         for (const auto& c : module_components) {
             if (c.id == id) return true;
         }
@@ -146,6 +166,25 @@ bool load_model(const std::string& openepl_bin, const std::string& path, Model& 
 /// the value's shape writes uncompilable source.
 using NeedsQuotes =
     std::function<bool(const std::string& type_name, const std::string& property)>;
+
+/// Is `id` a name the compiler would take as an identifier: a letter or an
+/// underscore, then letters, digits and underscores, and not a keyword.
+bool is_identifier(const std::string& id);
+
+/// Record that `old_id` is now `new_id`: the form's name or a component's,
+/// plus the pending rename a save applies to the file's other lines. Refuses,
+/// with the reason in `error` and nothing changed, when the new id is not an
+/// identifier, is taken by the form, a component or a subroutine, or when
+/// `old_id` names nothing.
+bool rename_id(Model& m, const std::string& old_id, const std::string& new_id, std::string& error);
+
+/// `line` with every reference `old_id.` rewritten to `new_id.` — whole words
+/// only, and never inside a text literal or a comment. A component is
+/// referred to as `id.property` or `id.method`; an `on event: sub` line names
+/// a subroutine, which a rename must leave alone, and this leaves it alone
+/// because the id there is not followed by a dot.
+std::string rename_references(const std::string& line, const std::string& old_id,
+                              const std::string& new_id);
 
 /// Render the model's `form … end` block as .oir source.
 std::string emit_form(const Model& m, const NeedsQuotes& needs_quotes);

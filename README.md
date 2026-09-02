@@ -206,7 +206,10 @@ model rather than something added later.
 
 OpenEPL is young, and honest about it:
 
-- **Linux x86-64 only.** Windows, macOS and arm64 are not supported yet.
+- **Linux x86-64, plus a Windows cross build.** Console programs and
+  libraries cross-build for Windows x86-64 from Linux (`--os windows`, with
+  mingw-w64 installed). GUI programs and Studio are Linux-only, nothing is
+  built natively on Windows yet, and macOS and arm64 are not supported.
 - **No debugger for the programs you build.** `--release` optimises, hardens
   and strips; what it cannot do is let you step through the result.
 - **TLS is opt-in.** `https://` works once `tools/fetch-mbedtls.sh` has
@@ -221,7 +224,8 @@ OpenEPL is young, and honest about it:
 
 What does work, end to end: design a form, wire an event, build it, run it,
 and ship the binary — and a console program, a web server or a library the
-same way — on Linux, today.
+same way — on Linux, today; a console program or a library can be cross-built
+for Windows from there.
 
 ## Documentation
 

@@ -427,12 +427,110 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("events tab: and the Code tab names the new sub", has(out, "| Code [button1_click]"));
     }
 
+    // The form itself is selectable: a press on its title bar puts its own
+    // properties in the inspector, frames it, and — since its left/top say
+    // where the window opens, not where the preview sits — refuses to drag.
+    {
+        std::string path;
+        const std::string out = session(
+            designer, openepl, form,
+            "clickform;props;click:segevents;events;drag:main_window@10,10->200,200;"
+            "geometry:greeting;badges;key:delete;select:ok_button;props", &path);
+        check("form: a press on the title bar selects it", has(out, "clickform: selected main_window"));
+        check("form: the inspector names it as the form", has(out, "props: main_window (form) name=main_window"));
+        check("form: and lists its own properties",
+              has(out, " title=OpenEPL width=480 height=300 background_color=#1e2233 icon="));
+        check("form: it is framed on the canvas", has(out, "formsel=yes"));
+        check("form: the Events tab lists load", has(out, "events: load="));
+        check("form: a drag does not move it", has(out, "greeting=40,40 form=480x300"));
+        check("form: the badges still show", has(out, "badge: ok_button click"));
+        check("form: Delete does not delete it", has(out, "the form cannot be deleted"));
+        check("form: a component takes the frame back",
+              out.rfind("formsel=yes") < out.rfind("props: ok_button (button)"));
+        check("form: selecting it leaves the file byte-identical", slurp(path) == slurp(form));
+    }
+    // Renaming, from the Name field: the block, and every `id.` reference
+    // in the hand-written code, say the new name after the save — a longer
+    // word ending in the old one, a literal and a comment do not.
+    {
+        std::string src = slurp(form);
+        src += "\nsub uses_it\n  ok_button.text = \"ok_button.text\"   # ok_button.text\n"
+               "  my_ok_button.text = \"x\"\nend\n";
+        const std::string fixture = "/tmp/openepl_studio_test_rename.oir";
+        { std::ofstream f(fixture, std::ios::trunc); f << src; }
+        std::string path;
+        const std::string out =
+            session(designer, openepl, fixture, "select:ok_button;rename:go_button;props;badges;save", &path);
+        check("rename: says so", has(out, "designer: renamed ok_button to go_button"));
+        check("rename: the inspector shows the new name", has(out, "props: go_button (button) name=go_button"));
+        check("rename: the badge follows", has(out, "badge: go_button click"));
+        const std::string file = slurp(path);
+        check("rename: the block carries the new name", has(file, "  button go_button\n"));
+        check("rename: the references are rewritten",
+              has(file, "  go_button.text = \"ok_button.text\"   # ok_button.text\n"));
+        check("rename: a longer word, a literal and a comment are left alone",
+              has(file, "  my_ok_button.text = \"x\"\n") && !has(file, " ok_button\n") &&
+                  !has(file, "(ok_button"));
+        check("rename: the handler line still names the sub", has(file, "    on click: on_ok_click\n"));
+    }
+    {
+        const std::string out = session(designer, openepl, form, "clickform;rename:main;props;save");
+        check("rename: the form too", has(out, "renamed main_window to main") && has(out, "props: main (form)"));
+    }
+    {
+        std::string path;
+        const std::string out = session(
+            designer, openepl, form,
+            "select:ok_button;rename:greeting;rename:9abc;rename:end;rename:on_ok_click;rename:;"
+            "clickform;rename:greeting;save", &path);
+        check("rename: a taken name is refused", has(out, "cannot rename ok_button: greeting is already taken"));
+        check("rename: an invalid one is refused",
+              has(out, "9abc is not a valid name") && has(out, "end is not a valid name") &&
+                  has(out, "a name is required"));
+        check("rename: a subroutine's name is refused", has(out, "on_ok_click is a subroutine"));
+        check("rename: the form cannot take a component's name",
+              has(out, "cannot rename main_window: greeting is already taken"));
+        check("rename: a refusal changes nothing", !has(out, "designer: renamed"));
+        // The save rewrites the block's spacing; the names in it are what
+        // must be the same.
+        const std::string file = slurp(path);
+        check("rename: the file keeps every name",
+              has(file, "form main_window\n") && has(file, "button ok_button\n") &&
+                  has(file, "label greeting\n"));
+    }
+    // The anchors editor: a box a side, toggling the value, beside a field
+    // the value can still be typed into. Through a CLI whose listing
+    // declares the property, so the test does not wait on the ui library.
+    {
+        const std::string wrapper = "/tmp/openepl_studio_test_anchors.sh";
+        {
+            std::ofstream f(wrapper, std::ios::trunc);
+            f << "#!/bin/sh\nif [ \"$1\" = commands ]; then\n  \"" << openepl
+              << "\" \"$@\" | grep -v 'button anchors'\n  echo 'property: button anchors text'\n"
+                 "  echo 'editor: button anchors anchors'\n  exit 0\nfi\nexec \"" << openepl
+              << "\" \"$@\"\n";
+        }
+        ::chmod(wrapper.c_str(), 0755);
+        std::string path;
+        const std::string out = session(
+            designer, wrapper, form,
+            "select:ok_button;props;click:anch-left;click:anch-right;props;click:anch-left;props;"
+            "set:anchors=bottom, top;props;save", &path);
+        check("anchors: an unset value lights no box", has(out, " [] anchors=\n"));
+        check("anchors: clicking a box adds its side, in reading order",
+              has(out, " [left right ] anchors=left,right\n"));
+        check("anchors: clicking it again removes it", has(out, " [right ] anchors=right\n"));
+        check("anchors: a typed value lights its boxes", has(out, " [top bottom ] anchors=bottom, top\n"));
+        check("anchors: the value is saved as text", has(slurp(path), "anchors = \"bottom, top\""));
+    }
+
     // The window's own frame: no window-manager frame over it, and the green
     // dot maximises. What the manager did is read back from SDL, since a
     // scripted session cannot look at the screen.
     {
         const std::string out =
-            session(designer, openepl, form, "winflags;click:wc-max;pump;winflags");
+            session("OPENEPL_UI_WINDOW=1 " + designer, openepl, form,
+                    "winflags;click:wc-max;pump;winflags");
         check("the window is borderless", has(out, " borderless"));
         check("the maximise dot maximises", has(out, " maximized borderless"));
         const std::string closed =

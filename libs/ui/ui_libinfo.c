@@ -19,8 +19,26 @@ static const OpenEPL_PropertyDesc FORM_PROPS[] = {
     /* The window's icon: a PNG beside the source, embedded at build time like
      * an image's source, so the shipped binary carries it. */
     { "icon",             OE_SDT_TEXT, "",                    "file" },
+    /* Where the window opens. `default` leaves it to the window manager (the
+     * substrate centres it today); `center` asks for the middle of the
+     * screen; `manual` puts its top-left corner at `left`,`top`. A later
+     * assignment of `left`/`top` from a subroutine moves the window when the
+     * form is `manual`; assigning `position` after the window exists is
+     * ignored, because a window that jumps between modes mid-run is a bug a
+     * program cannot mean. */
+    { "position",         OE_SDT_TEXT, "default",             NULL },
+    { "left",             OE_SDT_INT,  "0",                   NULL },
+    { "top",              OE_SDT_INT,  "0",                   NULL },
 };
 static const OpenEPL_EventDesc FORM_EVENTS[] = { { "load", 0, NULL } };
+
+/* Delphi's `Anchors`, on every control that has a rectangle: which edges of
+ * the window it keeps its distance from when the window is resized. The far
+ * edge alone moves the control with the window, both edges stretch it, and
+ * the default keeps it where the form put it — so a form written without a
+ * thought for resizing behaves exactly as it always has. The layout rule is
+ * `anchored_rect` in ui_mapping.h, shared with the designer. */
+#define ANCHORS { "anchors", OE_SDT_TEXT, "left,top", "anchors" }
 
 /* --- button ----------------------------------------------------------- */
 static const OpenEPL_PropertyDesc BUTTON_PROPS[] = {
@@ -29,6 +47,7 @@ static const OpenEPL_PropertyDesc BUTTON_PROPS[] = {
     { "top",              OE_SDT_INT,  "0",       NULL },
     { "width",            OE_SDT_INT,  "120",     NULL },
     { "height",           OE_SDT_INT,  "36",      NULL },
+    ANCHORS,
     { "background_color", OE_SDT_TEXT, "#4a86e8", "color" },
     { "color",            OE_SDT_TEXT, "#ffffff", "color" },
     { "border_radius",    OE_SDT_INT,  "6",       NULL },
@@ -46,6 +65,7 @@ static const OpenEPL_PropertyDesc LABEL_PROPS[] = {
     /* A label the designer can size only sideways is a label the designer
      * writes a `height` into anyway, and the build then rejects. */
     { "height", OE_SDT_INT, "24",      NULL },
+    ANCHORS,
     { "color", OE_SDT_TEXT, "#1f2328", "color" },
 };
 
@@ -56,6 +76,7 @@ static const OpenEPL_PropertyDesc EDIT_PROPS[] = {
     { "top",    OE_SDT_INT,  "0",       NULL },
     { "width",  OE_SDT_INT,  "160",     NULL },
     { "height", OE_SDT_INT,  "26",      NULL },
+    ANCHORS,
     { "color",  OE_SDT_TEXT, "#1f2328", "color" },
 };
 static const OpenEPL_EventDesc EDIT_EVENTS[] = { { "change", 0, NULL } };
@@ -68,6 +89,7 @@ static const OpenEPL_PropertyDesc CHECK_PROPS[] = {
     { "top",     OE_SDT_INT,  "0",        NULL },
     { "width",   OE_SDT_INT,  "140",      NULL },
     { "height",  OE_SDT_INT,  "24",       NULL },
+    ANCHORS,
     { "color",   OE_SDT_TEXT, "#1f2328",  "color" },
 };
 static const OpenEPL_EventDesc CHECK_EVENTS[] = { { "change", 0, NULL } };
@@ -79,6 +101,7 @@ static const OpenEPL_PropertyDesc GROUP_PROPS[] = {
     { "top",          OE_SDT_INT,  "0",       NULL },
     { "width",        OE_SDT_INT,  "200",     NULL },
     { "height",       OE_SDT_INT,  "120",     NULL },
+    ANCHORS,
     { "border_color", OE_SDT_TEXT, "#d0d7de", "color" },
 };
 
@@ -89,6 +112,7 @@ static const OpenEPL_PropertyDesc IMAGE_PROPS[] = {
     { "top",    OE_SDT_INT,  "0",   NULL },
     { "width",  OE_SDT_INT,  "120", NULL },
     { "height", OE_SDT_INT,  "120", NULL },
+    ANCHORS,
 };
 
 /* --- progressbar ------------------------------------------------------ */
@@ -98,6 +122,7 @@ static const OpenEPL_PropertyDesc PROG_PROPS[] = {
     { "top",    OE_SDT_INT, "0",   NULL },
     { "width",  OE_SDT_INT, "200", NULL },
     { "height", OE_SDT_INT, "16",  NULL },
+    ANCHORS,
 };
 
 
@@ -124,6 +149,7 @@ static const OpenEPL_PropertyDesc COMBO_PROPS[] = {
     { "top",      OE_SDT_INT,  "0",   NULL },
     { "width",    OE_SDT_INT,  "160", NULL },
     { "height",   OE_SDT_INT,  "28",  NULL },
+    ANCHORS,
     { "enabled",  OE_SDT_BOOL, "true", NULL },
 };
 /* `change`, not `changed`: the palette already spells this event `change` on
@@ -139,6 +165,7 @@ static const OpenEPL_PropertyDesc LIST_PROPS[] = {
     { "top",      OE_SDT_INT,  "0",   NULL },
     { "width",    OE_SDT_INT,  "160", NULL },
     { "height",   OE_SDT_INT,  "120", NULL },
+    ANCHORS,
     { "enabled",  OE_SDT_BOOL, "true", NULL },
 };
 static const OpenEPL_EventDesc LIST_EVENTS[] = { { "change", 0, NULL } };
@@ -159,6 +186,7 @@ static const OpenEPL_PropertyDesc RADIO_PROPS[] = {
     { "top",     OE_SDT_INT,  "0",       NULL },
     { "width",   OE_SDT_INT,  "140",     NULL },
     { "height",  OE_SDT_INT,  "24",      NULL },
+    ANCHORS,
     { "color",   OE_SDT_TEXT, "#1f2328", "color" },
 };
 static const OpenEPL_EventDesc RADIO_EVENTS[] = { { "change", 0, NULL } };
@@ -175,6 +203,7 @@ static const OpenEPL_PropertyDesc MEMO_PROPS[] = {
     { "top",    OE_SDT_INT,  "0",      NULL },
     { "width",  OE_SDT_INT,  "240",    NULL },
     { "height", OE_SDT_INT,  "100",    NULL },
+    ANCHORS,
     { "color",  OE_SDT_TEXT, "#1f2328", "color" },
     { "enabled", OE_SDT_BOOL, "true",  NULL },
 };
@@ -193,6 +222,7 @@ static const OpenEPL_PropertyDesc SLIDER_PROPS[] = {
     { "top",     OE_SDT_INT,  "0",    NULL },
     { "width",   OE_SDT_INT,  "200",  NULL },
     { "height",  OE_SDT_INT,  "20",   NULL },
+    ANCHORS,
     { "enabled", OE_SDT_BOOL, "true", NULL },
 };
 static const OpenEPL_EventDesc SLIDER_EVENTS[] = { { "change", 0, NULL } };
@@ -213,6 +243,7 @@ static const OpenEPL_PropertyDesc SPIN_PROPS[] = {
     { "top",     OE_SDT_INT,  "0",    NULL },
     { "width",   OE_SDT_INT,  "110",  NULL },
     { "height",  OE_SDT_INT,  "28",   NULL },
+    ANCHORS,
     { "enabled", OE_SDT_BOOL, "true", NULL },
 };
 static const OpenEPL_EventDesc SPIN_EVENTS[] = { { "change", 0, NULL } };
@@ -275,6 +306,7 @@ static const OpenEPL_PropertyDesc GRID_PROPS[] = {
     { "top",      OE_SDT_INT,  "0",    NULL },
     { "width",    OE_SDT_INT,  "320",  NULL },
     { "height",   OE_SDT_INT,  "160",  NULL },
+    ANCHORS,
     { "enabled",  OE_SDT_BOOL, "true", NULL },
 };
 static const int32_t ROW_PARAM[] = { OE_SDT_INT };
