@@ -6021,7 +6021,9 @@ int main(int argc, char** argv) {
      * with no window at all, and a caller who set SDL_VIDEODRIVER
      * knows better than this default, as does OPENEPL_UI_WINDOW=1 — the
      * one test that reads the manager's own flags back needs a real window. */
-    if (!std::getenv("SDL_VIDEODRIVER") && !std::getenv("OPENEPL_UI_WINDOW") && (std::getenv("OPENEPL_DESIGNER_SCRIPT") || std::getenv("OPENEPL_DESIGNER_DUMP")))
+    if (!std::getenv("SDL_VIDEODRIVER") && !std::getenv("OPENEPL_UI_WINDOW") &&
+        (std::getenv("OPENEPL_DESIGNER_SCRIPT") || std::getenv("OPENEPL_DESIGNER_DUMP") ||
+         std::getenv("OPENEPL_DESIGNER_WELCOME_DUMP")))
         setenv("SDL_VIDEODRIVER", "offscreen", 1);
     if (!Backend::Initialize("OpenEPL Studio", INIT_W, INIT_H, true)) return 1;
 
