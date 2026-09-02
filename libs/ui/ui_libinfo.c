@@ -12,7 +12,10 @@ static const OpenEPL_PropertyDesc FORM_PROPS[] = {
     { "title",            OE_SDT_TEXT, "OpenEPL Application", NULL },
     { "width",            OE_SDT_INT,  "800",                 NULL },
     { "height",           OE_SDT_INT,  "600",                 NULL },
-    { "background_color", OE_SDT_TEXT, "#1e2233",             "color" },
+    /* A window's ground, not a terminal's. Every desktop the target audience
+     * has used draws a form in light grey; a dark default reads as a theme
+     * someone has to switch off before their first app looks normal. */
+    { "background_color", OE_SDT_TEXT, "#f0f0f0",             "color" },
 };
 static const OpenEPL_EventDesc FORM_EVENTS[] = { { "load", 0, NULL } };
 
@@ -40,7 +43,7 @@ static const OpenEPL_PropertyDesc LABEL_PROPS[] = {
     /* A label the designer can size only sideways is a label the designer
      * writes a `height` into anyway, and the build then rejects. */
     { "height", OE_SDT_INT, "24",      NULL },
-    { "color", OE_SDT_TEXT, "#ffffff", "color" },
+    { "color", OE_SDT_TEXT, "#1f2328", "color" },
 };
 
 /* --- editbox ---------------------------------------------------------- */

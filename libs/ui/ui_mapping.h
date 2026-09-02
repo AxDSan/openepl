@@ -412,7 +412,11 @@ inline std::string control_styles(const std::string& scope = "") {
 /// still reports success. Always seed.
 inline std::string seed_document(int width, int height, const std::string& font_family) {
     std::string out = "<rml><head><style>";
-    out += "body { width: " + std::to_string(width) + "px; height: " + std::to_string(height) +
+    // The form's default ground, painted here because a descriptor default is
+    // something the inspector shows, not something the runtime applies: a form
+    // that set no colour used to clear to black. Light grey is what every
+    // desktop the audience has used draws a window in.
+    out += "body { background-color: #f0f0f0; width: " + std::to_string(width) + "px; height: " + std::to_string(height) +
            "px; font-family: '" + font_family + "'; font-size: 16px; color: #1f2328; }";
     out += control_styles();
     out += "</style></head><body/></rml>";

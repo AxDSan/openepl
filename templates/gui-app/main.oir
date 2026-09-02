@@ -8,14 +8,12 @@ form main_window
   title = "__MODULE__"
   width = 480
   height = 300
-  background_color = "#1e2233"
 
   label greeting
     text = "Click the button."
     left = 40
     top = 50
     width = 400
-    color = "#ffffff"
   end
 
   button ok_button
