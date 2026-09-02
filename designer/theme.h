@@ -63,6 +63,12 @@ constexpr int BOTTOM_H   = 220;
 /// for the same reason: a timer has properties to edit and no rectangle to
 /// click, so it needs somewhere to be.
 constexpr int TRAY_H     = 104;
+/// The form preview's own title bar: decoration above the client area, which
+/// is the only thing the file's coordinates describe.
+constexpr int FORM_TITLE_H = 32;
+/// The wiring box pinned to the foot of the inspector, so it is on screen
+/// however long the property list above it grows.
+constexpr int WIRE_H     = 84;
 
 } // namespace openepl::designer::theme
 #endif

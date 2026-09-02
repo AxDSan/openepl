@@ -338,6 +338,95 @@ static void test_sessions(const std::string& openepl, const std::string& designe
               has(out, "about: open https://github.com/AxDSan/openepl"));
     }
 
+    // The document tabs carry the file, and the Code tab the subroutine the
+    // caret is in — the name the language server's index knows.
+    {
+        const std::string out = session(designer, openepl, form, "tabs;view:code;goto:39,3;tabs;goto:36,1;tabs");
+        check("tabs: both name the file", has(out, "tabs: Designer [openepl_studio_test_") &&
+                                          has(out, "] | Code [openepl_studio_test_"));
+        check("tabs: the caret in a sub names it on the Code tab", has(out, "| Code [on_ok_click]"));
+        check("tabs: outside every sub the Code tab names the file again",
+              out.rfind("| Code [openepl_studio_test_") > out.find("| Code [on_ok_click]"));
+    }
+
+    // The preview's title bar is decoration: the client area starts under it
+    // and the file's coordinates are measured from there, unshifted.
+    {
+        std::string path;
+        const std::string out = session(designer, openepl, form, "geometry:greeting;geometry:ok_button", &path);
+        check("title bar: the form's own size is kept", has(out, "form=480x300"));
+        check("title bar: a component at top=40 is drawn 40px below it",
+              has(out, "greeting=40,40") && has(out, "ok_button=40,110"));
+        check("title bar: the client area starts under it", has(out, "title=32 client_top=33"));
+        check("title bar: no icon set falls back to the app's", has(out, "icon=openepl-icon-64.png"));
+        check("a session that does nothing leaves the file byte-identical", slurp(path) == slurp(form));
+    }
+    {
+        // An icon beside the file is shown; one that is not there is not.
+        const std::string dir = "/tmp/openepl_studio_test_icon";
+        ::mkdir(dir.c_str(), 0755);
+        const std::string fixture = dir + "/form.oir";
+        std::string src = slurp(form);
+        src.insert(src.find("  width  = 480"), "  icon   = \"mark.png\"\n");
+        { std::ofstream f(fixture, std::ios::trunc); f << src; }
+        { std::ofstream f(dir + "/mark.png", std::ios::trunc | std::ios::binary); f << slurp("assets/icons/button_16.png"); }
+        // session() copies the fixture to /tmp, where mark.png is not.
+        const std::string cmd = "OPENEPL_DESIGNER_SCRIPT='geometry:greeting' " + designer + " " + fixture +
+                                " " + openepl + " 2>/dev/null";
+        std::string out;
+        if (FILE* p = popen(cmd.c_str(), "r")) {
+            char buf[4096];
+            while (fgets(buf, sizeof buf, p)) out += buf;
+            pclose(p);
+        }
+        check("title bar: the form's icon, a path beside the file, is shown", has(out, "icon=mark.png"));
+        const std::string missing = session(designer, openepl, fixture, "geometry:greeting");
+        check("title bar: an icon that cannot be read falls back to the app's",
+              has(missing, "icon=openepl-icon-64.png"));
+    }
+
+    // The wiring, on the canvas and in the inspector, and every way from it
+    // into the handler.
+    {
+        const std::string out = session(designer, openepl, form, "badges;select:greeting;wiring;select:ok_button;wiring");
+        check("badge: a wired component shows event and handler, above it",
+              has(out, "badge: ok_button click\xe2\x86\x92on_ok_click at 40,86"));
+        check("badge: an unwired one shows none", !has(out, "badge: greeting"));
+        check("wiring: an unwired component says how to wire it",
+              has(out, "wiring: HANDLER WIRINGNot linked \xe2\x80\x94 double-click to create"));
+        check("wiring: a wired one names the handler", has(out, "wiring: HANDLER WIRINGLinked to: on_ok_click()on click"));
+    }
+    {
+        const std::string out = session(designer, openepl, form, "select:ok_button;click:wirelink;caret");
+        check("wiring: the link opens the code view in the handler",
+              has(out, "designer: code view") && has(out, "caret: 39,") && !has(out, "wired"));
+    }
+    {
+        // A badge is a way into the handler, but only the selection's: one
+        // that took every click would sit over the components above it.
+        std::string path;
+        const std::string out = session(designer, openepl, form, "add:editbox;click:editbox1;view:designer;caret", &path);
+        check("badge: an unselected badge lets the click through to the component under it",
+              !has(slurp(path), "editbox1_change"));
+    }
+    {
+        const std::string out = session(designer, openepl, form, "select:ok_button;badges");
+        check("badge: the selection's badge is live", has(out, "badge: ok_button"));
+    }
+    {
+        const std::string out = session(designer, openepl, form, "select:ok_button;click:segevents;events;click:ev-click;caret");
+        check("events tab: lists the event with its handler", has(out, "events: click=on_ok_click"));
+        check("events tab: choosing it jumps to the handler", has(out, "caret: 39,"));
+    }
+    {
+        std::string path;
+        const std::string out = session(designer, openepl, form, "add:button;click:segevents;events;click:ev-click;tabs", &path);
+        check("events tab: a fresh component lists the event empty", has(out, "events: click=\n"));
+        check("events tab: choosing it creates the handler as double-click does",
+              has(out, "wired button1.click to button1_click") && has(slurp(path), "\nsub button1_click\n"));
+        check("events tab: and the Code tab names the new sub", has(out, "| Code [button1_click]"));
+    }
+
     // The window's own frame: no window-manager frame over it, and the green
     // dot maximises. What the manager did is read back from SDL, since a
     // scripted session cannot look at the screen.

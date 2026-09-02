@@ -72,6 +72,32 @@ inline std::vector<Location> read_locations(const json::Value& v) {
     return out;
 }
 
+/// A module-level name the server's index knows, and the line it is
+/// declared on. The range a documentSymbol answer carries is the name's own,
+/// not its block's, so where a subroutine ends is not known here.
+struct Symbol {
+    std::string name;
+    int line = 0;        ///< 0-based
+    bool is_sub = false;
+};
+
+/// A documentSymbol answer as a list. Null — a document the server never
+/// opened — is an empty list, not an error.
+inline std::vector<Symbol> read_symbols(const json::Value& v) {
+    std::vector<Symbol> out;
+    for (size_t i = 0; i < v.size(); i++) {
+        const json::Value& s = v.at(i);
+        Symbol sym;
+        sym.name = s["name"].str();
+        sym.line = s["location"]["range"]["start"]["line"].num(0);
+        // 12 is SymbolKind.Function, which is what the server files a
+        // subroutine under.
+        sym.is_sub = s["kind"].num(0) == 12;
+        if (!sym.name.empty()) out.push_back(sym);
+    }
+    return out;
+}
+
 /// The text of a hover answer, or "" when there is none to show.
 inline std::string hover_text(const json::Value& v) {
     const json::Value& c = v["contents"];
@@ -178,6 +204,10 @@ public:
     }
     int completion(int line, int character) {
         return request("textDocument/completion", at(line, character));
+    }
+    int document_symbols() {
+        return request("textDocument/documentSymbol",
+                       "{\"textDocument\":{\"uri\":\"" + json::escape(uri_) + "\"}}");
     }
     int references(int line, int character) {
         std::string p = at(line, character);

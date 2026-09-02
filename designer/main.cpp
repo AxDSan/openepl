@@ -243,6 +243,20 @@ struct Designer {
     std::string swallow_text;
     /// Where a hit in the references list jumps to, by list index.
     std::vector<openepl::lsp::Location> refs;
+
+    /// The module-level names the server's index knows, for the Code tab's
+    /// label. Asked for again after every change to the text, one request
+    /// in flight at a time; until the first answer lands the tab names the
+    /// file, which is never wrong.
+    std::vector<openepl::lsp::Symbol> symbols;
+    int symbol_request = 0;
+    bool symbols_stale = true;
+    /// What the two document tabs currently say, so a frame that changes
+    /// nothing rewrites nothing.
+    std::string tab_designer_label, tab_code_label;
+    /// The icon the form preview's title bar shows, so the image is only
+    /// reloaded when the property changes — the canvas is rebuilt per drag.
+    std::string form_icon_src;
 };
 Designer g;
 
@@ -429,6 +443,18 @@ void relayout() {
     place("fullcode", 0, 0, centre_w - 2 * CODE_PAD_X, canvas_h - 2 * CODE_PAD_Y);
     place("codehl", 0, 0, centre_w - 2 * CODE_PAD_X, canvas_h - 2 * CODE_PAD_Y);
     place("inspectdock", g.toolbox_w + centre_w, content_y, g.inspect_w, content_h);
+    // Panel head, tab strip and context label above the list; the wiring box
+    // below it, pinned to the dock's foot.
+    {
+        const int above = 29 + 29 + 32;
+        if (Rml::Element* e = by_id("grid")) {
+            e->SetProperty("height", Rml::String(std::to_string(std::max(40, content_h - above - WIRE_H)) + "px"));
+        }
+        if (Rml::Element* e = by_id("wirebox")) {
+            e->SetProperty("top", Rml::String(std::to_string(content_h - WIRE_H) + "px"));
+            e->SetProperty("width", Rml::String(std::to_string(g.inspect_w - 20) + "px"));
+        }
+    }
     place("bottom", g.toolbox_w, content_y + TABBAR_H + canvas_h, centre_w, g.bottom_h);
     place("splitleft", g.toolbox_w - 3, content_y, 6, content_h);
     place("splitright", g.toolbox_w + centre_w - 3, content_y, 6, content_h);
@@ -566,6 +592,8 @@ bool apply_code();
 void refresh_all();
 void rebuild_tray();
 bool is_selected(const std::string& id);
+void update_tabs();
+void open_handler(const std::string& id, const std::string& event = "");
 
 /// Record the model before a change, so it can be undone. Call BEFORE mutating.
 void push_undo() {
@@ -809,12 +837,22 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // ---- centre: tabs + canvas -----------------------------------------
     s << "#centre{left:" << TOOLBOX_W << "px;top:" << content_y << "px;width:" << centre_w
       << "px;height:" << content_h << "px;background-color:" << CANVAS << "}";
-    s << "#tabs{height:" << TABBAR_H << "px;background-color:" << CHROME_ALT
-      << ";border-bottom:1px " << BORDER << "}";
-    s << ".tab{display:inline-block;height:" << TABBAR_H
-      << "px;padding:9px 14px 0 14px;font-size:12px;color:" << TEXT_MUTED << "}";
-    s << ".tab.active{background-color:" << CANVAS << ";color:" << TEXT
-      << ";border-bottom:2px " << ACCENT << "}";
+    // Document tabs. The bar's bottom rule is what the pane sits under; the
+    // active tab is one pixel taller than the others so it covers that rule
+    // and, painted in the pane's own colour, reads as joined to it. The
+    // inactive ones stop on the rule and keep the chrome colour: recessed.
+    s << "#tabs{height:" << (TABBAR_H - 1) << "px;background-color:" << CHROME_ALT
+      << ";border-bottom:1px " << BORDER << ";padding-left:8px;white-space:nowrap}";
+    s << ".tab{display:inline-block;height:18px;margin:7px 2px 0 0;padding:5px 14px 0 14px;"
+         "font-size:12px;color:" << TEXT_MUTED << ";background-color:" << CHROME
+      << ";border-top:1px " << BORDER << ";border-left:1px " << BORDER << ";border-right:1px "
+      << BORDER << ";border-top-left-radius:6px;border-top-right-radius:6px}";
+    s << ".tab:hover{color:" << TEXT << "}";
+    s << ".tab.active{height:20px;margin-top:5px;padding-top:6px;color:" << TEXT
+      << ";background-color:" << CANVAS << "}";
+    s << ".tab.active.code{background-color:" << PANEL << "}";
+    s << ".tab .tabfile{color:" << TEXT_MUTED << ";margin-left:5px}";
+    s << ".tab.active .tabfile{color:" << ACCENT << "}";
     s << "#codeview{position:absolute;left:0;top:" << TABBAR_H << "px;width:100%;"
          "background-color:" << PANEL << ";overflow:auto}";
     // The editor fills the pane. A textarea has no default appearance in RmlUi,
@@ -920,13 +958,24 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << "#canvasarea{left:0;top:" << TABBAR_H << "px;width:" << centre_w << "px;height:" << canvas_h
       << "px;background-color:" << CANVAS << ";decorator:image(\"" << dot_tile << "\" repeat)}";
 
-    // The form preview: a floating native-looking window.
-    s << "#formwin{left:60px;top:40px;border-radius:8px;background-color:#ffffff;"
+    // The form preview, drawn as the window it will become. The title bar is
+    // the form's own colour with no rule under it, the way a current Windows
+    // window is; it is decoration only, and the client area under it is
+    // where the file's coordinates start.
+    s << "#formwin{left:60px;top:40px;border-radius:8px;border:1px #b9c0c8;background-color:#ffffff;"
          "box-shadow:#0000002e 0 10px 30px 0px, #00000014 0 2px 6px 0px}";
-    s << "#formtitle{height:28px;background-color:" << CHROME
-      << ";border-bottom:1px " << BORDER_SOFT << ";border-top-left-radius:8px;"
-         "border-top-right-radius:8px;padding:7px 10px 0 10px;font-size:12px;color:" << TEXT << "}";
-    s << "#formtitle .dot{position:absolute;top:10px;width:9px;height:9px;border-radius:5px}";
+    s << "#formtitle{position:relative;height:" << FORM_TITLE_H
+      << "px;border-top-left-radius:7px;border-top-right-radius:7px;font-size:12px;"
+         "white-space:nowrap;overflow:hidden}";
+    s << "#formicon{position:absolute;left:10px;top:8px;width:16px;height:16px}";
+    s << "#formtitletext{position:absolute;left:34px;top:9px}";
+    // The three glyphs are the width a Windows caption button is, so the
+    // preview's proportions are the built window's. Only the close button
+    // takes a colour on hover: the other two are decoration that darkens.
+    s << ".wbtn{position:absolute;top:0;width:46px;height:" << FORM_TITLE_H
+      << "px;text-align:center;padding-top:8px;font-size:11px}";
+    s << ".wbtn:hover{background-color:#00000018}";
+    s << ".wbtn.close:hover{background-color:#c42b1c;color:#ffffff}";
     // Components on the canvas get the SAME default styling as in the built
     // app, from the shared mapping — otherwise the preview lies.
     // SCOPED to the canvas: these rules include `div{position:absolute}`, which
@@ -942,7 +991,10 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // drawn on it is solid.
     s << "#overlay{position:absolute;left:0;top:0;width:100%;height:100%;z-index:5;"
          "pointer-events:none}";
-    s << ".handle,.fgrip,.badge{pointer-events:auto}";
+    // Only the selection's badge takes the pointer. A badge floats over
+    // whatever is above its component, and one that took every click would
+    // make the component under it impossible to select.
+    s << ".handle,.fgrip,.badge.live{pointer-events:auto}";
     s << ".selbox{border:1px " << ACCENT << "}";
     s << ".selbox.alt{border:1px #9db8ea}";
     s << ".guide{background-color:#ff4d9a}";
@@ -958,8 +1010,19 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".handle.e,.handle.w{cursor:resize-ew}";
     s << ".fgrip.e{cursor:resize-ew}.fgrip.s{cursor:resize-ns}";
     s << ".fgrip.corner{cursor:resize-nwse}";
-    s << ".badge{background-color:" << ACCENT << ";color:#fff;font-size:11px;padding:3px 7px 3px 7px;"
-         "border-radius:4px;white-space:nowrap}";
+    s << ".badge{background-color:" << ACCENT << ";color:#fff;font-size:11px;padding:3px 8px 3px 7px;"
+         "border-radius:4px;white-space:nowrap;cursor:pointer}";
+    s << ".badge:hover{background-color:#174ead}";
+    // The link glyph is drawn, not typed: no face the IDE loads has one, and
+    // a character the font lacks renders as nothing at all.
+    // Selected by id as well as class: the canvas's own rule makes every div
+    // in it absolute, and the glyph has to hold its place in the line.
+    s << "#overlay .chain{display:inline-block;position:relative;width:15px;height:10px;"
+         "margin-right:5px;vertical-align:-1px}";
+    s << "#overlay .chain div{position:absolute;width:6px;height:4px;border:1px #ffffff;"
+         "border-radius:3px}";
+    s << "#overlay .chain .a{left:0;top:0}#overlay .chain .b{left:6px;top:3px}";
+    s << ".badge .ev{color:#d6e4ff;margin-right:4px}.badge .arrow{margin:0 5px 0 1px}";
 
     // ---- non-visual component tray --------------------------------------
     s << "#tray{position:absolute;left:0;top:" << (canvas_h - TRAY_H) << "px;width:" << centre_w
@@ -982,18 +1045,25 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << "#inspectdock{left:" << (TOOLBOX_W + centre_w) << "px;top:" << content_y << "px;width:"
       << INSPECT_W << "px;height:" << content_h << "px;background-color:" << PANEL
       << ";border-left:1px " << BORDER << "}";
-    s << ".segbar{margin:8px;height:26px;white-space:nowrap}";
-    s << ".seg{display:inline-block;width:" << ((INSPECT_W - 18) / 2)
-      << "px;height:26px;padding-top:5px;text-align:center;font-size:12px;color:" << TEXT_MUTED
-      << ";background-color:" << CHROME << ";border:1px " << BORDER << "}";
-    s << ".seg.active{background-color:" << ACCENT << ";color:" << ACCENT_TEXT << ";border:1px "
-      << ACCENT << "}";
-    s << "#ctxlabel{margin:2px 10px 6px 10px;font-size:13px;font-weight:bold;"
+    // Properties / Events as tabs, in the same idiom as the document tabs:
+    // the chosen one is underlined in the accent and the other is not.
+    s << ".segbar{height:28px;padding:0 10px;white-space:nowrap;border-bottom:1px " << BORDER_SOFT
+      << "}";
+    s << ".seg{display:inline-block;height:20px;margin-right:14px;padding:8px 2px 0 2px;"
+         "font-size:12px;color:" << TEXT_MUTED << "}";
+    s << ".seg:hover{color:" << TEXT << "}";
+    s << ".seg.active{color:" << ACCENT << ";font-weight:bold;border-bottom:2px " << ACCENT << "}";
+    s << ".prow label .evgo{color:" << ACCENT << ";margin-left:8px;font-size:11px}";
+    s << ".prow label .evgo:hover{text-decoration:underline}";
+    s << ".prow label .evname{color:" << TEXT << ";font-weight:bold}";
+    s << "#ctxlabel{margin:8px 10px 6px 10px;height:18px;font-size:13px;font-weight:bold;"
          "color:" << TEXT << "}";
-    s << "#grid{margin:0 10px 0 10px}";
+    // The list scrolls above the wiring box, which does not move: a button
+    // declares more properties than the dock is tall.
+    s << "#grid{padding:0 10px 0 10px;overflow-y:auto}";
     s << ".prow{margin-bottom:8px}";
     s << ".prow label{display:block;font-size:11px;color:" << TEXT_MUTED << ";margin-bottom:2px}";
-    s << ".prow input{display:block;width:" << (INSPECT_W - 24)
+    s << ".prow input{display:block;width:" << (INSPECT_W - 40)
       << "px;height:24px;border:1px " << BORDER << ";border-radius:4px;background-color:" << PANEL
       << ";color:" << TEXT << ";padding-left:6px;font-size:12px}";
     s << ".prow input:focus{border:1px " << ACCENT << "}";
@@ -1003,13 +1073,13 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".swatch{display:inline-block;width:24px;height:24px;border:1px " << BORDER
       << ";border-radius:4px;vertical-align:top;margin-right:6px}";
     s << ".swatch:hover{border:1px " << ACCENT << "}";
-    s << ".prow input.withswatch{display:inline-block;width:" << (INSPECT_W - 24 - 40) << "px}";
-    s << ".prow input.withbtn{display:inline-block;width:" << (INSPECT_W - 24 - 84) << "px}";
+    s << ".prow input.withswatch{display:inline-block;width:" << (INSPECT_W - 40 - 40) << "px}";
+    s << ".prow input.withbtn{display:inline-block;width:" << (INSPECT_W - 40 - 84) << "px}";
     s << ".browse{display:inline-block;width:66px;height:24px;margin-left:6px;padding-top:4px;"
          "text-align:center;font-size:11px;border:1px " << BORDER << ";border-radius:4px;"
          "background-color:" << CHROME << ";color:" << TEXT << ";vertical-align:top}";
     s << ".browse:hover{border:1px " << ACCENT << ";color:" << ACCENT << "}";
-    s << ".prow textarea{display:block;width:" << (INSPECT_W - 24)
+    s << ".prow textarea{display:block;width:" << (INSPECT_W - 40)
       << "px;height:72px;border:1px " << BORDER << ";border-radius:4px;background-color:" << PANEL
       << ";color:" << TEXT << ";padding:4px 0 0 6px;font-size:12px}";
     s << ".prow textarea:focus{border:1px " << ACCENT << "}";
@@ -1025,10 +1095,14 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << ";border-radius:3px;white-space:nowrap;overflow:hidden}";
     s << ".fileitem:hover{background-color:#eef2f8;color:" << ACCENT << "}";
     s << "#editpop .hint{padding:4px}";
-    s << ".wire{margin:10px;padding:8px;background-color:" << CHROME_ALT
-      << ";border:1px " << BORDER_SOFT << ";border-radius:5px}";
-    s << ".wire .h{font-size:11px;font-weight:bold;color:" << TEXT_MUTED << ";margin-bottom:4px}";
-    s << ".wire .link{color:" << ACCENT << "}";
+    s << "#wirebox{position:absolute;left:0;width:" << (INSPECT_W - 20) << "px;height:" << WIRE_H
+      << "px;padding:8px 10px 0 10px;background-color:" << CHROME_ALT << ";border-top:1px "
+      << BORDER_SOFT << ";overflow:hidden}";
+    s << "#wirebox .h{font-size:11px;font-weight:bold;color:" << TEXT_MUTED << ";margin-bottom:6px}";
+    s << "#wirebox .row{font-size:12px;color:" << TEXT << ";white-space:nowrap;margin-bottom:3px}";
+    s << "#wirebox .link{color:" << ACCENT << ";cursor:pointer}";
+    s << "#wirebox .link:hover{text-decoration:underline}";
+    s << "#wirebox .unlinked{color:" << TEXT_MUTED << ";font-size:12px}";
     s << ".hint{color:" << TEXT_MUTED << ";font-size:12px;padding:10px}";
 
     // ---- bottom split ---------------------------------------------------
@@ -1123,9 +1197,10 @@ std::string build_chrome(const std::string& family, const std::string& mono,
 
     s << "<div id='centre'>"
          "<div id='tabs'>"
-         "<div class='tab active' id='tabdesigner' oe-view='designer'>Designer — "
-      << esc(g.model.form_name) << "</div>"
-         "<div class='tab' id='tabcode' oe-view='code'>Code</div>"
+         // Labels are written by update_tabs(): the Code tab's changes with
+         // the caret, and one writer is fewer than two.
+         "<div class='tab active' id='tabdesigner' oe-view='designer'/>"
+         "<div class='tab' id='tabcode' oe-view='code'/>"
          "</div>"
          // The editor is two layers. Underneath, `#codehl` paints the
          // syntax-highlighted text; on top, a real RmlUi <textarea> supplies
@@ -1140,10 +1215,13 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div id='codehl'/><textarea id='fullcode' wrap='nowrap'/></div>"
          "<div id='canvasarea'>"
          "<div id='formwin'>"
-         "<div id='formtitle'><span id='formtitletext'>Form</span>"
-         "<div class='dot' style='right:12px;background-color:#ff5f57'/>"
-         "<div class='dot' style='right:26px;background-color:#febc2e'/>"
-         "<div class='dot' style='right:40px;background-color:#28c840'/></div>"
+         // Glyphs the loaded faces have: a box-drawing dash, a ballot box
+         // and a multiplication cross. The Windows caption glyphs proper are
+         // in a private font nothing here can load.
+         "<div id='formtitle'><img id='formicon'/><span id='formtitletext'>Form</span>"
+         "<div class='wbtn' style='right:92px'>\xe2\x94\x80</div>"
+         "<div class='wbtn' style='right:46px'>\xe2\x98\x90</div>"
+         "<div class='wbtn close' style='right:0'>\xe2\x9c\x95</div></div>"
          "<div id='canvas'><div id='overlay'/></div></div>"
          // The tray. A timer, an action or a server has properties to edit and
          // no rectangle to click, so it needs a place that is not the canvas —
@@ -1152,9 +1230,9 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div id='traylist'/></div>"
          "</div></div>";
 
-    s << "<div id='inspectdock'><div class='panelhead'>PROPERTIES / EVENTS</div>"
-         "<div class='segbar'><div class='seg active' oe-tab='props'>Properties</div>"
-         "<div class='seg' oe-tab='events'>Events</div></div>"
+    s << "<div id='inspectdock'><div class='panelhead'>INSPECTOR</div>"
+         "<div class='segbar'><div class='seg active' id='segprops' oe-tab='props'>Properties</div>"
+         "<div class='seg' id='segevents' oe-tab='events'>Events</div></div>"
          "<div id='ctxlabel'>—</div><div id='grid'/><div id='wirebox'/></div>";
 
     const int half = centre_w / 2;
@@ -1247,6 +1325,48 @@ bool measure_component(Rml::Element* canvas, const std::string& id, int& x, int&
     return true;
 }
 
+bool is_hex_colour(const std::string& v);
+
+/// Is this a colour light text belongs on? Perceived luminance of a hex
+/// colour, since the title bar takes the form's own background: black text
+/// on form.oir's navy would be a title nobody could read.
+bool dark_colour(const std::string& hex) {
+    if (!is_hex_colour(hex)) return false;
+    auto nib = [](char c) { return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10; };
+    int r, gr, b;
+    if (hex.size() == 4) {
+        r = nib(hex[1]) * 17; gr = nib(hex[2]) * 17; b = nib(hex[3]) * 17;
+    } else {
+        r = nib(hex[1]) * 16 + nib(hex[2]);
+        gr = nib(hex[3]) * 16 + nib(hex[4]);
+        b = nib(hex[5]) * 16 + nib(hex[6]);
+    }
+    return (r * 299 + gr * 587 + b * 114) / 1000 < 128;
+}
+
+std::string asset_path(const char* name);
+
+/// The image the preview's title bar shows: the form's `icon`, a path beside
+/// the .oir, or the app's own icon when the property is unset or names
+/// nothing readable. Handed to RmlUi the way asset_path does, with the
+/// leading slash doubled so its URL parser leaves the path absolute.
+std::string form_icon_src() {
+    if (const std::string* icon = g.model.form.property("icon")) {
+        if (!icon->empty()) {
+            std::string path = *icon;
+            if (path[0] != '/') {
+                const size_t slash = g.model.path.find_last_of('/');
+                path = (slash == std::string::npos ? std::string() : g.model.path.substr(0, slash + 1)) + path;
+            }
+            char real[4096];
+            if (::access(path.c_str(), R_OK) == 0 && ::realpath(path.c_str(), real)) {
+                return "/" + std::string(real);
+            }
+        }
+    }
+    return asset_path("openepl-icon-64.png");
+}
+
 void rebuild_canvas() {
     Rml::Element* formwin = by_id("formwin");
     Rml::Element* canvas = by_id("canvas");
@@ -1258,12 +1378,25 @@ void rebuild_canvas() {
     formwin->SetProperty("width", Rml::String(std::to_string(fw) + "px"));
     canvas->SetProperty("width", Rml::String(std::to_string(fw) + "px"));
     canvas->SetProperty("height", Rml::String(std::to_string(fh) + "px"));
-    if (const std::string* bg = g.model.form.property("background_color")) {
-        canvas->SetProperty("background-color", *bg);
+    // The title bar is the form's colour too — reading only, so a form that
+    // sets no colour is drawn white and stays a form that sets no colour.
+    const std::string* bg = g.model.form.property("background_color");
+    const std::string form_bg = bg && is_hex_colour(*bg) ? *bg : "#ffffff";
+    canvas->SetProperty("background-color", form_bg);
+    if (Rml::Element* t = by_id("formtitle")) {
+        t->SetProperty("background-color", form_bg);
+        t->SetProperty("color", dark_colour(form_bg) ? "#ffffff" : theme::TEXT);
     }
     if (Rml::Element* t = by_id("formtitletext")) {
         const std::string* title = g.model.form.property("title");
         t->SetInnerRML(esc(title ? *title : g.model.form_name));
+    }
+    if (Rml::Element* i = by_id("formicon")) {
+        const std::string src = form_icon_src();
+        if (src != g.form_icon_src) {
+            g.form_icon_src = src;
+            i->SetAttribute("src", Rml::String(src));
+        }
     }
 
     // Clear components but keep the overlay element itself.
@@ -1455,13 +1588,31 @@ void rebuild_canvas() {
                 d->SetAttribute("oe-grip", Rml::String(EDGE[i][j]));
             }
         }
-        // Event connector badge, as specified.
-        const Component* sel = g.model.find(g.selected);
-        if (sel && !sel->handlers.empty()) {
-            const auto& hnd = sel->handlers.front();
-            Rml::Element* b = place("badge", ox + x, oy + y - 24, 0, 0);
-            b->SetInnerRML("▸ on" + esc(hnd.first) + " → " + esc(hnd.second));
+    }
+
+    // The wiring, on the canvas: every component with a handler carries a
+    // badge naming the event and the subroutine, and the badge is a way into
+    // that subroutine. Above the component, or below it when the component
+    // sits too close to the top — the client area clips what it holds, and
+    // a badge clipped to nothing is wiring the user cannot see.
+    for (const auto& comp : g.model.children) {
+        const std::pair<std::string, std::string>* hnd = nullptr;
+        for (const auto& h : comp.handlers) {
+            if (!h.second.empty()) { hnd = &h; break; }
         }
+        if (!hnd) continue;
+        int x = 0, y = 0, w = 0, h = 0;
+        if (!measure_component(canvas, comp.id, x, y, w, h)) continue;
+        Rml::Element* b = overlay->AppendChild(g.doc->CreateElement("div"));
+        b->SetProperty("position", "absolute");
+        b->SetAttribute("class", Rml::String(comp.id == g.selected ? "badge live" : "badge"));
+        b->SetAttribute("oe-jump", comp.id);
+        b->SetAttribute("oe-event", hnd->first);
+        b->SetProperty("left", Rml::String(std::to_string(x) + "px"));
+        b->SetProperty("top", Rml::String(std::to_string(y >= 24 ? y - 24 : y + h + 4) + "px"));
+        b->SetInnerRML("<div class='chain'><div class='a'/><div class='b'/></div><span class='ev'>" +
+                       esc(hnd->first) + "</span><span class='arrow'>\xe2\x86\x92</span>" +
+                       esc(hnd->second));
     }
 }
 
@@ -1602,7 +1753,8 @@ void rebuild_inspector() {
     if (!comp) {
         ctx->SetInnerRML("—");
         grid->SetInnerRML("<div class='hint'>Select a component on the canvas.</div>");
-        wire->SetInnerRML("");
+        wire->SetInnerRML("<div class='h'>HANDLER WIRING</div>"
+                          "<div class='unlinked'>Nothing selected.</div>");
         return;
     }
     ctx->SetInnerRML(esc(comp->id) + " <span style='color:#656d76;font-weight:normal'>(" +
@@ -1659,7 +1811,14 @@ void rebuild_inspector() {
         if (events.empty()) html += "<div class='hint'>This component has no events.</div>";
         for (const auto& ev : events) {
             const std::string* h = comp->handler(ev.name);
-            html += "<div class='prow'><label>On" + esc(ev.name) + "</label>"
+            const bool wired = h && !h->empty();
+            // The field takes a name typed in; the link beside it is the
+            // double-click, for this event: it goes to the handler, or
+            // writes one first.
+            html += "<div class='prow'><label><span class='evname'>on " + esc(ev.name) +
+                    "</span><span class='evgo' id='ev-" + esc(ev.name) + "' oe-jump='" +
+                    esc(comp->id) + "' oe-event='" + esc(ev.name) + "'>" +
+                    (wired ? "open \xe2\x86\x97" : "+ create handler") + "</span></label>"
                     "<input type='text' class='ev' name='" + esc(ev.name) + "' value='" +
                     esc(h ? *h : "") + "'/></div>";
         }
@@ -1685,13 +1844,21 @@ void rebuild_inspector() {
 
     std::string wired;
     for (const auto& h : comp->handlers) {
-        if (!h.second.empty()) {
-            wired += "<div class='link'>▸ " + esc(h.second) + "()</div>";
-        }
+        if (h.second.empty()) continue;
+        // The first link keeps a fixed id, so a script can click it; the
+        // event carried on it is what makes the jump land in the right sub
+        // when a component has several.
+        wired += "<div class='row'>Linked to: <span class='link'" +
+                 std::string(wired.empty() ? " id='wirelink'" : "") + " oe-jump='" +
+                 esc(comp->id) + "' oe-event='" + esc(h.first) + "'>" + esc(h.second) +
+                 "()</span><span style='color:" + theme::TEXT_MUTED + ";margin-left:6px'>on " + esc(h.first) +
+                 "</span></div>";
     }
     wire->SetInnerRML("<div class='h'>HANDLER WIRING</div>" +
-                      (wired.empty() ? std::string("<div class='hint'>Not wired.</div>")
-                                     : "<div>Linked to:</div>" + wired));
+                      (wired.empty()
+                           ? std::string("<div class='unlinked' id='wirelink'>Not linked \xe2\x80\x94 "
+                                         "double-click to create</div>")
+                           : wired));
 }
 
 /* --- code pane ------------------------------------------------------------ */
@@ -1757,8 +1924,10 @@ void rebuild_code() {
         // and a hover answered against the text before the save names the
         // wrong line.
         g.lsp.did_change(g.model_text);
+        g.symbols_stale = true;
     }
     refresh_highlight();
+    update_tabs();
 }
 
 /// The code editor, or null before the chrome exists.
@@ -2046,12 +2215,13 @@ void set_view(const std::string& view) {
             const bool is_code = std::string(id).find("code") != std::string::npos;
             const bool active = (is_code == code);
             const std::string base = std::string(id).rfind("tab", 0) == 0 ? "tab" : "tb";
-            e->SetAttribute("class", Rml::String(active ? base + (base == "tab" ? " active"
+            e->SetAttribute("class", Rml::String(active ? base + (base == "tab" ? (is_code ? " active code" : " active")
                                                                                : " primary")
                                                         : base + (base == "tab" ? "" : " ghost")));
         }
     }
     rebuild_code();
+    update_tabs();
     set_status(code ? "code view" : "designer view");
 }
 
@@ -2604,6 +2774,74 @@ int line_of_sub(const std::string& text, const std::string& name) {
     return -1;
 }
 
+/// The subroutine the caret is inside, or "" when it is in none.
+///
+/// The names and their lines come from the server's index, which is the one
+/// place that knows what a `sub` is; the index does not say where a block
+/// ends, so the closing `end` is found in the text, the way the preview pane
+/// finds it. Before the first answer arrives — or with no server at all —
+/// the text is scanned for the names too, so the label never waits.
+std::string enclosing_sub() {
+    if (g.view != "code") return "";
+    int line = 0, col = 0;
+    if (!caret_position(line, col)) return "";
+    auto* ed = code_editor();
+    if (!ed) return "";
+    const std::string text = ed->GetValue();
+    std::string name;
+    int start = -1;
+    if (!g.symbols.empty()) {
+        for (const auto& sym : g.symbols) {
+            if (sym.is_sub && sym.line <= line && sym.line > start) {
+                start = sym.line;
+                name = sym.name;
+            }
+        }
+    } else {
+        int n = 0;
+        for (size_t at = 0; at <= text.size() && n <= line; n++) {
+            const size_t nl = text.find('\n', at);
+            const std::string l = text.substr(at, nl == std::string::npos ? std::string::npos : nl - at);
+            if (l.rfind("sub ", 0) == 0) {
+                start = n;
+                name = l.substr(4, l.find_first_of(" (:\t", 4) - 4);
+            }
+            if (nl == std::string::npos) break;
+            at = nl + 1;
+        }
+    }
+    if (start < 0) return "";
+    // Inside, only up to the block's own `end`: the caret in the blank line
+    // between two subroutines is in neither of them.
+    int n = 0;
+    for (size_t at = 0; at <= text.size(); n++) {
+        const size_t nl = text.find('\n', at);
+        const std::string l = text.substr(at, nl == std::string::npos ? std::string::npos : nl - at);
+        if (n > start && l == "end") return line <= n ? name : "";
+        if (nl == std::string::npos) break;
+        at = nl + 1;
+    }
+    return name;
+}
+
+/// Label the document tabs with what they hold: the file, and — for the Code
+/// tab while the caret is in a subroutine — that subroutine. Written only
+/// when the words change; this runs every frame.
+void update_tabs() {
+    const std::string file = basename_of(g.model.path);
+    const std::string sub = enclosing_sub();
+    const std::string designer = "Designer <span class='tabfile'>[" + esc(file) + "]</span>";
+    const std::string code = "Code <span class='tabfile'>[" + esc(sub.empty() ? file : sub) + "]</span>";
+    if (designer != g.tab_designer_label) {
+        g.tab_designer_label = designer;
+        if (Rml::Element* e = by_id("tabdesigner")) e->SetInnerRML(designer);
+    }
+    if (code != g.tab_code_label) {
+        g.tab_code_label = code;
+        if (Rml::Element* e = by_id("tabcode")) e->SetInnerRML(code);
+    }
+}
+
 /* --- hover, definition, references ----------------------------------------- */
 
 void hide_tip() {
@@ -2841,8 +3079,11 @@ void filter_completion();
 void poll_answers() {
     openepl::json::Value v;
     if (!g.lsp.running()) {
-        // A server that has gone leaves no answers to wait for.
-        g.hover_request = g.def_request = g.refs_request = 0;
+        // A server that has gone leaves no answers to wait for — and no
+        // symbols to ask for: a flag left waiting for it keeps the frame
+        // loop awake, since idle() counts it as an answer on its way.
+        g.hover_request = g.def_request = g.refs_request = g.symbol_request = 0;
+        g.symbols_stale = false;
         return;
     }
     if (g.hover_request && g.lsp.take_response(g.hover_request, v)) {
@@ -2870,6 +3111,15 @@ void poll_answers() {
         g.refs = openepl::lsp::read_locations(v);
         render_references();
         set_status(std::to_string(g.refs.size()) + " reference(s)");
+    }
+    if (g.symbol_request && g.lsp.take_response(g.symbol_request, v)) {
+        g.symbol_request = 0;
+        g.symbols = openepl::lsp::read_symbols(v);
+        update_tabs();
+    }
+    if (g.symbols_stale && !g.symbol_request) {
+        g.symbols_stale = false;
+        g.symbol_request = g.lsp.document_symbols();
     }
     if (g.complete_request && g.lsp.take_response(g.complete_request, v)) {
         g.complete_request = 0;
@@ -3193,7 +3443,10 @@ std::string handler_stub(const CatalogComponent& cc, const CatalogEvent& ev,
 /// that matters first: click for a button, change for an editbox, tick for a
 /// timer, select for a grid. No table by name here, so a kit's component gets
 /// the gesture with no change to the IDE.
-void open_handler(const std::string& id) {
+///
+/// With `event` named — from the Events tab, the wiring box or a badge — that
+/// event is the one handled, through exactly this path.
+void open_handler(const std::string& id, const std::string& event) {
     Component* c = g.model.find(id);
     if (!c) return;
     const CatalogComponent* cc = g.catalog.find(c->type_name);
@@ -3201,7 +3454,17 @@ void open_handler(const std::string& id) {
         set_status(c->type_name + " has no events to handle");
         return;
     }
-    const CatalogEvent ev = cc->events.front();
+    CatalogEvent ev = cc->events.front();
+    if (!event.empty()) {
+        bool known = false;
+        for (const auto& e : cc->events) {
+            if (e.name == event) { ev = e; known = true; }
+        }
+        if (!known) {
+            set_status(c->type_name + " has no event " + event);
+            return;
+        }
+    }
     std::string name;
     if (const std::string* h = c->handler(ev.name)) name = *h;
     if (name.empty() || !g.model.has_sub(name)) {
@@ -3312,6 +3575,7 @@ struct Listener : Rml::EventListener {
                 // Diagnostics as you type: the server re-checks on every
                 // change, exactly as it does for any other editor.
                 if (auto* ed2 = code_editor()) g.lsp.did_change(ed2->GetValue());
+                g.symbols_stale = true;
                 completion_on_change();
                 return;
             }
@@ -3534,6 +3798,11 @@ struct Listener : Rml::EventListener {
                     } else {
                         set_status(a + " is not implemented yet");
                     }
+                    return;
+                }
+                if (e->HasAttribute("oe-jump")) {
+                    open_handler(e->GetAttribute<Rml::String>("oe-jump", ""),
+                                 e->GetAttribute<Rml::String>("oe-event", ""));
                     return;
                 }
                 if (e->HasAttribute("oe-ref")) {
@@ -4124,6 +4393,7 @@ void run_script(const char* script) {
                 }
                 hover_tick();
                 poll_answers();
+                update_tabs();
                 g.context->Update();
                 size_output_pane();
                 follow_log();
@@ -4376,6 +4646,93 @@ void run_script(const char* script) {
                     }
                     std::fflush(stdout);
                 }
+            }
+            else if (verb == "tabs") {
+                // The labels as written to the tabs, after the server has
+                // had a moment to answer for the symbols they depend on.
+                if (g.symbol_request) g.lsp.pump_until(g.symbol_request, 3000);
+                poll_answers();
+                update_tabs();
+                auto plain = [](std::string h) {
+                    for (size_t a; (a = h.find('<')) != std::string::npos;) {
+                        const size_t b = h.find('>', a);
+                        h.erase(a, b == std::string::npos ? std::string::npos : b - a + 1);
+                    }
+                    return h;
+                };
+                std::printf("tabs: %s | %s\n", plain(g.tab_designer_label).c_str(),
+                            plain(g.tab_code_label).c_str());
+                std::fflush(stdout);
+            }
+            else if (verb == "geometry") {
+                // geometry:<id> — the title bar's height, where the client
+                // area starts under it, and where the component was drawn
+                // relative to that client area. The last is what must equal
+                // the file's `top`, whatever is drawn above.
+                g.context->Update();
+                Rml::Element* win = by_id("formwin");
+                Rml::Element* title = by_id("formtitle");
+                Rml::Element* canvas = by_id("canvas");
+                if (win && title && canvas) {
+                    const auto wo = win->GetAbsoluteOffset(Rml::BoxArea::Border);
+                    const auto co = canvas->GetAbsoluteOffset(Rml::BoxArea::Border);
+                    int x = 0, y = 0, w = 0, h = 0;
+                    const bool found = measure_component(canvas, arg, x, y, w, h);
+                    std::printf("geometry: title=%d client_top=%d %s=%s%d,%d form=%dx%d icon=%s\n",
+                                (int)title->GetBox().GetSize(Rml::BoxArea::Border).y,
+                                (int)(co.y - wo.y), arg.c_str(), found ? "" : "missing ", x, y,
+                                (int)canvas->GetBox().GetSize().x,
+                                (int)canvas->GetBox().GetSize().y,
+                                basename_of(g.form_icon_src).c_str());
+                    std::fflush(stdout);
+                }
+            }
+            else if (verb == "wiring" || verb == "badges") {
+                // What the wiring box, or the canvas badges, say — with the
+                // markup stripped, so the line reads as the user reads it.
+                g.context->Update();
+                auto plain = [](std::string h) {
+                    for (size_t a; (a = h.find('<')) != std::string::npos;) {
+                        const size_t b = h.find('>', a);
+                        h.erase(a, b == std::string::npos ? std::string::npos : b - a + 1);
+                    }
+                    return h;
+                };
+                if (verb == "wiring") {
+                    if (Rml::Element* w = by_id("wirebox")) {
+                        std::printf("wiring: %s\n", plain(w->GetInnerRML()).c_str());
+                    }
+                } else if (Rml::Element* overlay = by_id("overlay")) {
+                    for (int i = 0; i < overlay->GetNumChildren(); i++) {
+                        Rml::Element* b = overlay->GetChild(i);
+                        if (!b->HasAttribute("oe-jump")) continue;
+                        std::printf("badge: %s %s at %s,%s\n",
+                                    b->GetAttribute<Rml::String>("oe-jump", "").c_str(),
+                                    plain(b->GetInnerRML()).c_str(),
+                                    b->GetProperty<Rml::String>("left").c_str(),
+                                    b->GetProperty<Rml::String>("top").c_str());
+                    }
+                }
+                std::fflush(stdout);
+            }
+            else if (verb == "events") {
+                // The Events tab's rows: each event and the handler its field
+                // holds, as the inspector shows them.
+                g.context->Update();
+                std::string out;
+                if (Rml::Element* grid = by_id("grid")) {
+                    for (int i = 0; i < grid->GetNumChildren(); i++) {
+                        Rml::Element* row = grid->GetChild(i);
+                        for (int j = 0; j < row->GetNumChildren(); j++) {
+                            Rml::Element* f = row->GetChild(j);
+                            if (f->GetAttribute<Rml::String>("class", "") != "ev") continue;
+                            out += " " + f->GetAttribute<Rml::String>("name", "") + "=" +
+                                   f->GetAttribute<Rml::String>("value", "");
+                        }
+                    }
+                }
+                std::printf("events:%s\n", out.c_str());
+                std::fflush(stdout);
             }
             else if (verb == "caret") {
                 g.context->Update();
@@ -5228,7 +5585,7 @@ int main(int argc, char** argv) {
     // keystroke instead.
     auto idle = [] {
         const bool awaiting = g.hover_request || g.def_request || g.refs_request ||
-                              g.complete_request ||
+                              g.complete_request || g.symbol_request || g.symbols_stale ||
                               (g.view == "code" && g.hover_x >= 0 && !g.hover_asked);
         return g.running_app <= 0 && g.build_pid <= 0 && !awaiting;
     };
@@ -5244,6 +5601,7 @@ int main(int argc, char** argv) {
         }
         hover_tick();
         poll_answers();
+        update_tabs();
         // Follow the OS window. The backend resizes the context; the layout has
         // to follow or everything past the old size is left unpainted.
         const auto dim = g.context->GetDimensions();
