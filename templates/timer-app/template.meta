@@ -1,4 +1,0 @@
-name: Timer Application
-desc: A console program that outlives `main`: a timer ticks, a handler counts down, and it quits itself.
-target: console
-entry: main.oir

@@ -63,7 +63,7 @@ fn new_writes_a_project_file_and_reports_it() {
 fn kits_follow_the_entry_file() {
     let dir = std::env::temp_dir().join("openepl_proj_kits");
     let _ = std::fs::remove_dir_all(&dir);
-    let out = openepl(&repo(), &["new", "web-server", dir.to_str().unwrap()]);
+    let out = openepl(&repo(), &["new", "gui-app", dir.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr(&out));
     let text = std::fs::read_to_string(dir.join("project.oeproj")).unwrap();
     let src = std::fs::read_to_string(dir.join("main.oir")).unwrap();

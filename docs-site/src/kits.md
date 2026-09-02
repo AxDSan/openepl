@@ -47,7 +47,7 @@ kit: units 1.0.0 project
 path: units /home/you/report/kits/units
 name: units Units
 section: units Measurement
-template: units units-app
+template: units units-starter
 ```
 
 The tier and the path are there because shadowing is the thing that goes wrong.
@@ -78,7 +78,7 @@ and add a `lib.json` with the design-time keys:
   "version": "1.0.0",
   "order": 50,
   "icons": ["Gauge=assets/gauge.svg"],
-  "templates": ["units-app"]
+  "templates": ["units-starter"]
 }
 ```
 
@@ -101,5 +101,5 @@ A template named here appears in `openepl templates` and can be created with
 
 ```sh
 openepl templates
-openepl new units-app converter
+openepl new units-starter converter
 ```

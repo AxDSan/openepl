@@ -1338,6 +1338,30 @@ static int32_t ui_pump(void *) {
         oe_loop_quit(0);
         return 1;
     }
+    /* Headless hook: a window manager's resize cannot be scripted, a size can.
+     * Same shape as the designer's OPENEPL_DESIGNER_WELCOME_SIZE. */
+    static bool sized_once = false;
+    if (!sized_once) {
+        sized_once = true;
+        int nw = 0, nh = 0;
+        const char* sz = std::getenv("OPENEPL_UI_SIZE");
+        if (sz && std::sscanf(sz, "%dx%d", &nw, &nh) == 2 && nw > 0 && nh > 0) {
+            if (SDL_Window* win = SDL_GL_GetCurrentWindow()) SDL_SetWindowSize(win, nw, nh);
+            for (int i = 0; i < 30; i++) Backend::ProcessEvents(g.context, nullptr, false);
+            g.context->SetDimensions(Rml::Vector2i(nw, nh));
+        }
+    }
+
+    /* The form IS the window. The seed document fixes the body to the size the
+     * form declared, and a window manager that maximises us does so after that
+     * layout — so everything past the declared size stayed black. Follow the
+     * window: the backend has already applied its size to the context. */
+    static Rml::Vector2i last_dims;
+    if (const auto now = g.context->GetDimensions(); now != last_dims) {
+        last_dims = now;
+        g.document->SetProperty("width", Rml::String(std::to_string(now.x) + "px"));
+        g.document->SetProperty("height", Rml::String(std::to_string(now.y) + "px"));
+    }
     sync_grids();
     g.context->Update();
     if (scroll_grids()) g.context->Update();

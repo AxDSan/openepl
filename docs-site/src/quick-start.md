@@ -58,11 +58,10 @@ machine of the same platform and it runs.
 ## A program that waits
 
 `console-app` prints and stops. Some programs should not: they wait for
-something and act when it arrives. `timer-app` is that shape.
+something and act when it arrives. `examples/loopdemo.oir` is that shape.
 
 ```sh
-openepl new timer-app countdown
-openepl run countdown/main.oir
+openepl run examples/loopdemo.oir
 ```
 
 ```text

@@ -1,4 +1,0 @@
-name: Web Server
-desc: An HTTP service. A server component, one wired handler, and routes to fill in.
-target: console
-entry: main.oir

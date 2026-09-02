@@ -3,8 +3,5 @@
   "section": "Measurement",
   "version": "1.0.0",
   "order": 50,
-  "templates": [
-    "units-app"
-  ],
   "comment": "A kit shipped outside libs/, proving that resolution, the toolbox metadata and kit templates all work for a directory the compiler was not built knowing about."
 }

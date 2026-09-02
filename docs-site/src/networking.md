@@ -29,7 +29,7 @@ end
 
 `main` prints one line and returns, and the program keeps running. A server is
 a live event source, exactly like a timer, and the runtime's loop stays in it
-until something calls `quit`. `openepl new web-server mysite` starts you here.
+until something calls `quit`. `examples/webserver.oir` starts you here.
 
 ## The request is a parameter, not a place
 

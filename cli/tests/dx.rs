@@ -150,14 +150,13 @@ fn a_new_project_carries_no_placeholders() {
 /// then stops by itself. Both halves matter: one that never quits is a hang
 /// the user has to learn to Ctrl-C out of.
 #[test]
-fn the_timer_template_outlives_main_and_quits_itself() {
+fn a_timer_program_outlives_main_and_quits_itself() {
     let home = scratch("timer_home");
     let root = scratch("timer_root");
-    let dest = root.join("countdown");
-    ok(&root, &home, &["new", "timer-app", dest.to_str().unwrap()]);
+    let example = repo().join("examples/loopdemo.oir");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_openepl"))
-        .args(["run", dest.join("main.oir").to_str().unwrap()])
+        .args(["run", example.to_str().unwrap()])
         .current_dir(&root)
         .env("HOME", &home)
         .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
@@ -172,7 +171,7 @@ fn the_timer_template_outlives_main_and_quits_itself() {
     loop {
         match child.try_wait().expect("poll") {
             Some(status) => {
-                assert!(status.success(), "the timer project exited with {status}");
+                assert!(status.success(), "the timer example exited with {status}");
                 break;
             }
             None if Instant::now() >= deadline => {
@@ -191,8 +190,8 @@ fn the_timer_template_outlives_main_and_quits_itself() {
         .expect("stdout")
         .read_to_string(&mut text)
         .expect("read output");
-    assert!(text.contains("3..."), "the tick handler never ran: {text}");
-    assert!(text.contains("Liftoff."), "the countdown never finished: {text}");
+    assert!(text.contains("main returned"), "main never ran: {text}");
+    assert!(text.contains("tick 3"), "the tick handler never ran to the end: {text}");
 }
 
 /// `openepl new` on a name that does not exist must say what does. A bare

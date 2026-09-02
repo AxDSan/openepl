@@ -264,15 +264,37 @@ fn kit_add_from_a_tarball_then_build_a_program_with_it() {
 
 /// A kit ships templates, and `openepl new` can instantiate one — a tile you
 /// can see but not click is worse than no tile.
+///
+/// The kit is staged here rather than shipped: a template only exists to be a
+/// starting point, and the bundled set is deliberately the four shapes a person
+/// actually starts from. Everything else is an example.
 #[test]
 fn kit_templates_are_listed_and_can_be_created() {
     let home = scratch("tmpl_home");
-    let listing = openepl(&repo(), &home, &["templates"]);
-    assert!(listing.contains("template: units-app console"), "{listing}");
-    assert!(
-        listing.contains("name: units-app Temperature Converter"),
-        "{listing}"
-    );
+    let root = scratch("tmpl_root");
+    let kit = root.join("kits/gadget");
+    write_kit(&kit, "gadget", "1.0.0");
+    std::fs::write(
+        kit.join("lib.json"),
+        r#"{ "display": "Gadget", "templates": ["gadget-app"] }"#,
+    )
+    .unwrap();
+    let tmpl = kit.join("gadget-app");
+    std::fs::create_dir_all(&tmpl).unwrap();
+    std::fs::write(
+        tmpl.join("template.meta"),
+        "name: Gadget App\ndesc: Uses the gadget kit.\ntarget: console\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmpl.join("main.oir"),
+        "module __MODULE__\nuse gadget\n\nsub main\n  call print_int(gadget_answer())\nend\n",
+    )
+    .unwrap();
+
+    let listing = openepl(&root, &home, &["templates"]);
+    assert!(listing.contains("template: gadget-app console"), "{listing}");
+    assert!(listing.contains("name: gadget-app Gadget App"), "{listing}");
 
     // The bundled templates are untouched: the designer parses this listing.
     for id in ["console-app", "gui-app", "shared-library", "static-library"] {
@@ -282,17 +304,12 @@ fn kit_templates_are_listed_and_can_be_created() {
         );
     }
 
-    let root = scratch("tmpl_new");
-    let dest = root.join("converter");
-    let out = openepl(
-        &repo(),
-        &home,
-        &["new", "units-app", dest.to_str().unwrap()],
-    );
-    assert!(out.contains("created: units-app"), "{out}");
+    let dest = root.join("widget");
+    let out = openepl(&root, &home, &["new", "gadget-app", dest.to_str().unwrap()]);
+    assert!(out.contains("created: gadget-app"), "{out}");
     let main = std::fs::read_to_string(dest.join("main.oir")).expect("template file copied");
-    assert!(main.contains("module converter"), "__MODULE__ not replaced");
-    assert!(main.contains("use units"));
+    assert!(main.contains("module widget"), "__MODULE__ not replaced");
+    assert!(main.contains("use gadget"));
 }
 
 /// The shipped kit compiles and runs, so the proof kit is a kit and not a
