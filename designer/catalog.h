@@ -69,6 +69,18 @@ struct CatalogComponent {
         }
         return nullptr;
     }
+
+    /// Whether the descriptor declares `name`. Everything the designer writes
+    /// on its own initiative — a drag, a resize, a nudge, a paste — has to
+    /// pass this: the compiler rejects a property the component does not
+    /// declare, and a build that fails on a line the user never typed is the
+    /// designer's fault, not theirs.
+    bool declares(const std::string& name) const {
+        for (const auto& p : props) {
+            if (p.name == name) return true;
+        }
+        return false;
+    }
 };
 
 struct Catalog {

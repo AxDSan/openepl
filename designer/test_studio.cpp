@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <sstream>
 #include <string>
@@ -201,6 +202,90 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("F12 on a local jumps to its declaration", has(out, "definition: caret 102,7"));
         check("Shift+F12 lists the wiring line and the declaration",
               has(out, "references: 2") && has(out, "line 49:18") && has(out, "line 96:5"));
+    }
+
+    // The designer writes only what the descriptor declares. Through a CLI
+    // whose listing omits the label's height — the build refused exactly
+    // that property once — the vertical anchors must go, and a resize must
+    // leave the block without it.
+    {
+        const std::string wrapper = "/tmp/openepl_studio_test_nolabelheight.sh";
+        {
+            std::ofstream f(wrapper, std::ios::trunc);
+            f << "#!/bin/sh\nif [ \"$1\" = commands ]; then\n  \"" << openepl
+              << "\" \"$@\" | grep -v '^property: label height'\n  exit 0\nfi\nexec \"" << openepl
+              << "\" \"$@\"\n";
+        }
+        ::chmod(wrapper.c_str(), 0755);
+        std::string path;
+        const std::string out = session(designer, wrapper, form,
+                                        "select:greeting;grip:s@0,30;grip:e@30,0;save", &path);
+        check("no height: the vertical anchor is not offered", has(out, "grip: s (no such grip)"));
+        check("no height: the side anchor still resizes", has(out, "grip: e dragged") && has(out, "width=430"));
+        const std::string file = slurp(path);
+        const size_t block = file.find("label greeting");
+        const size_t block_end = file.find("end", block);
+        check("no height: the resize wrote no height into the block",
+              block != std::string::npos && file.substr(block, block_end - block).find("height") == std::string::npos);
+        check("no height: the width it does declare was written", has(file, "width = 430"));
+    }
+    {
+        const std::string out = session(designer, openepl, form, "select:ok_button;grip:s@0,30");
+        check("with height: the vertical anchor resizes", has(out, "grip: s dragged") && has(out, "height=70"));
+    }
+
+    // The console: built through the real build path, then a drag over three
+    // of its lines selects them, a keystroke changes nothing, and the newest
+    // line is on screen.
+    {
+        const std::string out = session(designer, openepl, form, "build;logscroll;logselect:3,5;logdump");
+        check("build log: the newest line is visible after a build", has(out, "newest=VISIBLE"));
+        check("build log: a drag selects whole lines",
+              has(out, "logselect:") && has(out, "|  stage 2/4") && has(out, "(--gc-sections)"));
+        check("build log: typing into it changes nothing", has(out, "edited=no"));
+        check("build log: the result keeps its class", has(out, "LOG [ok] OK  /tmp/openepl_studio_app"));
+    }
+
+    // Completion. Typing opens the popup, typing on narrows it, Enter takes
+    // the row — and the character the platform sends after Enter stays out.
+    {
+        const std::string out = session(
+            designer, openepl, form,
+            "goto:40,1;typein:  call pri;waitcomplete;typein:nt_t;waitcomplete;key:enter;waitcomplete;bufline:40");
+        check("completion: an identifier opens the popup with the server's items",
+              has(out, "open=1 offered=") && has(out, "print_text"));
+        check("completion: typing on narrows it", has(out, "shown=1 index=0 selected=print_text"));
+        check("completion: Enter puts the item in and closes the popup",
+              has(out, "buf 40:   call print_textend") && has(out, "open=0 offered=0"));
+    }
+    // Ctrl+Space asks with no word typed, so everything is offered; Escape
+    // dismisses; and neither key leaves a character in the editor.
+    {
+        const std::string out = session(
+            designer, openepl, form,
+            "goto:40,1;typein:  call ;key:ctrl-space;waitcomplete;key:escape;waitcomplete;bufline:40");
+        check("completion: Ctrl+Space opens the full list", has(out, "open=1 offered=109 shown=109"));
+        check("completion: Escape closes it", has(out, "open=0 offered=0"));
+        check("completion: neither key typed anything", has(out, "buf 40:   call end"));
+    }
+    // The RAD loop from the keyboard: `on ` offers the events, the handler
+    // position offers a subroutine that does not exist yet, and accepting it
+    // writes the subroutine with the event's parameters.
+    {
+        std::string src = slurp("examples/eventparams.oir");
+        const size_t at = src.find("  on tick: on_plain\n");
+        src.insert(at + std::string("  on tick: on_plain\n").size(), "\n");
+        const std::string fixture = "/tmp/openepl_studio_test_timer.oir";
+        { std::ofstream f(fixture, std::ios::trunc); f << src; }
+        const std::string out = session(
+            designer, openepl, fixture,
+            "goto:20,1;typein:  on ;waitcomplete;key:tab;typein:: pl;waitcomplete;key:enter;bufline:20;buftail:4");
+        check("completion: `on ` offers the timer's event", has(out, "shown=1 index=0 selected=tick"));
+        check("completion: the handler position offers the new subroutine",
+              has(out, "selected=plain_tick"));
+        check("completion: accepting writes the wiring line", has(out, "buf 20:   on tick: plain_tick"));
+        check("completion: and the subroutine, with the event's parameter",
+              has(out, "sub plain_tick(n: int)"));
     }
 
     // Diagnostics carry columns, and a scrolled editor keeps them on the row.
