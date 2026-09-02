@@ -236,15 +236,22 @@ pub fn cmd_new(repo_root: &Path, args: &[String]) -> i32 {
         if name == "template.meta" || !from.is_file() {
             continue;
         }
-        let text = match std::fs::read_to_string(&from) {
-            Ok(s) => s,
+        let bytes = match std::fs::read(&from) {
+            Ok(b) => b,
             Err(e) => {
                 eprintln!("openepl: cannot read {}: {e}", from.display());
                 return 1;
             }
         };
+        // Only text gets the module name substituted. An icon or any other
+        // binary a template ships is copied byte for byte — running a text
+        // replace over a PNG corrupts it, and reading it as UTF-8 refuses it.
+        let out: Vec<u8> = match std::str::from_utf8(&bytes) {
+            Ok(text) => text.replace("__MODULE__", &module).into_bytes(),
+            Err(_) => bytes,
+        };
         let to = dest.join(name);
-        if let Err(e) = std::fs::write(&to, text.replace("__MODULE__", &module)) {
+        if let Err(e) = std::fs::write(&to, out) {
             eprintln!("openepl: cannot write {}: {e}", to.display());
             return 1;
         }

@@ -8,6 +8,7 @@ form main_window
   title = "__MODULE__"
   width = 480
   height = 300
+  icon = "app.png"
 
   label greeting
     text = "Click the button."
