@@ -1548,6 +1548,11 @@ void rebuild_canvas() {
                     }
                 }
                 text_target->SetInnerRML(esc(p.second));
+            } else if (p.first == "enabled") {
+                // Not RCSS: the running app dims a disabled control, and the
+                // canvas shows the same so a form reads as it will run.
+                const bool on = p.second == "true" || p.second == "1";
+                e->SetProperty("opacity", on ? "1.0" : "0.4");
             } else if (!openepl::ui::is_control_value(comp.type_name.c_str(),
                                                       p.first.c_str())) {
                 e->SetProperty(openepl::ui::rcss_name(p.first.c_str()),
