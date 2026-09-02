@@ -2,6 +2,9 @@
 //!
 //! Templates live in `templates/<id>/`, each with a `template.meta` describing
 //! it and one or more source files. `__MODULE__` in any file is replaced with
+//! the module name and `__TITLE__` with the title — what a window's caption
+//! shows, "Untitled App" until someone says otherwise — so a template's
+//! caption is a project's name, not a module identifier; the rest replaced with
 //! the new project's module name.
 //!
 //! They are exposed through the CLI rather than read directly by the designer,
@@ -141,11 +144,12 @@ pub fn cmd_list(repo_root: &Path) -> i32 {
     0
 }
 
-/// `openepl new <template> <dir> [--name <module>]`.
+/// `openepl new <template> <dir> [--name <module>] [--title <text>]`.
 pub fn cmd_new(repo_root: &Path, args: &[String]) -> i32 {
     let mut template_id: Option<String> = None;
     let mut dest: Option<PathBuf> = None;
     let mut module: Option<String> = None;
+    let mut title: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -155,6 +159,16 @@ pub fn cmd_new(repo_root: &Path, args: &[String]) -> i32 {
                     Some(v) => module = Some(v.clone()),
                     None => {
                         eprintln!("openepl: `--name` needs a module name");
+                        return 2;
+                    }
+                }
+            }
+            "--title" | "-t" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) if !v.trim().is_empty() => title = Some(v.trim().to_string()),
+                    _ => {
+                        eprintln!("openepl: `--title` needs a title");
                         return 2;
                     }
                 }
@@ -174,7 +188,7 @@ pub fn cmd_new(repo_root: &Path, args: &[String]) -> i32 {
     }
 
     let (Some(template_id), Some(dest)) = (template_id, dest) else {
-        eprintln!("openepl: usage: openepl new <template> <dir> [--name <module>]");
+        eprintln!("openepl: usage: openepl new <template> <dir> [--name <module>] [--title <text>]");
         eprintln!("openepl: run `openepl templates` to see what is available");
         return 2;
     };
@@ -209,6 +223,13 @@ pub fn cmd_new(repo_root: &Path, args: &[String]) -> i32 {
             .to_string();
         sanitise_module(&stem)
     });
+
+    // The title is what a person reads — a window's caption, a project's name
+    // on a welcome screen — so it is not derived from the directory the way
+    // the module is: `my-app` is a fine folder and a poor caption. Every
+    // project starts as "Untitled App", as documents do in every editor,
+    // until the person names it.
+    let title = title.unwrap_or_else(|| "Untitled App".to_string());
 
     // Never write over someone's work: an existing non-empty directory is an
     // error, not something to merge into.
@@ -247,7 +268,10 @@ pub fn cmd_new(repo_root: &Path, args: &[String]) -> i32 {
         // binary a template ships is copied byte for byte — running a text
         // replace over a PNG corrupts it, and reading it as UTF-8 refuses it.
         let out: Vec<u8> = match std::str::from_utf8(&bytes) {
-            Ok(text) => text.replace("__MODULE__", &module).into_bytes(),
+            Ok(text) => text
+                .replace("__MODULE__", &module)
+                .replace("__TITLE__", &title)
+                .into_bytes(),
             Err(_) => bytes,
         };
         let to = dest.join(name);
@@ -278,6 +302,7 @@ pub fn cmd_new(repo_root: &Path, args: &[String]) -> i32 {
     // that only knows `open:` still sees exactly what it saw before.
     println!("created: {} {}", t.id, dest.display());
     println!("module: {module}");
+    println!("title: {title}");
     println!("target: {}", t.target.as_str());
     println!("open: {}", entry_path.display());
     println!("project: {}", proj.display());

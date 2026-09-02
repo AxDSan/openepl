@@ -190,10 +190,14 @@ as a program or as a library without editing it. See
 openepl templates                # what you can create
 openepl new gui-app my-app       # create it
 openepl new gui-app my-app --name my_module
+openepl new gui-app my-app --title "Inventory"
 ```
 
 The module is named after the directory unless `--name` says otherwise;
-characters that cannot appear in an identifier are replaced.
+characters that cannot appear in an identifier are replaced. The title — a
+GUI form's caption — is "Untitled App" unless `--title` says otherwise: a
+folder name makes a poor caption, and a person names a project the way they
+name a document, once it is something.
 
 ## Finding out what exists
 

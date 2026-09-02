@@ -16,6 +16,7 @@ USAGE:
   openepl commands [--use <lib>]      list the commands and components available
   openepl templates                   list the available project templates
   openepl new <template> <dir>        create a project from a template
+  [--name <module>] [--title <text>]  the caption defaults to "Untitled App"
   openepl kits                        list the kits found, and from where
   openepl kit add <path>              install a kit into ~/.openepl/kits
   openepl project <file-or-dir>       dump a project file's resolved fields
@@ -47,10 +48,14 @@ as a program or as a library without editing it. See
 openepl templates                # what you can create
 openepl new gui-app my-app       # create it
 openepl new gui-app my-app --name my_module
+openepl new gui-app my-app --title "Inventory"
 ```
 
 The module is named after the directory unless `--name` says otherwise;
-characters that cannot appear in an identifier are replaced.
+characters that cannot appear in an identifier are replaced. The title — a
+GUI form's caption — is "Untitled App" unless `--title` says otherwise: a
+folder name makes a poor caption, and a person names a project the way they
+name a document, once it is something.
 
 ## Finding out what exists
 

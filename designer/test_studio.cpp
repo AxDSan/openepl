@@ -524,6 +524,23 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("anchors: the value is saved as text", has(slurp(path), "anchors = \"bottom, top\""));
     }
 
+    // Anchors at design time: dragging the form's grip moves and stretches
+    // the anchored children exactly as a window resize does in the built app
+    // (examples/anchors.oir: a 400x300 form; ok_button right,bottom at
+    // 250,230; name_box left,right 20,44 360x26; a label with the defaults).
+    {
+        std::string path;
+        const std::string out =
+            session(designer, openepl, "examples/anchors.oir", "formgrip:se@100,50", &path);
+        check("anchors: the form grew by the drag", has(out, "formgrip: se dragged form=500x350"));
+        check("anchors: right,bottom moves by the whole delta",
+              has(out, "  ok_button 350,280 120x36 anchors=right,bottom\n"));
+        check("anchors: left,right stretches", has(out, "  name_box 20,44 460x26 anchors=left,right\n"));
+        check("anchors: the default stays put", has(out, "  caption 20,20 ") && has(out, "anchors=-\n"));
+        check("anchors: the moved rectangles are what the file says",
+              has(slurp(path), "left = 350") && has(slurp(path), "width = 460"));
+    }
+
     // Typing in an inspector field: every keystroke used to rebuild the
     // grid under the caret, so the field lost focus after one character —
     // and a fast typist crashed Studio inside the text widget.

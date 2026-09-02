@@ -10,6 +10,7 @@
 //!   openepl inspect <in.oir>            dump the form model, one fact per line
 //!   openepl templates                   list project templates
 //!   openepl new <tmpl> <dir>            create a project from a template
+//!     [--name <module>] [--title <text>]  (the title defaults to "Untitled App")
 //!   openepl kits                        list resolved kits and where they came from
 //!   openepl kit add <path>              install a kit into ~/.openepl/kits
 //!   openepl project <file-or-dir>       dump a project file's resolved fields
@@ -145,6 +146,7 @@ fn usage() {
          openepl commands [--use <lib>]      list the commands and components available\n  \
          openepl templates                   list the available project templates\n  \
          openepl new <template> <dir>        create a project from a template\n  \
+           [--name <module>] [--title <text>]  the caption defaults to \"Untitled App\"\n  \
          openepl kits                        list the kits found, and from where\n  \
          openepl kit add <path>              install a kit into ~/.openepl/kits\n  \
          openepl project <file-or-dir>       dump a project file's resolved fields\n  \

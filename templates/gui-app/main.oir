@@ -5,7 +5,7 @@ target gui
 use ui
 
 form main_window
-  title = "__MODULE__"
+  title = "__TITLE__"
   width = 480
   height = 300
   icon = "app.png"

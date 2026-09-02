@@ -18,6 +18,8 @@
 #include <RmlUi/Core/Elements/ElementFormControlInput.h>
 #include <RmlUi/Core/Elements/ElementFormControlTextArea.h>
 #include <cstdio>
+#include <array>
+#include <map>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -158,6 +160,10 @@ struct Designer {
     /// Form-window resize, as in Visual Studio / RAD Studio: grab an edge or
     /// the corner of the preview and drag.
     bool resizing_form = false;
+    /// Every child's rectangle when the form's resize began, so anchored
+    /// controls follow the form from where they were, not from where the
+    /// last mouse move left them (integer deltas would drift otherwise).
+    std::map<std::string, std::array<int, 4>> anchor_base;
     std::string resize_edge;          // "e", "s" or "se"
     int resize_x0 = 0, resize_y0 = 0, resize_w0 = 0, resize_h0 = 0;
 
@@ -1322,6 +1328,33 @@ bool write_prop(Component& c, const char* prop, const std::string& value) {
 }
 bool write_int(Component& c, const char* prop, int value) {
     return write_prop(c, prop, std::to_string(value));
+}
+
+/// The form grew by dw,dh: move and stretch every child the way its `anchors`
+/// say, from the rectangles in `base` (or from what the model holds now). The
+/// same rule the built program applies on a window resize — so what the
+/// canvas shows after a resize is what the app will show after one.
+void follow_form_resize(int dw, int dh, const std::map<std::string, std::array<int, 4>>* base) {
+    if (!dw && !dh) return;
+    for (auto& c : g.model.children) {
+        const std::string* a = c.property("anchors");
+        unsigned mask = 0;
+        if (!a || !openepl::ui::parse_anchors(a->c_str(), &mask)) continue;
+        if (!(mask & (openepl::ui::ANCHOR_RIGHT | openepl::ui::ANCHOR_BOTTOM))) continue;
+        int l, t, w, h;
+        if (base && base->count(c.id)) {
+            const auto& r = base->at(c.id);
+            l = r[0]; t = r[1]; w = r[2]; h = r[3];
+        } else {
+            l = prop_int(c, "left", 0); t = prop_int(c, "top", 0);
+            w = prop_int(c, "width", 120); h = prop_int(c, "height", 32);
+        }
+        openepl::ui::anchored_rect(mask, dw, dh, &l, &t, &w, &h);
+        if (c.property("left"))   write_int(c, "left", l);
+        if (c.property("top"))    write_int(c, "top", t);
+        if (c.property("width"))  write_int(c, "width", w);
+        if (c.property("height")) write_int(c, "height", h);
+    }
 }
 
 /// The rendered border-box rect of a component, in canvas coordinates.
@@ -3825,7 +3858,18 @@ struct Listener : Rml::EventListener {
                 rebuild_code();
             } else if (cls.find("pv") != Rml::String::npos) {
                 push_undo();
-                comp->set_property(name, value);
+                // A new form size typed into the inspector is a resize: the
+                // anchored children follow it exactly as they follow the grip.
+                if (comp == &g.model.form && (name == "width" || name == "height")) {
+                    const int before = prop_int(g.model.form, name.c_str(), 0);
+                    const int after = std::atoi(value.c_str());
+                    comp->set_property(name, value);
+                    if (before > 0 && after > 0)
+                        follow_form_resize(name == "width" ? after - before : 0,
+                                           name == "height" ? after - before : 0, nullptr);
+                } else {
+                    comp->set_property(name, value);
+                }
                 mark_dirty();
                 // The swatch beside a colour field follows the text at once,
                 // since the grid itself is not rebuilt under the caret.
@@ -4093,6 +4137,11 @@ struct Listener : Rml::EventListener {
                 g.resize_y0 = my;
                 g.resize_w0 = prop_int(g.model.form, "width", 420);
                 g.resize_h0 = prop_int(g.model.form, "height", 260);
+                g.anchor_base.clear();
+                for (const auto& c : g.model.children) {
+                    g.anchor_base[c.id] = {prop_int(c, "left", 0), prop_int(c, "top", 0),
+                                           prop_int(c, "width", 120), prop_int(c, "height", 32)};
+                }
                 return;
             }
             // Resizing the selected component by its anchor.
@@ -4187,8 +4236,10 @@ struct Listener : Rml::EventListener {
                 int w = g.resize_w0, h = g.resize_h0;
                 if (g.resize_edge != "s") w = g.resize_w0 + (mx - g.resize_x0);
                 if (g.resize_edge != "e") h = g.resize_h0 + (my - g.resize_y0);
-                write_int(g.model.form, "width", snap(w < 120 ? 120 : w));
-                write_int(g.model.form, "height", snap(h < 80 ? 80 : h));
+                const int nw = snap(w < 120 ? 120 : w), nh = snap(h < 80 ? 80 : h);
+                write_int(g.model.form, "width", nw);
+                write_int(g.model.form, "height", nh);
+                follow_form_resize(nw - g.resize_w0, nh - g.resize_h0, &g.anchor_base);
                 mark_dirty();
                 rebuild_canvas();
                 return;
@@ -4783,6 +4834,42 @@ void run_script(const char* script) {
                             found ? "dragged" : "(no such grip)", shown("left").c_str(),
                             shown("top").c_str(), shown("width").c_str(),
                             shown("height").c_str());
+                std::fflush(stdout);
+            }
+            else if (verb == "formgrip") {
+                // formgrip:<edge>@<dx>,<dy> — drag the form's own resize grip
+                // and report where every child ended up, anchored or not.
+                const size_t at = arg.find('@');
+                const std::string edge = arg.substr(0, at);
+                int dx = 0, dy = 0;
+                if (at != std::string::npos) std::sscanf(arg.c_str() + at + 1, "%d,%d", &dx, &dy);
+                g.context->Update();
+                Rml::Element* found = nullptr;
+                if (Rml::Element* overlay = by_id("overlay")) {
+                    for (int i = 0; i < overlay->GetNumChildren(); i++) {
+                        Rml::Element* h = overlay->GetChild(i);
+                        if (h->GetAttribute<Rml::String>("oe-formgrip", "") == edge) found = h;
+                    }
+                }
+                if (found) {
+                    const auto o = found->GetAbsoluteOffset(Rml::BoxArea::Border);
+                    const auto sz = found->GetBox().GetSize(Rml::BoxArea::Border);
+                    const int cx = (int)(o.x + sz.x / 2), cy = (int)(o.y + sz.y / 2);
+                    g.context->ProcessMouseMove(cx, cy, 0);
+                    g.context->ProcessMouseButtonDown(0, 0);
+                    g.context->ProcessMouseMove(cx + dx, cy + dy, 0);
+                    g.context->ProcessMouseButtonUp(0, 0);
+                    g.context->Update();
+                }
+                std::printf("formgrip: %s %s form=%dx%d\n", edge.c_str(),
+                            found ? "dragged" : "(no such grip)",
+                            prop_int(g.model.form, "width", 0), prop_int(g.model.form, "height", 0));
+                for (const auto& c : g.model.children) {
+                    const std::string* a = c.property("anchors");
+                    std::printf("  %s %d,%d %dx%d anchors=%s\n", c.id.c_str(), prop_int(c, "left", 0),
+                                prop_int(c, "top", 0), prop_int(c, "width", 0), prop_int(c, "height", 0),
+                                a ? a->c_str() : "-");
+                }
                 std::fflush(stdout);
             }
             else if (verb == "hoverat" || verb == "gotodef" || verb == "refs") {

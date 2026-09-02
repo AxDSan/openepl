@@ -213,3 +213,25 @@ fn build_says_which_library_has_an_unknown_command() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The caption a GUI project opens with is a title, not a module identifier:
+/// "Untitled App" until `--title` names it, whatever the folder is called.
+#[test]
+fn a_gui_project_is_untitled_until_titled() {
+    let repo = repo();
+    let dir = std::env::temp_dir().join("openepl_proj_untitled");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = openepl(&repo, &["new", "gui-app", dir.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(has_line(&stdout(&out), "title: Untitled App"), "{}", stdout(&out));
+    let src = std::fs::read_to_string(dir.join("main.oir")).unwrap();
+    assert!(src.contains("title = \"Untitled App\""), "{src}");
+    assert!(src.contains("module openepl_proj_untitled"), "the module still follows the folder:\n{src}");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let out = openepl(&repo, &["new", "gui-app", dir.to_str().unwrap(), "--title", "Inventory"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let src = std::fs::read_to_string(dir.join("main.oir")).unwrap();
+    assert!(src.contains("title = \"Inventory\""), "{src}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
