@@ -426,6 +426,7 @@ void poll_build();
 void set_activity(const char* what);
 void refresh_highlight();
 void sync_highlight_scroll();
+std::string icon_img(const std::string& name, int px, const char* cls);
 void follow_log();
 void size_output_pane();
 void render_diagnostics();
@@ -520,8 +521,12 @@ std::string build_toolbox() {
             // is the one entry a toolbox must not have.
             if (c.type_name == "form") continue;
             if (!matches_search(c.type_name)) continue;
-            body += "<div class='tool' oe-add='" + c.type_name + "'><span class='ico'>" +
-                    (c.visual ? "\xe2\x96\xa0" : "\xe2\x97\x87") + "</span> " + c.type_name +
+            std::string ico = icon_img(c.type_name, 16, "ico");
+            if (ico.empty()) {
+                ico = std::string("<span class='ico'>") +
+                      (c.visual ? "\xe2\x96\xa0" : "\xe2\x97\x87") + "</span>";
+            }
+            body += "<div class='tool' oe-add='" + c.type_name + "'>" + ico + " " + c.type_name +
                     "</div>";
         }
         for (const auto& p : PLANNED) {
@@ -578,6 +583,16 @@ std::string asset_path(const char* name) {
     return "";
 }
 
+/// An `<img>` for a named toolbar or toolbox icon, or "" when the file is not
+/// there. Callers fall back to their text glyph, so a missing icon costs a
+/// little polish rather than a broken layout — the icon set is an asset, not a
+/// dependency.
+std::string icon_img(const std::string& name, int px, const char* cls) {
+    const std::string path = asset_path(("icons/" + name + "_" + std::to_string(px) + ".png").c_str());
+    if (path.empty()) return "";
+    return "<img class='" + std::string(cls) + "' src='" + path + "'/>";
+}
+
 std::string build_chrome(const std::string& family, const std::string& mono,
                          const std::string& dot_tile) {
     using namespace theme;
@@ -631,6 +646,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".tb{display:inline-block;height:26px;margin:7px 2px 0 2px;padding:5px 10px 0 10px;"
          "border-radius:5px;font-size:12px;color:" << TEXT << "}";
     s << ".tb:hover{background-color:#e8eaed}";
+    s << ".tb img.tbi{width:16px;height:16px;vertical-align:-3px;margin-right:6px}";
     s << ".tb.primary{background-color:" << ACCENT << ";color:" << ACCENT_TEXT << "}";
     s << ".tb.ghost{color:" << TEXT_MUTED << "}";
     s << ".tb.run{color:" << SUCCESS << ";font-weight:bold}";
@@ -659,6 +675,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".tool.sel{background-color:" << ACCENT << ";color:" << ACCENT_TEXT << "}";
     s << ".tool.soon{color:#aeb6c2}";
     s << ".tool .ico{display:inline-block;width:14px;color:" << ACCENT << "}";
+    s << ".tool img.ico{width:16px;height:16px;vertical-align:-3px}";
     s << ".tool.soon .ico{color:#c9d0da}";
 
     // ---- centre: tabs + canvas -----------------------------------------
@@ -934,7 +951,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div id='tip' style='display:none'/>";
 
     s << "<div id='toolbar'>"
-         "<div class='tb' oe-action='save'>Save</div>"
+         "<div class='tb' oe-action='save'>" + icon_img("save", 16, "tbi") + "Save</div>"
          "<div class='tb' oe-action='undo'>Undo</div>"
          "<div class='tb' oe-action='redo'>Redo</div>"
          "<div class='sep'/>"
@@ -946,9 +963,9 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div id='activitytrack'><div id='activitybar'/></div></div>"
          "<span id='runlamp' style='display:none'>●</span>"
          "<div class='sep'/>"
-         "<div class='tb run' oe-action='run'>▶ Run</div>"
-         "<div class='tb' oe-action='build'>Build Binary</div>"
-         "<div class='tb stop' oe-action='stop'>■ Stop</div>"
+         "<div class='tb run' oe-action='run'>" + icon_img("run", 16, "tbi") + "Run</div>"
+         "<div class='tb' oe-action='build'>" + icon_img("build", 16, "tbi") + "Build Binary</div>"
+         "<div class='tb stop' oe-action='stop'>" + icon_img("stop", 16, "tbi") + "Stop</div>"
          "</div>";
 
     s << "<div id='toolbox'><div class='panelhead'>TOOLBOX</div>"
