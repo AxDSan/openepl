@@ -125,6 +125,7 @@ list.
 | `width` | int |
 | `height` | int |
 | `background_color` | text |
+| `icon` | text |
 
 **Events:** `load`
 

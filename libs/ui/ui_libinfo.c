@@ -16,6 +16,9 @@ static const OpenEPL_PropertyDesc FORM_PROPS[] = {
      * has used draws a form in light grey; a dark default reads as a theme
      * someone has to switch off before their first app looks normal. */
     { "background_color", OE_SDT_TEXT, "#f0f0f0",             "color" },
+    /* The window's icon: a PNG beside the source, embedded at build time like
+     * an image's source, so the shipped binary carries it. */
+    { "icon",             OE_SDT_TEXT, "",                    "file" },
 };
 static const OpenEPL_EventDesc FORM_EVENTS[] = { { "load", 0, NULL } };
 

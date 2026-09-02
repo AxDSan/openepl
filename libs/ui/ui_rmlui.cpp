@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <SDL.h>
+#include <SDL_image.h>
 
 #include "RmlUi_Backend.h"
 #include "RmlUi_Renderer_GL3.h"
@@ -1128,6 +1129,26 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
     const std::string v = openepl::ui::rcss_value(property, value);
 
     if (w == 1 && std::strcmp(property, "title") == 0) return 0;  /* window title: set at init */
+    if (w == 1 && std::strcmp(property, "icon") == 0) {
+        /* Embedded bytes first, the path second, the same order every other
+         * resource resolves in — so the icon a program shipped with wins over
+         * whatever happens to sit at that path on the running machine. */
+        SDL_Surface* icon = nullptr;
+        if (const OpenEPL_Resource* r = find_resource(value)) {
+            icon = IMG_Load_RW(SDL_RWFromConstMem(r->data, (int)r->size), 1);
+        } else if (value && *value) {
+            icon = IMG_Load(value);
+        }
+        if (icon) {
+            if (SDL_Window* win = SDL_GL_GetCurrentWindow()) SDL_SetWindowIcon(win, icon);
+            if (std::getenv("OPENEPL_UI_DEBUG"))
+                std::fprintf(stderr, "ui: window icon %dx%d\n", icon->w, icon->h);
+            SDL_FreeSurface(icon);
+        } else if (value && *value) {
+            oe_error_set(OE_ERR_INVALID_ARG, "form icon could not be loaded");
+        }
+        return 0;
+    }
 
     bool ok = e->SetProperty(openepl::ui::rcss_name(property), v);
 

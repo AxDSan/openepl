@@ -715,14 +715,26 @@ fn embed_resources(module: &Module, input: &Path) -> Result<Option<String>, Stri
     let base = input.parent().unwrap_or(Path::new("."));
     let mut found: Vec<(String, Vec<u8>)> = Vec::new();
     for form in module.forms() {
+        // The form's own icon rides the same path as an image's source: a
+        // window icon that only exists on the author's disk is not shipped.
+        let mut wanted: Vec<(&str, &openepl_ir::Expr)> = form
+            .properties
+            .iter()
+            .filter(|(name, _)| name == "icon")
+            .map(|(_, v)| (form.name.as_str(), v))
+            .collect();
         for child in &form.children {
             if child.type_name != "image" {
                 continue;
             }
-            for (name, value) in &child.properties {
-                if name != "source" {
-                    continue;
+            for (name, v) in &child.properties {
+                if name == "source" {
+                    wanted.push((child.id.as_str(), v));
                 }
+            }
+        }
+        for (owner, value) in wanted {
+            {
                 let src = literal_text(value);
                 if src.is_empty() {
                     continue;
@@ -735,7 +747,7 @@ fn embed_resources(module: &Module, input: &Path) -> Result<Option<String>, Stri
                     format!(
                         "{}: `{}` has source `{src}`, which cannot be read: {e}",
                         input.display(),
-                        child.id
+                        owner
                     )
                 })?;
                 if bytes.is_empty() {
@@ -744,7 +756,7 @@ fn embed_resources(module: &Module, input: &Path) -> Result<Option<String>, Stri
                     return Err(format!(
                         "{}: `{}` has source `{src}`, which is empty",
                         input.display(),
-                        child.id
+                        owner
                     ));
                 }
                 found.push((src, bytes));
