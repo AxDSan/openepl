@@ -229,3 +229,55 @@ end
         "the window was not placed from the form:\n{stderr}"
     );
 }
+
+/// The form's `load` runs once, before the first frame is drawn — so a handler
+/// that fills in a caption is never seen half-done — and after the window
+/// exists, so one that reads the form's size gets the real one. RmlUi raises no
+/// such event; the library holds the handler and calls it from `oe_ui_run`.
+#[test]
+fn a_form_load_handler_runs_before_the_first_frame() {
+    if !ui_available() {
+        return;
+    }
+    let src = r#"module loadev
+target gui
+use ui
+form win
+  title = "load"
+  width = 320
+  height = 200
+  on load: win_load
+  label greeting
+    text = "before"
+    left = 20
+    top = 20
+    width = 200
+    height = 24
+  end
+end
+sub win_load
+  call print_text("loaded")
+  greeting.text = "after"
+end
+sub main
+  call print_text("main")
+end
+"#;
+    let bin = build_src(src, "loadev");
+    let out = run_headless(&bin, "3", None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        has_line(&stdout, "loaded"),
+        "the form's load handler never ran:\n{stdout}"
+    );
+    // `main` builds the form, so load can only come after it — and exactly once,
+    // however many frames the loop turns.
+    let order: Vec<&str> = stdout.lines().filter(|l| *l == "main" || *l == "loaded").collect();
+    assert_eq!(order, vec!["main", "loaded"], "load fired at the wrong time:\n{stdout}");
+    // What the handler wrote is what the first frame shows.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).lines().all(|l| !l.contains("Syntax error")),
+        "the handler's property write was refused:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

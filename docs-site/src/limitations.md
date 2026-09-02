@@ -76,11 +76,6 @@ out — a tab control, a splitter, a file dialog and a tray icon: they are part
 of the intended shape but are not implemented, and adding one tells you so
 rather than placing something that does not work.
 
-The `form` declares a `load` event, and a handler bound to it compiles — and
-is never called. Nothing dispatches it yet. Put start-up work in `main`, which
-runs after the window and its components exist and before the event loop
-starts.
-
 A `grid` shows what a `datasource` holds, and a datasource holds text —
 rows separated by newlines, cells by tabs. There is no database kit yet to
 fill one from a query.

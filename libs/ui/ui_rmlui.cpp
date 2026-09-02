@@ -129,6 +129,10 @@ struct HandlerBridge : Rml::EventListener {
     }
 };
 std::vector<HandlerBridge*> g_bridges;   // owned; freed at shutdown
+/* The form's `load`. RmlUi raises no such event — the window simply comes
+ * up — so it is held here and called by oe_ui_run once everything the
+ * handler could touch exists and before the first frame is drawn. */
+OpenEPL_EventFn g_on_load = nullptr;
 
 /* Interactive visual states.
  *
@@ -1467,6 +1471,11 @@ int oe_ui_on(OpenEPL_Widget w, const char* event, OpenEPL_EventFn handler) {
         if (std::strcmp(event, "select") == 0)   { it->second.on_select = handler; return 0; }
         if (std::strcmp(event, "activate") == 0) { it->second.on_activate = handler; return 0; }
     }
+    /* The form's own `load`, which no element raises: see g_on_load. */
+    if (w == 1 && std::strcmp(event, "load") == 0) {
+        g_on_load = handler;
+        return 0;
+    }
     auto* bridge = new HandlerBridge(handler, w);
     g_bridges.push_back(bridge);
     e->AddEventListener(event, bridge);
@@ -1789,6 +1798,15 @@ int oe_ui_run(void) {
         openepl::a11y::bridge_set_window_bounds((float)wx, (float)wy, (float)ww, (float)wh);
     }
 
+    /* `load` before the first frame, so a handler that fills a list or sets a
+     * caption is never seen half-done — and after the window exists, so one
+     * that reads the form's size gets the real one. */
+    if (g_on_load) {
+        OpenEPL_EventFn fn = g_on_load;
+        g_on_load = nullptr;   /* once per run, even if the loop is re-entered */
+        fn();
+    }
+
     g_frames = 0;
     if (!oe_loop_add(ui_pump, nullptr, 0)) return 1;
     return oe_loop_run();
@@ -1826,6 +1844,7 @@ void oe_ui_shutdown(void) {
     g_window = WindowPlace{};
     g_running = false;
     g_form_width = g_form_height = 0;
+    g_on_load = nullptr;
     g_applied_dw = g_applied_dh = 0;
     g.interactive.clear();
     g.widgets.clear();
