@@ -54,8 +54,8 @@ Download a release, unpack it anywhere, and run it — there is no installer and
 nothing to configure:
 
 ```sh
-tar xzf openepl-0.6.0-linux-x86_64.tar.gz
-cd openepl-0.6.0-linux-x86_64
+tar xzf openepl-0.7.0-linux-x86_64.tar.gz
+cd openepl-0.7.0-linux-x86_64
 bin/openepl-studio
 ```
 
