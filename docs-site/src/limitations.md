@@ -69,8 +69,9 @@ not breakpoints, stepping or variable inspection.
 - A dictionary's keys are text, and only text; asking with an `int` is a
   compile error.
 - Local variables are visible for the whole subroutine, not just the block
-  they were declared in. A `for` loop's variable follows the same rule, so two
-  loops in one subroutine need two different variable names.
+  they were declared in. A `for` loop's variable — and a `for each`'s element,
+  value and index bindings — follow the same rule, so two loops in one
+  subroutine need different binding names.
 - An indirect call — `call through fp(a, b): int` — is checked for the two
   things that can be known: the callee is a `ptr`, and every argument has a
   shape C can be handed. Nothing checks the signature *against the function*,
@@ -82,8 +83,9 @@ not breakpoints, stepping or variable inspection.
 - No mixing of numeric types in one expression: `d + 1` where `d` is a
   `double` is an error, not an implicit conversion. Write
   `d + int_to_double(1)`.
-- No `for` over a collection. Loop `1` to `count(xs)` and index; a
-  dictionary is walked through `dict_keys`.
+- A counting loop — `for i = 1 to n`, and its shorthand `for i in 1..n` —
+  counts with `int`, not `int64`. A range whose bounds are `int64` is a
+  compile error; count with an `int` and widen inside the loop.
 - One form per module.
 - A form or component property value must be a literal. A component's
   properties can be set again from code, but the form's own cannot — the form

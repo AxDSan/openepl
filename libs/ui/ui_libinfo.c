@@ -82,13 +82,17 @@ static const OpenEPL_PropertyDesc LABEL_PROPS[] = {
 
 /* --- editbox ---------------------------------------------------------- */
 static const OpenEPL_PropertyDesc EDIT_PROPS[] = {
-    { "text",   OE_SDT_TEXT, "",        NULL },
-    { "left",   OE_SDT_INT,  "0",       NULL },
-    { "top",    OE_SDT_INT,  "0",       NULL },
-    { "width",  OE_SDT_INT,  "160",     NULL },
-    { "height", OE_SDT_INT,  "32",      NULL },
+    { "text",      OE_SDT_TEXT, "",        NULL },
+    { "left",      OE_SDT_INT,  "0",       NULL },
+    { "top",       OE_SDT_INT,  "0",       NULL },
+    { "width",     OE_SDT_INT,  "160",     NULL },
+    { "height",    OE_SDT_INT,  "32",      NULL },
     ANCHORS,
-    { "color",  OE_SDT_TEXT, "#1a1a1a", "color" },
+    { "color",     OE_SDT_TEXT, "#1a1a1a", "color" },
+    /* Off by default: a single-line field. On, the box becomes a multi-line
+     * text area whose height is honoured — and the designer lets it be resized
+     * vertically only then, clamping a single-line field to one row. */
+    { "multiline", OE_SDT_BOOL, "false",   NULL },
 };
 static const OpenEPL_EventDesc EDIT_EVENTS[] = { { "change", 0, NULL } };
 

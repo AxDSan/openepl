@@ -398,7 +398,7 @@ this table deliberately differs from C's.
 | `band` | |
 | `bxor` | |
 | `bor` | |
-| `= <> < <= > >=` | comparison, and not chainable |
+| `= <> < <= > >=`, `in`, `not in` | comparison and membership |
 | `not` | |
 | `and` | |
 | `or` | loosest |
@@ -441,6 +441,14 @@ operator cannot be soft — `bnot(x)` reads as the operator and as a call to
 something named `bnot` equally well, and `bnot - 1` as a complement and as a
 subtraction. Guessing there gives a wrong answer rather than an error, so the
 word is refused as a name at the line that writes it.
+
+## Shorthands and sugar
+
+The 0.8.0 assignment and operator shorthands — compound assignment,
+`increment`/`decrement`, text `+` and `*`, chained comparison, `in`, the
+one-line `if` — and string interpolation live in their own chapter,
+[Shorthands and sugar](./sugar.md). Every one of them desugars to something
+on this page.
 
 ## Choosing
 
@@ -502,6 +510,11 @@ end
 
 Local variables are visible for the whole subroutine, so two loops in one
 subroutine need two different loop-variable names.
+
+Two shorthands sit on top of this counting loop: a range loop
+`for i in 1..n` and `for each x in xs`, which walk a collection without
+spelling the index. Both are pure sugar over the `for` above; see
+[Shorthands and sugar](./sugar.md#iteration-ranges-and-for-each).
 
 ## Components
 

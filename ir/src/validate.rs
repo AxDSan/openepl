@@ -25,8 +25,8 @@ use crate::sema::{
 };
 use crate::registry::{ComponentKind, PropertyDesc};
 use crate::{
-    Component, Elem, Expr, Item, Module, RecordDef, Registry, Span, Stmt, StmtKind, Sub, Target,
-    Ty,
+    foreach_elem_types, Component, Elem, Expr, Item, Module, RecordDef, Registry, Span, Stmt,
+    StmtKind, Sub, Target, Ty,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -801,6 +801,62 @@ fn validate_impl(
                         loop_vars.insert(var.clone());
                         stack.push(body);
                     }
+                    StmtKind::ForEach { elem, value, index, coll, body } => {
+                        // What the collection is decides what every binding is,
+                        // so type it first. A collection that cannot be iterated
+                        // is reported here, not left to the synthetic loop the
+                        // backend builds out of it.
+                        match type_of_expr_in(coll, &vars, reg, &components) {
+                            Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
+                            Ok(cty) => match foreach_elem_types(cty) {
+                                None => push(format!(
+                                    "in `{}`: `for each` iterates an array, a byte-set, a text or a \
+                                     dictionary — {} is none of those",
+                                    sub.name,
+                                    cty.as_str()
+                                ), stmt.span),
+                                Some((elem_ty, value_ty)) => {
+                                    // A `, VALUE` second binding reads a
+                                    // dictionary's value, so it means nothing
+                                    // over the one-element-at-a-time collections.
+                                    if value.is_some() && value_ty.is_none() {
+                                        push(format!(
+                                            "in `{}`: two bindings (`k, v`) read a dictionary's key and \
+                                             value — {} yields one element at a time, so drop the `, {}`",
+                                            sub.name,
+                                            cty.as_str(),
+                                            value.as_ref().unwrap()
+                                        ), stmt.span);
+                                    }
+                                    // The element, the optional value and the
+                                    // optional index are each a fresh, immutable
+                                    // local for the loop body — exactly a `for`
+                                    // counter's status: in `loop_vars`, absent
+                                    // from `mutable_locals`. (`value_ty.unwrap_or`
+                                    // gives a misused value binding a type so the
+                                    // body does not also complain it is unknown.)
+                                    let mut binds: Vec<(&String, Ty)> = vec![(elem, elem_ty)];
+                                    if let Some(v) = value {
+                                        binds.push((v, value_ty.unwrap_or(elem_ty)));
+                                    }
+                                    if let Some(i) = index {
+                                        binds.push((i, Ty::Int));
+                                    }
+                                    for (name, ty) in binds {
+                                        if vars.insert(name.clone(), ty).is_some() {
+                                            push(format!(
+                                                "in `{}`: variable `{name}` is defined more than once",
+                                                sub.name
+                                            ), stmt.span);
+                                        }
+                                        local_names.insert(name.clone());
+                                        loop_vars.insert(name.clone());
+                                    }
+                                    stack.push(body);
+                                }
+                            },
+                        }
+                    }
                     // Placement is checked separately: this worklist flattens
                     // the body, so it cannot tell what is inside a loop.
                     StmtKind::Break | StmtKind::Continue => {}
@@ -1124,9 +1180,9 @@ fn check_loop_control(
                     stmt.span,
                 );
             }
-            StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
-                check_loop_control(body, true, sub, push)
-            }
+            StmtKind::While { body, .. }
+            | StmtKind::For { body, .. }
+            | StmtKind::ForEach { body, .. } => check_loop_control(body, true, sub, push),
             StmtKind::If { arms, otherwise } => {
                 for (_, b) in arms {
                     check_loop_control(b, in_loop, sub, push);
@@ -1366,6 +1422,10 @@ fn check_initializer(
              and command calls only"
                 .to_string(),
         ),
+        // An interpolation hole in a module-variable initializer: its value
+        // faces the same restriction the rest of the initializer does, since the
+        // hole desugars to a `concat` of `*_to_text` calls run at start-up.
+        Expr::ToText { value, .. } => check_initializer(value, globals, reg),
         _ => Ok(()),
     }
 }

@@ -1536,8 +1536,17 @@ void rebuild_canvas() {
     }
     while (overlay->GetNumChildren() > 0) overlay->RemoveChild(overlay->GetChild(0));
 
+    // An editbox with `multiline = true` previews as a text area, exactly as
+    // the built app renders it; off, it is a single-line input.
+    auto canvas_tag = [](const Component& c) -> std::string {
+        if (c.type_name == "editbox") {
+            const std::string* m = c.property("multiline");
+            if (m && (*m == "true" || *m == "1")) return "textarea";
+        }
+        return openepl::ui::tag_for(c.type_name.c_str());
+    };
     for (const auto& comp : g.model.children) {
-        Rml::ElementPtr child = g.doc->CreateElement(openepl::ui::tag_for(comp.type_name.c_str()));
+        Rml::ElementPtr child = g.doc->CreateElement(canvas_tag(comp).c_str());
         const char* attr_value = nullptr;
         if (const char* attr =
                 openepl::ui::creation_attribute(comp.type_name.c_str(), &attr_value)) {
@@ -1730,7 +1739,14 @@ void rebuild_canvas() {
         // which properties the anchor moves.
         const Component* sel_comp = g.model.find(g.selected);
         const bool can_w = sel_comp && can_write(*sel_comp, "width");
-        const bool can_h = sel_comp && can_write(*sel_comp, "height");
+        // A single-line editbox is clamped to one row: its height is fixed, so
+        // the vertical anchors are withheld until `multiline` is turned on.
+        bool editbox_single = false;
+        if (sel_comp && sel_comp->type_name == "editbox") {
+            const std::string* m = sel_comp->property("multiline");
+            editbox_single = !(m && (*m == "true" || *m == "1"));
+        }
+        const bool can_h = sel_comp && can_write(*sel_comp, "height") && !editbox_single;
         const bool can_l = sel_comp && can_write(*sel_comp, "left");
         const bool can_t = sel_comp && can_write(*sel_comp, "top");
         for (int i = 0; i < 3; i++) {

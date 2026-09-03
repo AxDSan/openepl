@@ -383,6 +383,16 @@ impl Lowerer<'_> {
         t
     }
 
+    /// A hidden local variable name for a desugaring — the counter and the
+    /// collection snapshot a `for each` lowers through. It carries a `$`, which
+    /// no source identifier can, so it never shadows a user variable that lands
+    /// in the same `self.vars` table.
+    fn fresh_hidden(&mut self, tag: &str) -> String {
+        let s = format!("$each${tag}${}", self.tmp);
+        self.tmp += 1;
+        s
+    }
+
     /// Emit a string constant and return an operand pointing at it.
     fn cstr(&mut self, text: &str) -> String {
         let id = self.strings.len();
@@ -1038,6 +1048,161 @@ impl Lowerer<'_> {
                 writeln!(self.body, "  store i32 {inc}, ptr {iv}").unwrap();
                 writeln!(self.body, "  br label %{head}").unwrap();
                 writeln!(self.body, "{done}:").unwrap();
+                Ok(())
+            }
+            // `for each` is sugar: it lowers to the very `for` above, over a
+            // hidden `int` counter from 1 to the collection's length, with the
+            // element read out by index each turn. Building that `for` here and
+            // handing it back to `self.stmt` keeps every loop — counter,
+            // once-only bounds, break/continue — lowered in exactly one place.
+            StmtKind::ForEach { elem, value, index, coll, body } => {
+                use openepl_ir::Stmt;
+                let line = s.line;
+                // Read the collection once and pin it to a hidden slot: the loop
+                // runs over one snapshot, so a body that grows it cannot make it
+                // longer, matching `for`. Its type is what decides the bindings.
+                let cv = self.eval(coll)?;
+                let cty = cv.ty;
+                let (elem_ty, value_ty) =
+                    openepl_ir::foreach_elem_types(cty).ok_or_else(|| LowerError {
+                        msg: format!("`for each` cannot iterate {}", cty.as_str()),
+                    })?;
+                let coll_slot = self.alloca(cty);
+                writeln!(
+                    self.body,
+                    "  store {} {}, ptr {coll_slot}",
+                    llvm_ty(cty),
+                    cv.operand
+                )
+                .unwrap();
+                let coll_name = self.fresh_hidden("coll");
+                self.vars.insert(coll_name.clone(), (coll_slot, cty));
+                let coll_ref = Expr::Var(coll_name);
+                let i_name = self.fresh_hidden("i");
+                let i_ref = Expr::Var(i_name.clone());
+                let call = |cmd: &str, args: Vec<Expr>| Expr::Call {
+                    cmd: cmd.to_string(),
+                    args,
+                };
+
+                // How to count the collection and how to read one element into
+                // `elem` differ by kind; a dictionary also pulls its keys out
+                // once, before the loop, and looks each value up by key.
+                let mut loop_body: Vec<Stmt> = Vec::new();
+                let count_expr = match cty {
+                    Ty::Array(_) => {
+                        loop_body.push(Stmt::new(
+                            StmtKind::Let {
+                                name: elem.clone(),
+                                ty: elem_ty,
+                                value: Expr::Index {
+                                    base: Box::new(coll_ref.clone()),
+                                    index: Box::new(i_ref.clone()),
+                                },
+                                mutable: false,
+                            },
+                            line,
+                        ));
+                        call("count", vec![coll_ref.clone()])
+                    }
+                    // Each byte is an `int`, 0..255, the way `bytes_at` reads one.
+                    Ty::Bytes => {
+                        loop_body.push(Stmt::new(
+                            StmtKind::Let {
+                                name: elem.clone(),
+                                ty: elem_ty,
+                                value: call("bytes_at", vec![coll_ref.clone(), i_ref.clone()]),
+                                mutable: false,
+                            },
+                            line,
+                        ));
+                        call("bytes_count", vec![coll_ref.clone()])
+                    }
+                    // Each character is a one-character `text`; `length` and
+                    // `substr` both count characters, so the slice never splits
+                    // one and the loop runs once per character.
+                    Ty::Text => {
+                        loop_body.push(Stmt::new(
+                            StmtKind::Let {
+                                name: elem.clone(),
+                                ty: elem_ty,
+                                value: call(
+                                    "substr",
+                                    vec![coll_ref.clone(), i_ref.clone(), Expr::IntLit(1)],
+                                ),
+                                mutable: false,
+                            },
+                            line,
+                        ));
+                        call("length", vec![coll_ref.clone()])
+                    }
+                    Ty::Dict(_) => {
+                        let keys_name = self.fresh_hidden("keys");
+                        self.stmt(&Stmt::new(
+                            StmtKind::Let {
+                                name: keys_name.clone(),
+                                ty: Ty::Array(Elem::Text),
+                                value: call("dict_keys", vec![coll_ref.clone()]),
+                                mutable: false,
+                            },
+                            line,
+                        ))?;
+                        let keys_ref = Expr::Var(keys_name);
+                        // The element binding is the key.
+                        loop_body.push(Stmt::new(
+                            StmtKind::Let {
+                                name: elem.clone(),
+                                ty: elem_ty,
+                                value: Expr::Index {
+                                    base: Box::new(keys_ref.clone()),
+                                    index: Box::new(i_ref.clone()),
+                                },
+                                mutable: false,
+                            },
+                            line,
+                        ));
+                        if let Some(v) = value {
+                            loop_body.push(Stmt::new(
+                                StmtKind::Let {
+                                    name: v.clone(),
+                                    ty: value_ty.unwrap_or(elem_ty),
+                                    value: call(
+                                        "dict_get",
+                                        vec![coll_ref.clone(), Expr::Var(elem.clone())],
+                                    ),
+                                    mutable: false,
+                                },
+                                line,
+                            ));
+                        }
+                        call("count", vec![keys_ref])
+                    }
+                    other => return err(format!("`for each` cannot iterate {}", other.as_str())),
+                };
+                // `at IDX` — the 1-based position, which is the counter itself.
+                if let Some(idx) = index {
+                    loop_body.push(Stmt::new(
+                        StmtKind::Let {
+                            name: idx.clone(),
+                            ty: Ty::Int,
+                            value: i_ref,
+                            mutable: false,
+                        },
+                        line,
+                    ));
+                }
+                // The author's body runs after the bindings, each turn.
+                loop_body.extend(body.iter().cloned());
+                self.stmt(&Stmt::new(
+                    StmtKind::For {
+                        var: i_name,
+                        start: Expr::IntLit(1),
+                        limit: count_expr,
+                        step: 1,
+                        body: loop_body,
+                    },
+                    line,
+                ))?;
                 Ok(())
             }
             StmtKind::Break | StmtKind::Continue => {
@@ -2093,6 +2258,109 @@ impl Lowerer<'_> {
         Ok(Val { ty: v.ty, operand: t })
     }
 
+    /// Evaluate `e` once, store it in a fresh synthetic local, and return that
+    /// local's name. The value can then be read back through `Expr::Var(name)`
+    /// as many times as the desugar needs while running `e` only once. The name
+    /// begins with `$`, which no source identifier can contain, so a temp never
+    /// shadows a program's own variable.
+    fn bind_temp(&mut self, e: &Expr) -> Result<String, LowerError> {
+        let v = self.eval(e)?;
+        let slot = self.alloca(v.ty);
+        writeln!(
+            self.body,
+            "  store {} {}, ptr {slot}",
+            llvm_ty(v.ty),
+            v.operand
+        )
+        .unwrap();
+        let name = format!("$t{}", self.tmp);
+        self.tmp += 1;
+        self.vars.insert(name.clone(), (slot, v.ty));
+        Ok(name)
+    }
+
+    /// `lo <op1> mid <op2> hi` — bind `lo` then `mid` to temps, in that order,
+    /// so evaluation runs left to right and the middle runs exactly once, then
+    /// lower the plain conjunction `lo <op1> mid and mid <op2> hi`. Reusing
+    /// `Cmp` and `Logical` gets text comparison and the `and`'s short circuit
+    /// (which keeps `hi` lazy) for free.
+    fn eval_chain(
+        &mut self,
+        lo: &Expr,
+        lo_op: CmpOp,
+        mid: &Expr,
+        hi_op: CmpOp,
+        hi: &Expr,
+    ) -> Result<Val, LowerError> {
+        let lo_t = self.bind_temp(lo)?;
+        let mid_t = self.bind_temp(mid)?;
+        let desugared = Expr::Logical(
+            LogicalOp::And,
+            Box::new(Expr::Cmp(
+                lo_op,
+                Box::new(Expr::Var(lo_t)),
+                Box::new(Expr::Var(mid_t.clone())),
+            )),
+            Box::new(Expr::Cmp(
+                hi_op,
+                Box::new(Expr::Var(mid_t)),
+                Box::new(hi.clone()),
+            )),
+        );
+        self.eval(&desugared)
+    }
+
+    /// `e in xs` / `k in d` / `sub in text` — bind the haystack once (its type
+    /// picks the command and its value feeds it, and it may have side effects),
+    /// then lower to the command that answers membership: `index_of(xs, e) <> 0`
+    /// for an array, `dict_has(d, k)` for a dictionary, `find(text, sub) <> 0`
+    /// for a substring. `not in` wraps the result in `not`. The needle appears
+    /// once in the desugar, so it stays inline and runs once too.
+    fn eval_in(
+        &mut self,
+        needle: &Expr,
+        haystack: &Expr,
+        negated: bool,
+    ) -> Result<Val, LowerError> {
+        let hay = self.bind_temp(haystack)?;
+        let hty = self.var_ty(&hay).expect("temp just bound");
+        let hvar = Expr::Var(hay);
+        let desugared = match hty {
+            Ty::Array(_) => Expr::Cmp(
+                CmpOp::Ne,
+                Box::new(Expr::Call {
+                    cmd: "index_of".to_string(),
+                    args: vec![hvar, needle.clone()],
+                }),
+                Box::new(Expr::IntLit(0)),
+            ),
+            Ty::Dict(_) => Expr::Call {
+                cmd: "dict_has".to_string(),
+                args: vec![hvar, needle.clone()],
+            },
+            Ty::Text => Expr::Cmp(
+                CmpOp::Ne,
+                Box::new(Expr::Call {
+                    cmd: "find".to_string(),
+                    args: vec![hvar, needle.clone()],
+                }),
+                Box::new(Expr::IntLit(0)),
+            ),
+            other => {
+                return err(format!(
+                    "`in` cannot test membership in {}",
+                    other.as_str()
+                ))
+            }
+        };
+        let desugared = if negated {
+            Expr::Not(Box::new(desugared))
+        } else {
+            desugared
+        };
+        self.eval(&desugared)
+    }
+
     fn eval_inner(&mut self, e: &Expr) -> Result<Val, LowerError> {
         match e {
             // Intercepted by `eval_hinted`, which is the only caller.
@@ -2124,6 +2392,26 @@ impl Lowerer<'_> {
                 Ok(self.c_load(&p, ty))
             }
             Expr::Index { base, index } => self.eval_index(base, index),
+            // `1 <= x <= 12` and `e in xs` are sugar that only becomes a
+            // concrete command once the operand types are known — which they are
+            // here. Both lower to expressions built entirely from nodes that
+            // already exist, so the work is one more `eval`.
+            Expr::Chain { lo, lo_op, mid, hi_op, hi } => {
+                self.eval_chain(lo, *lo_op, mid, *hi_op, hi)
+            }
+            Expr::In { needle, haystack, negated } => {
+                self.eval_in(needle, haystack, *negated)
+            }
+            // One interpolation hole. The value is rendered to text by the very
+            // routine that renders a value assigned to a component property, so
+            // a bool is `true`/`false` and a number goes through its
+            // `*_to_text` — the checker has already refused a type with no text
+            // form, naming the hole.
+            Expr::ToText { value, .. } => {
+                let v = self.eval(value)?;
+                let operand = self.value_as_text(&v)?;
+                Ok(Val { ty: Ty::Text, operand })
+            }
             Expr::IntLit(v) => {
                 if let Ok(v32) = i32::try_from(*v) {
                     Ok(Val {
@@ -2198,6 +2486,17 @@ impl Lowerer<'_> {
                 // the same `concat` command an author could call by name.
                 if lv.ty == Ty::Text && rv.ty == Ty::Text && *op == BinOp::Add {
                     let t = self.call_symbol_2("oe_concat", &lv, &rv, Ty::Text)?;
+                    return Ok(Val {
+                        ty: Ty::Text,
+                        operand: t,
+                    });
+                }
+                // `text * count` repeats the text: it forwards to the `repeat`
+                // command, the same operation an author could call by name. The
+                // checker has already required the text on the left and an `int`
+                // count on the right.
+                if lv.ty == Ty::Text && rv.ty == Ty::Int && *op == BinOp::Mul {
+                    let t = self.call_symbol_2("oe_repeat", &lv, &rv, Ty::Text)?;
                     return Ok(Val {
                         ty: Ty::Text,
                         operand: t,

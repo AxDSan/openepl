@@ -60,12 +60,29 @@ pub enum Tok {
     Comma,
     Colon,
     Dot,
+    /// `..` — the range operator in `for i in 1..10`. A fused token so a range
+    /// bound's expression ends cleanly at the `..`; without it `A..B` would lex
+    /// as `A` then a `.` that the expression parser reads as a field access into
+    /// a second `.`, which is nothing. `..` appears nowhere else in the grammar.
+    DotDot,
     Eq,
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
+    /// The compound-assignment operators `+= -= *= /=` and the text-append
+    /// `&=`. They are fused tokens rather than a `+` beside a `=` because the
+    /// two only ever mean *assign back into the target*, and lexing them whole
+    /// keeps the parser from having to distinguish `x += 1` from a stray `+`
+    /// that happens to precede an `=`. `&=` is the only one whose first
+    /// character (`&`) is otherwise not a token at all — a lone `&` stays the
+    /// error it always was.
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    AmpEq,
     Lt,
     Le,
     Gt,
@@ -176,6 +193,13 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                 push(&mut out, Tok::Colon, line, start_col);
                 i += 1;
             }
+            // `..` (range) before a single `.` (field access): two dots fuse so
+            // a range bound's expression ends at the `..` rather than reading
+            // the first `.` as the start of a field access.
+            b'.' if i + 1 < n && bytes[i + 1] == b'.' => {
+                push(&mut out, Tok::DotDot, line, start_col);
+                i += 2;
+            }
             b'.' => {
                 push(&mut out, Tok::Dot, line, start_col);
                 i += 1;
@@ -206,17 +230,35 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     i += 1;
                 }
             }
+            // `+=` etc. before the bare operator: a compound assignment is one
+            // token so the parser reads it as an operator, not `+` then `=`.
+            b'+' if i + 1 < n && bytes[i + 1] == b'=' => {
+                push(&mut out, Tok::PlusEq, line, start_col);
+                i += 2;
+            }
             b'+' => {
                 push(&mut out, Tok::Plus, line, start_col);
                 i += 1;
+            }
+            b'-' if i + 1 < n && bytes[i + 1] == b'=' => {
+                push(&mut out, Tok::MinusEq, line, start_col);
+                i += 2;
             }
             b'-' => {
                 push(&mut out, Tok::Minus, line, start_col);
                 i += 1;
             }
+            b'*' if i + 1 < n && bytes[i + 1] == b'=' => {
+                push(&mut out, Tok::StarEq, line, start_col);
+                i += 2;
+            }
             b'*' => {
                 push(&mut out, Tok::Star, line, start_col);
                 i += 1;
+            }
+            b'/' if i + 1 < n && bytes[i + 1] == b'=' => {
+                push(&mut out, Tok::SlashEq, line, start_col);
+                i += 2;
             }
             b'/' => {
                 push(&mut out, Tok::Slash, line, start_col);
@@ -225,6 +267,13 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
             b'%' => {
                 push(&mut out, Tok::Percent, line, start_col);
                 i += 1;
+            }
+            // `&=` is text append. A lone `&` is not an operator in the language
+            // (bitwise-and is the word `band`), so only the paired form is a
+            // token; a stray `&` falls through to the unexpected-character error.
+            b'&' if i + 1 < n && bytes[i + 1] == b'=' => {
+                push(&mut out, Tok::AmpEq, line, start_col);
+                i += 2;
             }
             b'"' => {
                 let (s, ni) = lex_string(bytes, i + 1, line)?;
@@ -287,27 +336,31 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
             }
             _ if c.is_ascii_digit() => {
                 let start = i;
-                while i < n && bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
+                // `1_000_000` — a digit-grouping underscore, matching the hex /
+                // binary path above. An underscore is allowed only between two
+                // digits, so `1_`, `_1` (which lexes as an identifier anyway)
+                // and `1__0` are refused rather than silently accepted.
+                scan_dec_digits(bytes, &mut i, n, line)?;
                 // Fractional part -> floating-point literal (needs a digit after `.`).
                 let is_float = i + 1 < n && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit();
                 if is_float {
                     i += 1; // consume '.'
-                    while i < n && bytes[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                    let text = &src[start..i];
+                    scan_dec_digits(bytes, &mut i, n, line)?;
+                }
+                // Parse the value without the grouping underscores; the span
+                // still covers the digits as written, for the diagnostic.
+                let raw = &src[start..i];
+                let text: String = raw.bytes().filter(|&b| b != b'_').map(|b| b as char).collect();
+                if is_float {
                     let v: f64 = text.parse().map_err(|_| LexError {
                         line,
-                        msg: format!("invalid float literal: {text}"),
+                        msg: format!("invalid float literal: {raw}"),
                     })?;
                     push(&mut out, Tok::Float(v), line, start_col);
                 } else {
-                    let text = &src[start..i];
                     let v: i64 = text.parse().map_err(|_| LexError {
                         line,
-                        msg: format!("integer literal out of range: {text}"),
+                        msg: format!("integer literal out of range: {raw}"),
                     })?;
                     push(&mut out, Tok::Int(v), line, start_col);
                 }
@@ -366,6 +419,31 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
         end_col: i - line_start + 1,
     });
     Ok(out)
+}
+
+/// Consume a run of decimal digits with optional grouping underscores, starting
+/// at a digit. An underscore must sit between two digits — `bytes[*i]` is a
+/// digit on entry, so the "digit before" half is given, and the following byte
+/// is required to be a digit too. `1_000` advances past all five characters;
+/// `1_` and `1__0` are refused with a line number.
+fn scan_dec_digits(bytes: &[u8], i: &mut usize, n: usize, line: usize) -> Result<(), LexError> {
+    while *i < n {
+        if bytes[*i].is_ascii_digit() {
+            *i += 1;
+        } else if bytes[*i] == b'_' {
+            if *i + 1 < n && bytes[*i + 1].is_ascii_digit() {
+                *i += 1;
+            } else {
+                return Err(LexError {
+                    line,
+                    msg: "an underscore in a number must sit between two digits".into(),
+                });
+            }
+        } else {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn is_ident_start(c: u8) -> bool {

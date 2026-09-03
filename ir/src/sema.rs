@@ -330,13 +330,43 @@ fn type_of_expr_bare(
             // `+` joins two texts. It is the same operation `concat` performs
             // — this spelling exists so that building a message does not nest
             // three calls deep.
-            if lt == Ty::Text && rt == Ty::Text && *op == crate::BinOp::Add {
-                return Ok(Ty::Text);
+            if *op == crate::BinOp::Add && lt == Ty::Text {
+                if rt == Ty::Text {
+                    return Ok(Ty::Text);
+                }
+                // No auto-stringify: `+` joins text with text and nothing else.
+                // Turning a number into its text is interpolation's job (stage
+                // 2), so the number is named and the conversion left to the
+                // author rather than done silently.
+                return err(format!(
+                    "`+` joins text with text; the right side is {} — convert it first, \
+                     for example with `int_to_text(...)`",
+                    rt.as_str()
+                ));
+            }
+            // `text * count` repeats the text; it lowers to the `repeat`
+            // command. The text goes on the left — one form, one rule — so
+            // `count * text` is refused with the spelling that works, and a
+            // non-`int` count is named rather than mistaken for arithmetic.
+            if *op == crate::BinOp::Mul && lt == Ty::Text {
+                if rt == Ty::Int {
+                    return Ok(Ty::Text);
+                }
+                return err(format!(
+                    "repeating a text needs an `int` count on the right, got {}",
+                    rt.as_str()
+                ));
+            }
+            if *op == crate::BinOp::Mul && rt == Ty::Text && lt == Ty::Int {
+                return err(
+                    "to repeat a text, put the text first: write `text * count`, \
+                     not `count * text`",
+                );
             }
             if !lt.is_numeric() {
                 if lt == Ty::Text {
                     return err(format!(
-                        "text supports `+` (joining) but not `{}`",
+                        "text supports `+` (joining) and `* count` (repeating) but not `{}`",
                         op.symbol()
                     ));
                 }
@@ -632,6 +662,95 @@ fn type_of_expr_bare(
                 ));
             }
             Ok(Ty::Bool)
+        }
+        // `1 <= x <= 12` — each half is a comparison in its own right, typed by
+        // exactly the `Cmp` rules above, so the chain is well-typed only when
+        // both `lo <op1> mid` and `mid <op2> hi` are.
+        Expr::Chain { lo, lo_op, mid, hi_op, hi } => {
+            for (op, l, r) in [(lo_op, lo, mid), (hi_op, mid, hi)] {
+                let lt = type_of_expr_in(l, vars, reg, components)?;
+                let rt = type_of_expr_in(r, vars, reg, components)?;
+                if lt != rt {
+                    return err(format!(
+                        "cannot compare {} with {} using `{}` (no implicit conversion)",
+                        lt.as_str(),
+                        rt.as_str(),
+                        op.symbol()
+                    ));
+                }
+                if op.is_ordering() && !lt.is_numeric() {
+                    return err(format!(
+                        "`{}` compares numbers; {} values support only `=` and `<>`",
+                        op.symbol(),
+                        lt.as_str()
+                    ));
+                }
+            }
+            Ok(Ty::Bool)
+        }
+        // `e in xs` / `k in d` / `sub in text` — the element type of the
+        // haystack decides both the rule and, later, which command lowers it.
+        // The needle is checked against what the haystack holds; an array's
+        // needle is hinted with the element type so `5 in int64s` widens the
+        // literal exactly as `append(int64s, 5)` does.
+        Expr::In { needle, haystack, negated: _ } => {
+            let ht = type_of_expr_in(haystack, vars, reg, components)?;
+            match ht {
+                Ty::Array(e) => {
+                    let nt = type_of_expr_hinted(needle, Some(e.ty()), vars, reg, components)?;
+                    if nt != e.ty() {
+                        return err(format!(
+                            "`in` on {} tests for {} values; this one is {}",
+                            ht.as_str(),
+                            e.as_str(),
+                            nt.as_str()
+                        ));
+                    }
+                    Ok(Ty::Bool)
+                }
+                Ty::Dict(_) => {
+                    let nt = type_of_expr_in(needle, vars, reg, components)?;
+                    if nt != Ty::Text {
+                        return err(format!(
+                            "a dictionary is keyed by text, so `in` tests a text key, got {}",
+                            nt.as_str()
+                        ));
+                    }
+                    Ok(Ty::Bool)
+                }
+                Ty::Text => {
+                    let nt = type_of_expr_in(needle, vars, reg, components)?;
+                    if nt != Ty::Text {
+                        return err(format!(
+                            "`in` on text asks whether one text contains another; \
+                             the left side is {}, not text",
+                            nt.as_str()
+                        ));
+                    }
+                    Ok(Ty::Bool)
+                }
+                other => err(format!(
+                    "`in` tests membership in an array, a dictionary or text — \
+                     {} has no members",
+                    other.as_str()
+                )),
+            }
+        }
+        // One hole of a string interpolation. The hole's value is turned to
+        // text the same way a component property assignment turns a value to
+        // text: text stays, a bool becomes `true`/`false`, a number goes
+        // through its `*_to_text`. A type with no text form is refused here,
+        // where the hole's spelling can be named, rather than at lowering.
+        Expr::ToText { value, hole } => {
+            let t = type_of_expr_in(value, vars, reg, components)?;
+            match t {
+                Ty::Text | Ty::Bool | Ty::Int | Ty::Int64 | Ty::Double => Ok(Ty::Text),
+                other => err(format!(
+                    "the interpolation hole `{{{hole}}}` is {}, which has no text form — \
+                     turn it into text yourself before the string",
+                    other.as_str()
+                )),
+            }
         }
         Expr::Logical(op, l, r) => {
             let word = match op {

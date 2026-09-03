@@ -236,8 +236,8 @@ OpenEPL is young, and honest about it:
   the `httpserver` component is plaintext either way.
 - **Memory is reclaimed at exit**, not before: a program that runs for days
   grows with the work it has done.
-- Nineteen components, and the language has no enum, no `for` over a
-  collection and no module-level constant yet. The
+- Nineteen components, and the language has no enum and no module-level
+  constant yet. The
   [limitations page](https://axdsan.github.io/openepl/docs/limitations.html)
   is the full list, checked against the toolchain.
 

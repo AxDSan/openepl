@@ -7,7 +7,15 @@
 //! sub     := "sub" IDENT params? (":" type)? conv? NEWLINE stmt* "end" NEWLINE
 //! conv    := "stdcall" | "cdecl" | "system"
 //! params  := "(" (IDENT ":" type ("," IDENT ":" type)*)? ")"
-//! stmt    := let | call | indirect | return | for | break | continue
+//! stmt    := let | assign | call | indirect | return | for | break | continue
+//!          | incdec
+//!   -- a simple statement (call, assign, return, incdec) may carry a one-line
+//!   -- suffix `STMT "if" expr NEWLINE`, sugar for `if expr NEWLINE STMT ... end`.
+//! assign  := lvalue asgop expr NEWLINE
+//! asgop   := "=" | "+=" | "-=" | "*=" | "/=" | "mod=" | "&="
+//!   -- compound forms desugar to `lvalue = lvalue OP expr` (`&=` via `concat`).
+//! incdec  := ("increment" | "decrement") lvalue NEWLINE  -- `lvalue = lvalue ± 1`
+//! lvalue  := IDENT ("[" expr "]" | "." IDENT)*
 //! return  := "return" expr? NEWLINE
 //! let     := "let" IDENT ":" type "=" expr NEWLINE
 //! call    := "call" IDENT "(" (expr ("," expr)*)? ")" NEWLINE
@@ -17,7 +25,13 @@
 //! record  := "record" IDENT NEWLINE (IDENT ":" type NEWLINE)+ "end" NEWLINE
 //! type    := ("int" | "int64" | "double" | "text" | "bool" | "bytes" | IDENT)
 //!            ("[" "]" | "{" "}")?
-//! expr    := bor (("+" | "-") term)*   -- see the precedence table below
+//! expr    := or   -- see the precedence table below
+//! or      := and ("or" and)*
+//! and     := not_ ("and" not_)*
+//! not_    := "not" not_ | cmp
+//! cmp     := bor (cmpop bor (cmpop bor)?)?   -- two in a row is a chained
+//!          | bor ("not"? "in") bor           -- comparison; membership test
+//! cmpop   := "=" | "<>" | "<" | "<=" | ">" | ">="
 //! bor     := bxor ("bor" bxor)*
 //! bxor    := band ("bxor" band)*
 //! band    := shift ("band" shift)*
@@ -65,6 +79,273 @@ pub fn parse(src: &str) -> Result<Module, ParseError> {
 struct Parser {
     toks: Vec<Spanned>,
     pos: usize,
+}
+
+/// A parsed assignment target. It holds enough to build both the expression a
+/// *read* of the target is (the left operand a compound assignment reuses) and
+/// the *write* statement, so one parser serves `x = e`, `x += e`, `increment x`
+/// and every target shape.
+enum Lvalue {
+    Var(String),
+    Index { name: String, index: Expr },
+    Property { component: String, property: String },
+    Place(Expr),
+}
+
+impl Lvalue {
+    /// The expression a read of this target is — cloned, since a compound
+    /// assignment names the target on both sides (`x += e` is `x = x + e`).
+    fn read(&self) -> Expr {
+        match self {
+            Lvalue::Var(name) => Expr::Var(name.clone()),
+            Lvalue::Index { name, index } => Expr::Index {
+                base: Box::new(Expr::Var(name.clone())),
+                index: Box::new(index.clone()),
+            },
+            Lvalue::Property { component, property } => Expr::GetProperty {
+                component: component.clone(),
+                property: property.clone(),
+            },
+            Lvalue::Place(e) => e.clone(),
+        }
+    }
+
+    /// The statement that writes `value` into this target — the same
+    /// `StmtKind` a plain `=` would have produced.
+    fn write(self, value: Expr) -> StmtKind {
+        match self {
+            Lvalue::Var(name) => StmtKind::Assign { name, value },
+            Lvalue::Index { name, index } => StmtKind::SetIndex { name, index, value },
+            Lvalue::Property { component, property } => {
+                StmtKind::SetProperty { component, property, value }
+            }
+            Lvalue::Place(place) => StmtKind::SetPlace { place, value },
+        }
+    }
+}
+
+/// Which assignment operator a target was followed by.
+enum AssignOp {
+    /// A plain `=`: the value is the right-hand side unchanged.
+    Plain,
+    /// A `+= -= *= /= mod=` — arithmetic, desugaring to `target = target OP e`.
+    Bin(BinOp),
+    /// `&=` — text append, desugaring to `target = concat(target, e)`.
+    Concat,
+}
+
+/// The value a compound assignment stores. For `target OP= rhs` the desugar is
+/// `target = target OP rhs`, reusing the very `=` statement path so the type
+/// rules are the ordinary ones. `&=` joins text through `concat`, the command an
+/// author could have called by name.
+fn apply_assign_op(op: AssignOp, target: Expr, rhs: Expr) -> Expr {
+    match op {
+        AssignOp::Plain => rhs,
+        AssignOp::Bin(b) => Expr::Bin(b, Box::new(target), Box::new(rhs)),
+        AssignOp::Concat => Expr::Call {
+            cmd: "concat".to_string(),
+            args: vec![target, rhs],
+        },
+    }
+}
+
+// --- String interpolation ---------------------------------------------------
+//
+// A text literal may carry `{expr}` holes: `"Row {i} of {n}"`. The lexer has
+// already decoded the literal's escapes (`\n`, `\t`, `\\`, `\"`, `\0`) and
+// passed its braces through untouched, so the whole of interpolation lives in
+// the parser, splitting that decoded string. `{{` and `}}` are the escaped
+// single braces; every other `{` opens a hole that runs to its matching `}`
+// (nested braces — a dict literal — balance), and the text between is re-lexed
+// and parsed as a full expression. The literal desugars to the left-folded
+// concat of its literal chunks and its holes, each hole wrapped in
+// `Expr::ToText`. A literal with no holes is returned as the one `TextLit` it
+// was before interpolation existed — no concat where none is needed.
+
+/// Is there a real `{expr}` hole in this decoded literal? `{{`/`}}` are escaped
+/// braces and do not count. Used where a hole is not allowed (a `const`).
+fn text_has_hole(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'{' if i + 1 < b.len() && b[i + 1] == b'{' => i += 2,
+            b'}' if i + 1 < b.len() && b[i + 1] == b'}' => i += 2,
+            b'{' => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Turn `{{`/`}}` into single braces in a literal with no holes — the same
+/// unescaping the interpolation path does to its literal chunks, for the one
+/// place that keeps a raw `TextLit` of its own (a `const`).
+fn unescape_braces(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'{' if i + 1 < b.len() && b[i + 1] == b'{' => {
+                out.push('{');
+                i += 2;
+            }
+            b'}' if i + 1 < b.len() && b[i + 1] == b'}' => {
+                out.push('}');
+                i += 2;
+            }
+            _ => {
+                let start = i;
+                while i < b.len() && b[i] != b'{' && b[i] != b'}' {
+                    i += 1;
+                }
+                if i == start {
+                    // A lone brace with no partner: keep it, as this path is
+                    // only reached for text that `text_has_hole` said has none.
+                    out.push(b[i] as char);
+                    i += 1;
+                } else {
+                    out.push_str(&s[start..i]);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Parse one hole's text as a full expression. The hole is re-lexed on its own,
+/// so its errors carry the literal's line rather than the sub-lex's line 1, and
+/// every token must belong to the single expression: a leftover `:` is a format
+/// spec (reserved, not yet supported) and anything else is a syntax error,
+/// both said against the hole so they cannot mis-parse.
+fn parse_hole(text: &str, line: usize) -> Result<Expr, ParseError> {
+    let shown = text.trim();
+    let toks = lex(text).map_err(|e| ParseError {
+        line,
+        msg: format!("in the interpolation hole `{{{shown}}}`: {}", e.msg),
+    })?;
+    let mut sub = Parser { toks, pos: 0 };
+    let e = sub.expr().map_err(|err| ParseError {
+        line,
+        msg: format!("in the interpolation hole `{{{shown}}}`: {}", err.msg),
+    })?;
+    match sub.peek() {
+        Tok::Eof => Ok(e),
+        Tok::Colon => Err(ParseError {
+            line,
+            msg: format!("format specs like `{{{shown}:...}}` are not supported yet"),
+        }),
+        other => Err(ParseError {
+            line,
+            msg: format!(
+                "unexpected {other:?} after the expression in the interpolation hole `{{{shown}}}`"
+            ),
+        }),
+    }
+}
+
+/// Split a decoded literal into its interpolation pieces: literal chunks as
+/// `TextLit`, holes as `ToText`. Always yields at least one piece (the empty
+/// string is one empty `TextLit`), so the fold that follows never sees nothing.
+fn split_interp(s: &str, line: usize) -> Result<Vec<Expr>, ParseError> {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut pieces: Vec<Expr> = Vec::new();
+    let mut lit = String::new();
+    let mut i = 0;
+    while i < n {
+        match b[i] {
+            b'{' if i + 1 < n && b[i + 1] == b'{' => {
+                lit.push('{');
+                i += 2;
+            }
+            b'}' if i + 1 < n && b[i + 1] == b'}' => {
+                lit.push('}');
+                i += 2;
+            }
+            b'}' => {
+                return Err(ParseError {
+                    line,
+                    msg: "a lone `}` in text — write `}}` for a literal brace".into(),
+                })
+            }
+            b'{' => {
+                if !lit.is_empty() {
+                    pieces.push(Expr::TextLit(std::mem::take(&mut lit)));
+                }
+                // Walk to the `}` that closes this hole, counting nested braces
+                // so a dict literal inside the expression balances.
+                let start = i + 1;
+                let mut depth = 1usize;
+                let mut j = start;
+                while j < n {
+                    match b[j] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                if depth != 0 {
+                    return Err(ParseError {
+                        line,
+                        msg: "an interpolation hole is missing its closing `}`".into(),
+                    });
+                }
+                let hole = &s[start..j];
+                if hole.trim().is_empty() {
+                    return Err(ParseError {
+                        line,
+                        msg: "an empty interpolation hole `{}` — put an expression between the braces"
+                            .into(),
+                    });
+                }
+                let expr = parse_hole(hole, line)?;
+                pieces.push(Expr::ToText {
+                    value: Box::new(expr),
+                    hole: hole.trim().to_string(),
+                });
+                i = j + 1;
+            }
+            _ => {
+                // A run of ordinary bytes up to the next brace. Braces are ASCII
+                // and never a UTF-8 continuation byte, so slicing at one is
+                // always a char boundary.
+                let start = i;
+                while i < n && b[i] != b'{' && b[i] != b'}' {
+                    i += 1;
+                }
+                lit.push_str(&s[start..i]);
+            }
+        }
+    }
+    if !lit.is_empty() || pieces.is_empty() {
+        pieces.push(Expr::TextLit(lit));
+    }
+    Ok(pieces)
+}
+
+/// Desugar a decoded text literal: an all-literal string stays one `TextLit`
+/// (only `{{`/`}}` unescaped); a string with holes becomes the left-folded
+/// concat chain — `concat(concat(chunk0, ToText(h1)), chunk2)` — that a hand
+/// written program would spell with `concat` and `int_to_text`.
+fn interpolate(s: &str, line: usize) -> Result<Expr, ParseError> {
+    let pieces = split_interp(s, line)?;
+    let mut it = pieces.into_iter();
+    let mut acc = it.next().expect("split_interp yields at least one piece");
+    for p in it {
+        acc = Expr::Call {
+            cmd: "concat".to_string(),
+            args: vec![acc, p],
+        };
+    }
+    Ok(acc)
 }
 
 impl Parser {
@@ -268,6 +549,10 @@ impl Parser {
                     match self.peek() {
                         Tok::Comma => {
                             self.bump();
+                            // A single trailing comma is allowed: `sub f(a: int,)`.
+                            if matches!(self.peek(), Tok::RParen) {
+                                break;
+                            }
                         }
                         Tok::RParen => break,
                         other => {
@@ -372,6 +657,10 @@ impl Parser {
                 match self.peek() {
                     Tok::Comma => {
                         self.bump();
+                        // A single trailing comma is allowed: `dll f(a: int,)`.
+                        if matches!(self.peek(), Tok::RParen) {
+                            break;
+                        }
                     }
                     Tok::RParen => break,
                     other => {
@@ -646,7 +935,16 @@ impl Parser {
                     "constant `{name}`: `-` may only precede a number"
                 ))
             }
-            Tok::Str(s) => (Expr::TextLit(s), Ty::Text),
+            // A constant is a literal, so a hole — whose value is only known
+            // when the program runs — is refused here, where the message can
+            // say so. `{{`/`}}` are still literal braces and are kept.
+            Tok::Str(s) if text_has_hole(&s) => {
+                return self.err(format!(
+                    "constant `{name}` is a literal; string interpolation `{{...}}` needs \
+                     values known only when the program runs"
+                ))
+            }
+            Tok::Str(s) => (Expr::TextLit(unescape_braces(&s)), Ty::Text),
             Tok::True => (Expr::BoolLit(true), Ty::Bool),
             Tok::False => (Expr::BoolLit(false), Ty::Bool),
             other => {
@@ -949,72 +1247,89 @@ impl Parser {
     /// A statement starting with an identifier: assignment or property-set.
     fn stmt_ident(&mut self) -> Result<Stmt, ParseError> {
         let start = self.pos;
+        // `increment x` / `decrement x` are soft keywords: the word is the
+        // statement only when a target name follows it. `increment = 5` (an
+        // assignment to a variable named `increment`), `increment[0] = ...` and
+        // every other spelling stay ordinary, because there the next token is
+        // not the start of a target name. Both desugar to `target = target ± 1`
+        // on any place a compound assignment reaches.
+        if matches!(self.peek(), Tok::Ident(w) if w == "increment" || w == "decrement")
+            && matches!(self.peek_at(1), Tok::Ident(_))
+        {
+            let up = matches!(self.peek(), Tok::Ident(w) if w == "increment");
+            self.bump(); // the `increment` / `decrement` keyword
+            let target = self.ident("the name to increment or decrement")?;
+            let lv = self.parse_lvalue(target)?;
+            let op = if up { BinOp::Add } else { BinOp::Sub };
+            let value = Expr::Bin(op, Box::new(lv.read()), Box::new(Expr::IntLit(1)));
+            let kind = lv.write(value);
+            return self.finish_simple(kind, start);
+        }
         let name = self.ident("variable or component name")?;
+        let lv = self.parse_lvalue(name)?;
+        // `=` or a compound assignment (`+= -= *= /= mod= &=`).
+        let Some(op) = self.assign_op() else {
+            return self.err(format!(
+                "expected `=`, a compound assignment (`+=`, `-=`, `*=`, `/=`, `mod=`, `&=`), \
+                 `[` (element) or `.` (property), found {:?}",
+                self.peek()
+            ));
+        };
+        let rhs = self.expr()?;
+        let value = apply_assign_op(op, lv.read(), rhs);
+        let kind = lv.write(value);
+        self.finish_simple(kind, start)
+    }
+
+    /// Parse an assignment target, with the leading `name` already read: a bare
+    /// variable, one element (`xs[i]`), one property (`c.p`), or a multi-step
+    /// path into a c-record (`r.pt.x`, `r.rgb[3]`). The result carries enough to
+    /// build both a *read* of the target (a compound assignment's left operand)
+    /// and the *write* statement — so `x = e`, `x += e` and `increment x` all
+    /// reach the target through this one parser.
+    fn parse_lvalue(&mut self, name: String) -> Result<Lvalue, ParseError> {
         match self.peek() {
             Tok::LBracket => {
                 self.bump();
                 let index = self.expr()?;
                 self.expect(&Tok::RBracket, "`]` after the index")?;
-                // `xs[i][j] = v` / `xs[i].f = v`: the target is a path, not one
-                // step, so hand the rest to the path form.
+                // `xs[i][j]` / `xs[i].f`: more than one step is a path.
                 if matches!(self.peek(), Tok::Dot | Tok::LBracket) {
                     let base = Expr::Index {
                         base: Box::new(Expr::Var(name)),
                         index: Box::new(index),
                     };
-                    return self.stmt_set_place(base, start);
+                    return Ok(Lvalue::Place(self.parse_place_tail(base)?));
                 }
-                self.expect(&Tok::Eq, "`=` in an element assignment")?;
-                let value = self.expr()?;
-                self.expect(&Tok::Newline, "newline after assignment")?;
-                Ok(self.finish(
-                    StmtKind::SetIndex { name, index, value },
-                    start,
-                ))
-            }
-            Tok::Eq => {
-                self.bump();
-                let value = self.expr()?;
-                self.expect(&Tok::Newline, "newline after assignment")?;
-                Ok(self.finish(StmtKind::Assign { name, value }, start))
+                Ok(Lvalue::Index { name, index })
             }
             Tok::Dot => {
                 self.bump();
                 let property = self.ident("property name")?;
-                // `r.pt.x = v` / `r.rgb[3] = v`: everything past the first step
-                // is a path into a c-record, which `SetProperty` has no room
-                // for. One step stays exactly as it was — that is the form that
-                // also reaches a heap record and a component property.
+                // `r.pt.x` / `r.rgb[3]`: everything past the first step is a
+                // path into a c-record. One step stays the form that also reaches
+                // a heap record and a component property.
                 if matches!(self.peek(), Tok::Dot | Tok::LBracket) {
                     let base = Expr::GetProperty {
                         component: name,
                         property,
                     };
-                    return self.stmt_set_place(base, start);
+                    return Ok(Lvalue::Place(self.parse_place_tail(base)?));
                 }
-                self.expect(&Tok::Eq, "`=` in property assignment")?;
-                let value = self.expr()?;
-                self.expect(&Tok::Newline, "newline after property assignment")?;
-                Ok(self.finish(StmtKind::SetProperty {
+                Ok(Lvalue::Property {
                     component: name,
                     property,
-                    value,
-                }, start))
+                })
             }
-            other => self.err(format!(
-                "expected `=` (assignment), `[` (element) or `.` (property) after `{name}`, \
-                 found {other:?}"
-            )),
+            _ => Ok(Lvalue::Var(name)),
         }
     }
 
-    /// The rest of a multi-step assignment target: `.field` and `[index]`
-    /// steps, then `=` and the value. `base` is the first step, already read.
-    ///
-    /// The place is built as the very `Expr` a *read* of it would be, so the
-    /// checker and the backend have one shape to handle rather than a mirror
-    /// grammar for the left-hand side.
-    fn stmt_set_place(&mut self, base: Expr, start: usize) -> Result<Stmt, ParseError> {
+    /// The `.field` / `[index]` steps of a multi-step target after its first
+    /// step `base`, built as the very `Expr` a read of it would be — so the
+    /// checker and backend have one shape to handle, not a mirror grammar for
+    /// the left-hand side.
+    fn parse_place_tail(&mut self, base: Expr) -> Result<Expr, ParseError> {
         let mut place = base;
         loop {
             match self.peek() {
@@ -1038,10 +1353,67 @@ impl Parser {
                 _ => break,
             }
         }
-        self.expect(&Tok::Eq, "`=` in an assignment")?;
-        let value = self.expr()?;
-        self.expect(&Tok::Newline, "newline after assignment")?;
-        Ok(self.finish(StmtKind::SetPlace { place, value }, start))
+        Ok(place)
+    }
+
+    /// Read an assignment operator in target position: a plain `=`, or one of
+    /// the compound forms. `None` when the next token is not one, so the caller
+    /// makes its own diagnostic. `mod=` is spelled with the word `mod` (there is
+    /// no `mod` token), recognised only here — a variable named `mod` is still
+    /// assignable with the two tokens `mod =`.
+    fn assign_op(&mut self) -> Option<AssignOp> {
+        if matches!(self.peek(), Tok::Ident(w) if w == "mod") && matches!(self.peek_at(1), Tok::Eq)
+        {
+            self.bump(); // `mod`
+            self.bump(); // `=`
+            return Some(AssignOp::Bin(BinOp::Rem));
+        }
+        let op = match self.peek() {
+            Tok::Eq => AssignOp::Plain,
+            Tok::PlusEq => AssignOp::Bin(BinOp::Add),
+            Tok::MinusEq => AssignOp::Bin(BinOp::Sub),
+            Tok::StarEq => AssignOp::Bin(BinOp::Mul),
+            Tok::SlashEq => AssignOp::Bin(BinOp::Div),
+            Tok::AmpEq => AssignOp::Concat,
+            _ => return None,
+        };
+        self.bump();
+        Some(op)
+    }
+
+    /// End a simple statement (call, assignment, return, increment): consume the
+    /// trailing newline, or fold a one-line `STMT if COND` suffix into an
+    /// ordinary `if COND \n STMT \n end`. The block `if` never reaches here, so
+    /// it is untouched.
+    fn finish_simple(&mut self, kind: StmtKind, start: usize) -> Result<Stmt, ParseError> {
+        if matches!(self.peek(), Tok::If) {
+            // The statement, spanning up to the `if`, becomes the sole arm body.
+            let inner = self.finish(kind, start);
+            let if_start = self.pos;
+            self.bump(); // `if`
+            let cond = self.expr()?;
+            self.expect(&Tok::Newline, "newline after a one-line `if` condition")?;
+            return Ok(self.finish(
+                StmtKind::If {
+                    arms: vec![(cond, vec![inner])],
+                    otherwise: None,
+                },
+                if_start,
+            ));
+        }
+        match self.peek() {
+            Tok::Newline => {
+                self.bump();
+            }
+            // The final statement of a file may have no trailing newline.
+            Tok::Eof => {}
+            other => {
+                return self.err(format!(
+                    "expected a newline or a one-line `if` after the statement, found {other:?}"
+                ))
+            }
+        }
+        Ok(self.finish(kind, start))
     }
 
     fn stmt_let(&mut self, mutable: bool) -> Result<Stmt, ParseError> {
@@ -1153,16 +1525,41 @@ impl Parser {
     }
 
     /// ```text
-    /// for := "for" IDENT "=" expr "to" expr ("step" INT)? NEWLINE stmt* "end"
+    /// for := "for" "each" foreach
+    ///      | "for" IDENT "in" expr ".." expr ("step" INT)? NEWLINE stmt* "end"
+    ///      | "for" IDENT "=" expr "to" expr ("step" INT)? NEWLINE stmt* "end"
     /// ```
     ///
-    /// `to` and `step` are **soft** keywords, matched as identifiers in these
-    /// two positions only — reserving them would steal two ordinary words from
-    /// every variable and property name in the language.
+    /// Three loops share the `for` keyword. `each`, `in`, `to` and `step` are
+    /// **soft** keywords, matched as identifiers in these positions only —
+    /// reserving them would steal ordinary words from every variable and
+    /// property name in the language. The first token after `for` chooses:
+    /// `each` (before a binding name) is the for-each form, an `in` after the
+    /// loop variable is the range form, and an `=` is the original counting
+    /// loop. The two new forms are sugar — each lands on a counted loop the
+    /// language already has.
     fn stmt_for(&mut self) -> Result<Stmt, ParseError> {
         let head = self.pos;
         self.expect(&Tok::For, "`for`")?;
+
+        // `for each ELEM ... in COLL` — iterate a collection. `each` is the
+        // for-each form only when a binding name follows it, so a counting loop
+        // whose variable is literally `each` (`for each = 1 to 3`) is unchanged.
+        if matches!(self.peek(), Tok::Ident(w) if w == "each")
+            && matches!(self.peek_at(1), Tok::Ident(_))
+        {
+            return self.stmt_for_each(head);
+        }
+
         let var = self.ident("loop variable name")?;
+
+        // `for i in A..B` — a range loop. `in` sits where the counting loop's
+        // `=` would, straight after the loop variable, so the two never collide;
+        // it is the same soft keyword the membership test spells.
+        if matches!(self.peek(), Tok::Ident(w) if w == "in") {
+            return self.stmt_for_range(var, head);
+        }
+
         self.expect(&Tok::Eq, "`=` after the loop variable")?;
         let start = self.expr()?;
         if !matches!(self.peek(), Tok::Ident(w) if w == "to") {
@@ -1173,31 +1570,7 @@ impl Parser {
         }
         self.bump();
         let limit = self.expr()?;
-
-        // `step K`. The step is a literal so that the loop's direction — and
-        // therefore whether it counts while `i <= limit` or `i >= limit` — is
-        // known without a run-time test.
-        let mut step = 1i64;
-        if matches!(self.peek(), Tok::Ident(w) if w == "step") {
-            self.bump();
-            let line = self.line();
-            match self.expr()? {
-                Expr::IntLit(0) => {
-                    return Err(ParseError {
-                        line,
-                        msg: "`step 0` never advances the loop variable".into(),
-                    })
-                }
-                Expr::IntLit(v) => step = v,
-                _ => {
-                    return Err(ParseError {
-                        line,
-                        msg: "`step` needs a whole-number literal, such as `step 2` or `step -1`"
-                            .into(),
-                    })
-                }
-            }
-        }
+        let step = self.parse_step()?;
         self.expect(&Tok::Newline, "newline after the loop header")?;
         let body = self.block(&[Tok::End])?;
         self.expect(&Tok::End, "`end`")?;
@@ -1210,6 +1583,113 @@ impl Parser {
                 start,
                 limit,
                 step,
+                body,
+            },
+            head,
+        ))
+    }
+
+    /// The optional `step K` closing a loop header, shared by the counting `for`
+    /// and the range loop so both read the one literal the one way. `K` is a
+    /// whole-number literal (it may be negative) so the loop's direction — and
+    /// thus whether it counts while `i <= limit` or `i >= limit` — is known
+    /// without a run-time test; `step 0` never advances and is refused.
+    fn parse_step(&mut self) -> Result<i64, ParseError> {
+        if !matches!(self.peek(), Tok::Ident(w) if w == "step") {
+            return Ok(1);
+        }
+        self.bump();
+        let line = self.line();
+        match self.expr()? {
+            Expr::IntLit(0) => Err(ParseError {
+                line,
+                msg: "`step 0` never advances the loop variable".into(),
+            }),
+            Expr::IntLit(v) => Ok(v),
+            _ => Err(ParseError {
+                line,
+                msg: "`step` needs a whole-number literal, such as `step 2` or `step -1`".into(),
+            }),
+        }
+    }
+
+    /// `for i in A..B [step S]` — sugar for the counting `for i = A to B
+    /// [step S]`, and desugared to exactly that: `StmtKind::For`. Both bounds
+    /// are inclusive and evaluated once, `break`/`continue` behave, and the
+    /// step sign is a compile-time fact — every one of those is the counting
+    /// loop's own behaviour, because this *is* the counting loop under a second
+    /// spelling. The bounds count with `int`, the type that loop counts with.
+    /// `..` has already fused in the lexer, so the lower bound's expression ends
+    /// cleanly at it rather than reading the first dot as a field access.
+    fn stmt_for_range(&mut self, var: String, head: usize) -> Result<Stmt, ParseError> {
+        self.bump(); // `in`
+        let start = self.expr()?;
+        self.expect(&Tok::DotDot, "`..` between the range bounds, as in `1..10`")?;
+        let limit = self.expr()?;
+        let step = self.parse_step()?;
+        self.expect(&Tok::Newline, "newline after the loop header")?;
+        let body = self.block(&[Tok::End])?;
+        self.expect(&Tok::End, "`end`")?;
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(self.finish(
+            StmtKind::For {
+                var,
+                start,
+                limit,
+                step,
+                body,
+            },
+            head,
+        ))
+    }
+
+    /// `for each ELEM [, VALUE] [at IDX] in COLL NEWLINE ... end`, with `each`
+    /// already peeked. The element binding is required; a `, VALUE` second name
+    /// is the dictionary two-binding form (the key is `ELEM`, the value is
+    /// `VALUE`); an `at IDX` binds the 1-based position. `at` and `in` are soft
+    /// keywords in these slots only. What the collection is — and therefore what
+    /// each binding's type is — is the checker's to work out; the parser only
+    /// records the names and the collection expression.
+    fn stmt_for_each(&mut self, head: usize) -> Result<Stmt, ParseError> {
+        self.bump(); // `each`
+        let elem = self.ident("the element binding name after `for each`")?;
+        let value = if matches!(self.peek(), Tok::Comma) {
+            self.bump();
+            Some(self.ident("the value binding name after `,`")?)
+        } else {
+            None
+        };
+        let index = if matches!(self.peek(), Tok::Ident(w) if w == "at") {
+            self.bump();
+            Some(self.ident("the index binding name after `at`")?)
+        } else {
+            None
+        };
+        match self.peek() {
+            Tok::Ident(w) if w == "in" => {
+                self.bump();
+            }
+            other => {
+                return self.err(format!(
+                    "expected `in` before the collection in `for each`, found {other:?}"
+                ))
+            }
+        }
+        let coll = self.expr()?;
+        self.expect(&Tok::Newline, "newline after the `for each` header")?;
+        let body = self.block(&[Tok::End])?;
+        self.expect(&Tok::End, "`end`")?;
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(self.finish(
+            StmtKind::ForEach {
+                elem,
+                value,
+                index,
+                coll,
                 body,
             },
             head,
@@ -1238,15 +1718,15 @@ impl Parser {
     fn stmt_return(&mut self) -> Result<Stmt, ParseError> {
         let start = self.pos;
         self.expect(&Tok::Return, "`return`")?;
-        let value = if matches!(self.peek(), Tok::Newline | Tok::Eof) {
+        // No value when the statement ends right here — a newline, EOF, or the
+        // start of a one-line `if` suffix (`return if done`), where the `if` is
+        // the suffix and not the returned expression.
+        let value = if matches!(self.peek(), Tok::Newline | Tok::Eof | Tok::If) {
             None
         } else {
             Some(self.expr()?)
         };
-        if matches!(self.peek(), Tok::Newline) {
-            self.bump();
-        }
-        Ok(self.finish(StmtKind::Return { value }, start))
+        self.finish_simple(StmtKind::Return { value }, start)
     }
 
     fn stmt_call(&mut self) -> Result<Stmt, ParseError> {
@@ -1257,17 +1737,15 @@ impl Parser {
         // `call add(1, 2)` discards a subroutine's.
         if matches!(self.peek(), Tok::Ident(w) if w == "through") {
             let (callee, args, ret, conv) = self.call_through_tail()?;
-            self.expect(&Tok::Newline, "newline after call")?;
-            return Ok(self.finish(
+            return self.finish_simple(
                 StmtKind::CallThrough { callee, args, ret, conv },
                 start,
-            ));
+            );
         }
         let cmd = self.ident("command name")?;
         self.expect(&Tok::LParen, "`(`")?;
         let args = self.arg_list()?;
-        self.expect(&Tok::Newline, "newline after call")?;
-        Ok(self.finish(StmtKind::Call { cmd, args }, start))
+        self.finish_simple(StmtKind::Call { cmd, args }, start)
     }
 
     /// The whole of `through <callee>(args...)[: type][convention]`, with the
@@ -1347,6 +1825,10 @@ impl Parser {
                 match self.peek() {
                     Tok::Comma => {
                         self.bump();
+                        // A single trailing comma is allowed: `f(a, b,)`.
+                        if matches!(self.peek(), Tok::RParen) {
+                            break;
+                        }
                     }
                     Tok::RParen => break,
                     other => return self.err(format!("expected `,` or `)`, found {other:?}")),
@@ -1389,31 +1871,87 @@ impl Parser {
         self.cmp_expr()
     }
 
-    /// Comparisons are **non-associative**: `a < b < c` is a compile error
-    /// rather than `(a < b) < c`, which would silently compare a bool to a
-    /// number and give a confidently wrong answer.
+    /// A comparison, a chained comparison, or a membership test — the three
+    /// things that turn operands into a truth value at this precedence.
+    ///
+    /// `a < b` is a plain `Cmp`. `1 <= x <= 12` — two comparisons sharing the
+    /// middle — is a `Chain`, the mathematical reading (`1 <= x and x <= 12`,
+    /// with `x` evaluated once); a *third* comparison has no such reading and is
+    /// still refused. `e in xs` and `e not in xs` are membership tests.
     fn cmp_expr(&mut self) -> Result<Expr, ParseError> {
         let lhs = self.bor_expr()?;
-        let op = match self.peek() {
-            Tok::Eq => CmpOp::Eq,
-            Tok::Ne => CmpOp::Ne,
-            Tok::Lt => CmpOp::Lt,
-            Tok::Le => CmpOp::Le,
-            Tok::Gt => CmpOp::Gt,
-            Tok::Ge => CmpOp::Ge,
-            _ => return Ok(lhs),
-        };
-        self.bump();
-        let rhs = self.bor_expr()?;
-        if matches!(
-            self.peek(),
-            Tok::Eq | Tok::Ne | Tok::Lt | Tok::Le | Tok::Gt | Tok::Ge
-        ) {
-            return self.err(
-                "comparisons cannot be chained; write `a < b and b < c` instead of `a < b < c`",
-            );
+        // `e in xs` / `k in d` / `sub in text`, and each with `not in`. `in` is a
+        // soft keyword, read as an operator only here where an operand has just
+        // been parsed; a variable or field named `in` is untouched elsewhere.
+        if let Some(negated) = self.membership_op() {
+            let haystack = self.bor_expr()?;
+            return Ok(Expr::In {
+                needle: Box::new(lhs),
+                haystack: Box::new(haystack),
+                negated,
+            });
         }
-        Ok(Expr::Cmp(op, Box::new(lhs), Box::new(rhs)))
+        let op = match self.cmp_op() {
+            Some(op) => op,
+            None => return Ok(lhs),
+        };
+        let mid = self.bor_expr()?;
+        // A second comparison sharing this middle operand is a chain. Beyond
+        // that there is no unambiguous reading, so a third one stays an error.
+        if let Some(op2) = self.cmp_op() {
+            let hi = self.bor_expr()?;
+            if self.cmp_op_peek().is_some() {
+                return self.err(
+                    "only two comparisons can be chained (as in `1 <= x <= 12`); \
+                     write the rest with `and`",
+                );
+            }
+            return Ok(Expr::Chain {
+                lo: Box::new(lhs),
+                lo_op: op,
+                mid: Box::new(mid),
+                hi_op: op2,
+                hi: Box::new(hi),
+            });
+        }
+        Ok(Expr::Cmp(op, Box::new(lhs), Box::new(mid)))
+    }
+
+    /// The comparison operator at the cursor, without consuming it.
+    fn cmp_op_peek(&self) -> Option<CmpOp> {
+        match self.peek() {
+            Tok::Eq => Some(CmpOp::Eq),
+            Tok::Ne => Some(CmpOp::Ne),
+            Tok::Lt => Some(CmpOp::Lt),
+            Tok::Le => Some(CmpOp::Le),
+            Tok::Gt => Some(CmpOp::Gt),
+            Tok::Ge => Some(CmpOp::Ge),
+            _ => None,
+        }
+    }
+
+    /// The comparison operator at the cursor, consuming it if present.
+    fn cmp_op(&mut self) -> Option<CmpOp> {
+        let op = self.cmp_op_peek()?;
+        self.bump();
+        Some(op)
+    }
+
+    /// `in` / `not in` in operator position: `Some(false)` for `in`, `Some(true)`
+    /// for `not in`, `None` for neither. A soft keyword, like the bitwise words.
+    fn membership_op(&mut self) -> Option<bool> {
+        if matches!(self.peek(), Tok::Ident(w) if w == "in") {
+            self.bump();
+            return Some(false);
+        }
+        if matches!(self.peek(), Tok::Not)
+            && matches!(self.peek_at(1), Tok::Ident(w) if w == "in")
+        {
+            self.bump(); // `not`
+            self.bump(); // `in`
+            return Some(true);
+        }
+        None
     }
 
     /// The word an infix operator is spelled with, when the next token is one.
@@ -1592,6 +2130,10 @@ impl Parser {
                     match self.peek() {
                         Tok::Comma => {
                             self.bump();
+                            // A single trailing comma is allowed: `[a, b,]`.
+                            if matches!(self.peek(), Tok::RBracket) {
+                                break;
+                            }
                         }
                         Tok::RBracket => break,
                         other => {
@@ -1622,6 +2164,11 @@ impl Parser {
                     match self.peek() {
                         Tok::Comma => {
                             self.bump();
+                            // A single trailing comma is allowed: `{"a": 1,}`.
+                            self.skip_newlines();
+                            if matches!(self.peek(), Tok::RBrace) {
+                                break;
+                            }
                         }
                         Tok::RBrace => break,
                         other => {
@@ -1655,13 +2202,16 @@ impl Parser {
                 conv,
             });
         }
+        // The line of the primary token, captured before it is consumed, so an
+        // interpolation error points at the literal's own line.
+        let tok_line = self.line();
         match self.bump() {
             Tok::True => Ok(Expr::BoolLit(true)),
             Tok::False => Ok(Expr::BoolLit(false)),
             Tok::Int(v) => Ok(Expr::IntLit(v)),
             Tok::Bits(v) => Ok(Expr::BitsLit(v)),
             Tok::Float(v) => Ok(Expr::DoubleLit(v)),
-            Tok::Str(s) => Ok(Expr::TextLit(s)),
+            Tok::Str(s) => interpolate(&s, tok_line),
             Tok::Ident(name) => {
                 // `address of NAME` — the address of a subroutine as a `ptr`.
                 // `address` is a *soft* keyword: it means this only when the
@@ -1713,6 +2263,11 @@ impl Parser {
                         match self.peek() {
                             Tok::Comma => {
                                 self.bump();
+                                // A single trailing comma is allowed:
+                                // `point(x: 1, y: 2,)`.
+                                if matches!(self.peek(), Tok::RParen) {
+                                    break;
+                                }
                             }
                             Tok::RParen => break,
                             other => {
@@ -2139,6 +2694,123 @@ mod tests {
             parse("module m\nsub main\n  var xs: int[] = [1]\n  xs[0] = 2\nend\n").unwrap();
         let s = m.subs().next().unwrap();
         assert!(matches!(s.body[1].kind, StmtKind::SetIndex { .. }));
+    }
+
+    // --- 0.8.0 assignment and operator shorthands ---------------------------
+
+    fn first_body(src: &str) -> Vec<Stmt> {
+        parse(src).unwrap().subs().next().unwrap().body.clone()
+    }
+
+    #[test]
+    fn compound_assignment_desugars_to_the_plain_assignment() {
+        let b = first_body("module m\nsub main\n  var x: int = 0\n  x += 2\nend\n");
+        match &b[1].kind {
+            StmtKind::Assign { name, value } => {
+                assert_eq!(name, "x");
+                // `x += 2` is exactly `x = x + 2`.
+                assert_eq!(
+                    *value,
+                    Expr::Bin(
+                        BinOp::Add,
+                        Box::new(Expr::Var("x".into())),
+                        Box::new(Expr::IntLit(2))
+                    )
+                );
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mod_assign_and_amp_assign_desugar() {
+        let b = first_body(
+            "module m\nsub main\n  var x: int = 9\n  x mod= 4\n  var s: text = \"a\"\n  s &= \"b\"\nend\n",
+        );
+        assert!(matches!(
+            &b[1].kind,
+            StmtKind::Assign { value: Expr::Bin(BinOp::Rem, ..), .. }
+        ));
+        // `s &= "b"` is `s = concat(s, "b")`.
+        match &b[3].kind {
+            StmtKind::Assign { value: Expr::Call { cmd, args }, .. } => {
+                assert_eq!(cmd, "concat");
+                assert_eq!(args.len(), 2);
+            }
+            other => panic!("expected concat call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_assignment_reaches_a_property_and_a_path() {
+        let b = first_body(
+            "module m\nsub main\n  label1.text &= \"!\"\n  r.pt.x += 1\nend\n",
+        );
+        assert!(matches!(&b[0].kind, StmtKind::SetProperty { .. }));
+        assert!(matches!(&b[1].kind, StmtKind::SetPlace { .. }));
+    }
+
+    #[test]
+    fn increment_and_decrement_desugar_and_stay_soft_keywords() {
+        let b = first_body(
+            "module m\nsub main\n  var n: int = 0\n  increment n\n  decrement n\nend\n",
+        );
+        assert!(matches!(
+            &b[1].kind,
+            StmtKind::Assign { value: Expr::Bin(BinOp::Add, ..), .. }
+        ));
+        assert!(matches!(
+            &b[2].kind,
+            StmtKind::Assign { value: Expr::Bin(BinOp::Sub, ..), .. }
+        ));
+        // `increment` is a soft keyword: assigning to a variable named
+        // `increment` still works, because there `=` follows the name.
+        let b = first_body("module m\nsub main\n  var increment: int = 0\n  increment = 5\nend\n");
+        assert!(matches!(&b[1].kind, StmtKind::Assign { name, .. } if name == "increment"));
+    }
+
+    #[test]
+    fn a_chained_comparison_is_a_chain() {
+        let b = first_body("module m\nsub main\n  var x: int = 5\n  if 1 <= x <= 12\n    return\n  end\nend\n");
+        let StmtKind::If { arms, .. } = &b[1].kind else { panic!() };
+        assert!(matches!(arms[0].0, Expr::Chain { .. }));
+        // Three comparisons in a row still have no single reading.
+        assert!(parse("module m\nsub main\n  if 1 < 2 < 3 < 4\n    return\n  end\nend\n").is_err());
+    }
+
+    #[test]
+    fn membership_parses_and_in_stays_a_name() {
+        let b = first_body("module m\nsub main\n  var xs: int[] = [1]\n  if 1 in xs\n    return\n  end\nend\n");
+        let StmtKind::If { arms, .. } = &b[1].kind else { panic!() };
+        assert!(matches!(arms[0].0, Expr::In { negated: false, .. }));
+        let b = first_body("module m\nsub main\n  var xs: int[] = [1]\n  if 9 not in xs\n    return\n  end\nend\n");
+        let StmtKind::If { arms, .. } = &b[1].kind else { panic!() };
+        assert!(matches!(arms[0].0, Expr::In { negated: true, .. }));
+        // `in` is a soft keyword: a variable named `in` still parses.
+        assert!(parse("module m\nsub main\n  var in: int = 3\n  call print_int(in)\nend\n").is_ok());
+    }
+
+    #[test]
+    fn one_line_if_wraps_the_statement() {
+        let b = first_body("module m\nsub main\n  call print_int(1) if true\nend\n");
+        let StmtKind::If { arms, otherwise } = &b[0].kind else {
+            panic!("expected the suffix to become an if")
+        };
+        assert!(otherwise.is_none());
+        assert_eq!(arms.len(), 1);
+        assert!(matches!(arms[0].1[0].kind, StmtKind::Call { .. }));
+        // `return if COND` reads the `if` as the suffix, not the return value.
+        let b = first_body("module m\nsub f(): int\n  return if false\n  return 1\nend\n");
+        assert!(matches!(&b[0].kind, StmtKind::If { .. }));
+    }
+
+    #[test]
+    fn decimal_underscores_and_trailing_commas_parse() {
+        let b = first_body("module m\nsub main\n  var x: int = 1_000_000\n  var xs: int[] = [1, 2,]\n  call print_int(count(xs),)\nend\n");
+        assert!(matches!(&b[0].kind, StmtKind::Let { value: Expr::IntLit(1_000_000), .. }));
+        // `1_.5`, `1__0`, `5_` are all rejected by the lexer.
+        assert!(parse("module m\nsub main\n  var x: int = 1__0\nend\n").is_err());
+        assert!(parse("module m\nsub main\n  var x: int = 5_\nend\n").is_err());
     }
 
     /// The limitation is named where it is hit, rather than surfacing as a

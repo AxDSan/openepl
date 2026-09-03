@@ -145,6 +145,7 @@ list.
 | `height` | int |
 | `anchors` | text |
 | `color` | text |
+| `multiline` | bool |
 
 **Events:** `change`
 

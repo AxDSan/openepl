@@ -1289,6 +1289,37 @@ int oe_ui_set(OpenEPL_Widget w, const char* property, const char* value) {
     Rml::Element* e = resolve(w);
     if (!e || !property || !value) return 1;
 
+    /* An editbox is an <input> (single line) or a <textarea> (multi-line); the
+     * tag cannot change after creation, so turning `multiline` on or off
+     * replaces the element in place — its value, class and geometry carried
+     * over. Properties are set before events are bound (the backend's order),
+     * so no handler is lost by swapping here. */
+    if (std::strcmp(property, "multiline") == 0 &&
+        g.type_of.count(w) && g.type_of[w] == "editbox") {
+        const bool on = std::strcmp(value, "true") == 0 || std::strcmp(value, "1") == 0;
+        const bool is_area = e->GetTagName() == "textarea";
+        if (on == is_area) return 0;   /* already the right shape */
+        Rml::Element* parent = e->GetParentNode();
+        if (!parent) return 1;
+        Rml::ElementPtr fresh = g.document->CreateElement(on ? "textarea" : "input");
+        if (!fresh) return 1;
+        if (!on) fresh->SetAttribute("type", Rml::String("text"));
+        /* Carry the class (its styling) and the current text across. */
+        fresh->SetAttribute("class", e->GetAttribute<Rml::String>("class", "oe-input"));
+        Rml::String v;
+        if (auto* oldc = dynamic_cast<Rml::ElementFormControl*>(e)) v = oldc->GetValue();
+        /* Geometry (left/top/width/height) was set as inline properties before
+         * `multiline`, so carry every inline property across or the swapped
+         * control loses its place and size. */
+        const auto inl = e->GetLocalStyleProperties();
+        Rml::Element* r = fresh.get();                 /* ReplaceChild returns the OLD node */
+        parent->ReplaceChild(std::move(fresh), e);
+        for (const auto& kv : inl) r->SetProperty(kv.first, kv.second);
+        if (auto* newc = dynamic_cast<Rml::ElementFormControl*>(r)) newc->SetValue(v);
+        g.widgets[(size_t)w - 1] = r;                  /* the handle now names the new element */
+        return 0;
+    }
+
     /* Pointing a control at an action, by the action's name. The form is built
      * before the module-level components, so the action named here usually does
      * not exist yet and the binding waits for it. */

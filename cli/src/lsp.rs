@@ -806,6 +806,12 @@ const KEYWORDS: &[&str] = &[
     // operator only in operator position — so they are offered but reserve
     // nothing; `bnot` is reserved by the lexer, like `not`.
     "band", "bor", "bxor", "bnot", "shl", "shr", "ushr",
+    // The 0.8.0 shorthands. All are soft keywords the parser recognises by
+    // position — none is reserved by the lexer, so a variable may still be
+    // named for any of them. `increment`/`decrement` lead a statement; `in`
+    // does double duty (a membership test `e in xs`, and a range/`for each`
+    // bound); `each` and `at` belong to `for each x at i in xs`.
+    "increment", "decrement", "in", "each", "at",
 ];
 
 fn item(label: &str, kind: CompletionItemKind, detail: String) -> CompletionItem {

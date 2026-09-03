@@ -65,6 +65,29 @@ pub fn carray(elem: Ty, count: u32) -> Ty {
     Ty::CArray(Box::leak(Box::new(CArray { elem, count })))
 }
 
+/// The bindings a `for each` introduces over a collection of type `coll`: the
+/// element binding's type, and — for a dictionary — the value binding's type.
+/// `None` when the type cannot be iterated.
+///
+/// This is the single place those element types are decided, so the checker
+/// (which binds the names and their types) and the backend (which reads the
+/// elements out) can never disagree about what one `for each` iterates:
+///   * an array of `E` yields `E`;
+///   * a byte-set yields `int` — each byte read as `0`..`255`, the way
+///     `bytes_at` already surfaces one;
+///   * a text yields a one-character `text` (`substr` cut to length 1);
+///   * a dictionary of `V` yields its key (`text`) as the element and `V` as
+///     the value, so the two-binding `for each k, v in d` reads both.
+pub fn foreach_elem_types(coll: Ty) -> Option<(Ty, Option<Ty>)> {
+    Some(match coll {
+        Ty::Array(e) => (e.ty(), None),
+        Ty::Bytes => (Ty::Int, None),
+        Ty::Text => (Ty::Text, None),
+        Ty::Dict(v) => (Ty::Text, Some(v.ty())),
+        _ => return None,
+    })
+}
+
 /// What an array holds.  A separate, deliberately small enum rather than a
 /// `Box<Ty>`: arrays of arrays are out of scope, and spelling that in the type
 /// itself means the checker never has to discover it — `Ty` also stays `Copy`,
@@ -542,8 +565,52 @@ pub enum Expr {
     GetProperty { component: String, property: String },
     /// `true` / `false`.
     BoolLit(bool),
-    /// A comparison; yields `bool`. Non-associative: `a < b < c` is rejected.
+    /// A comparison; yields `bool`. A bare `a < b`. Two comparisons that share
+    /// a middle — `1 <= x <= 12` — parse as `Chain`, not as this nested twice.
     Cmp(CmpOp, Box<Expr>, Box<Expr>),
+    /// `lo <op1> mid <op2> hi` — two comparisons sharing the middle operand,
+    /// the mathematical reading of `1 <= x <= 12`. It is sugar for
+    /// `lo <op1> mid and mid <op2> hi`, with one difference the plain
+    /// conjunction cannot express: `mid` is evaluated **once**, so a call in the
+    /// middle runs a single time. The backend binds `lo` and `mid` to temps in
+    /// that order and then lowers exactly the conjunction; `hi` stays lazy
+    /// behind the `and`'s short circuit. `Cmp`'s rules type each half.
+    Chain {
+        lo: Box<Expr>,
+        lo_op: CmpOp,
+        mid: Box<Expr>,
+        hi_op: CmpOp,
+        hi: Box<Expr>,
+    },
+    /// `e in xs`, `k in d`, `sub in text` (and each with `not in`) — a
+    /// membership test yielding `bool`. It is sugar that lowers, once the
+    /// checker knows what `haystack` is, to the command that already answers the
+    /// question: `index_of(xs, e) <> 0` for an array (0 is "absent", positions
+    /// counting from 1), `dict_has(d, k)` for a dictionary, and
+    /// `find(text, sub) <> 0` for a substring. `not in` wraps the result in
+    /// `not`. `find` rather than the `text` library's `contains`, so membership
+    /// needs no `use`.
+    In {
+        needle: Box<Expr>,
+        haystack: Box<Expr>,
+        negated: bool,
+    },
+    /// One hole of a string interpolation — `{expr}` inside a `"..."` — turned
+    /// to `text`. It is the single piece a text literal's holes desugar to: the
+    /// literal `"Row {i} of {n}"` becomes the left-folded concat chain
+    /// `concat(concat(concat("Row ", ToText(i)), " of "), ToText(n))`, with the
+    /// literal chunks as plain `TextLit`s and each hole wrapped here. The parser
+    /// builds that chain, so this is the only new node interpolation needs; the
+    /// per-type conversion (text as-is, bool to `true`/`false`, a number through
+    /// `int_to_text`/`int64_to_text`/`double_to_text`) is the same one a
+    /// component property assignment already performs, so the backend lowers a
+    /// hole exactly as it renders `label.text = <value>`. A type with no text
+    /// form — a `ptr`, an array, a record — is a build error, and `hole` keeps
+    /// the hole's source spelling so that error can name it.
+    ToText {
+        value: Box<Expr>,
+        hole: String,
+    },
     /// `and` / `or`, short-circuiting.
     Logical(LogicalOp, Box<Expr>, Box<Expr>),
     /// `not EXPR`.
@@ -782,6 +849,33 @@ pub enum StmtKind {
         start: Expr,
         limit: Expr,
         step: i64,
+        body: Vec<Stmt>,
+    },
+    /// `for each ELEM [at IDX] in COLL` — and, for a dictionary, the two-binding
+    /// `for each KEY, VALUE in COLL`.
+    ///
+    /// It is sugar for a 1-based counted loop over the collection, but it earns
+    /// a node of its own for one reason the other sugars did not need: the
+    /// element's type is not known until `coll` is typed, so the binding cannot
+    /// be spelled with a `let` in the parser (a `let` needs its type written
+    /// out). The checker infers the binding types from the collection and the
+    /// backend lowers this to exactly the loop a hand-written `for` would — a
+    /// hidden `int` counter from 1 to the collection's length, the element read
+    /// out by index each turn — so there is no second loop semantics, only one
+    /// spelling that stands in for the counter.
+    ///
+    /// `elem` binds each element (each array item, each byte as an `int`, each
+    /// character as a one-character `text`, or each dictionary key as `text`).
+    /// `value` is the dictionary value binding of the two-binding form, `None`
+    /// otherwise. `index` is the optional `at IDX`, the 1-based position. All
+    /// three are fresh and immutable inside the body, like a `for` counter.
+    /// `coll` is evaluated once, before the first turn, so a body that grows the
+    /// collection does not lengthen the loop.
+    ForEach {
+        elem: String,
+        value: Option<String>,
+        index: Option<String>,
+        coll: Expr,
         body: Vec<Stmt>,
     },
     /// `break` — leave the innermost loop.
