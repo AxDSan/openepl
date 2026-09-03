@@ -148,7 +148,7 @@ call is checked for arity and type at build time.
 ### The shape of a declaration
 
 ```text
-dll NAME(param: type, ...): return-type from "library" as "symbol"
+dll NAME(param: type, ...): return-type from "library" as "symbol" convention
 ```
 
 - The parameter list and the `: return-type` are the same as a subroutine's. A
@@ -161,12 +161,18 @@ dll NAME(param: type, ...): return-type from "library" as "symbol"
 - `as "symbol"` overrides the exported name, for when the symbol a library
   exports is not what the program wants to call it by. It is optional; without
   it the declaration name is the symbol name.
+- `convention` — one of `stdcall`, `cdecl` or `system`, last on the line — names
+  the C calling convention. It is optional and, on every target OpenEPL builds,
+  a no-op; [Calling conventions](#calling-conventions) below says why, and why
+  `system` is the one to write on a Win32 declaration anyway.
 
 The types that cross the boundary are `int`, `int64`, `double`, `bool`, `text`
 and `ptr`. A `text` is passed as a C `char *` and a returned `char *` is copied
-into a managed text; a `ptr` is passed straight through. Passing an OpenEPL
-array, dictionary or record by value is not part of this — pass a `ptr` to the
-bytes instead.
+into a managed text; a `ptr` is passed straight through. A parameter may also be
+a [C-struct record](#c-struct-records), which passes a pointer to a real struct
+— the way a C API that takes a `RECT *` or a `MSG *` is reached. An OpenEPL
+array or dictionary, and a plain (non-`is c`) record, are runtime-owned objects
+with no by-value C shape — pass a `ptr` to bytes you laid out instead.
 
 ### A worked example
 
@@ -205,6 +211,145 @@ and run — it reaches out only when it actually makes the call. When that call
 comes and the library or the symbol cannot be found, the program stops with a
 message naming both, so a foreign call that cannot be made is a visible failure
 rather than a silent zero.
+
+## C-struct records
+
+Most real C APIs do not take a handful of scalars — they take a *struct*. A
+`RECT`, a `POINT`, a `MSG`, a `STARTUPINFO`: a block of bytes with a fixed
+layout the callee reads and writes by field. A `record` marked `is c` is exactly
+that block. It has a C memory layout — natural alignment, the padding a C
+compiler inserts — so a `dll` can be handed a pointer to a real struct instead
+of a buffer packed by hand with `ptr_write_int` at offsets counted by eye.
+
+```text
+record NAME is c
+  field: type
+  ...
+end
+```
+
+The `is c` after the name is the whole of the marker. Without it a `record` is
+unchanged: a reference to a runtime-owned object, built with `NAME(field: ...)`
+and passed by handle. With it the record is a **value** whose storage is a flat
+struct on the stack, and the two do not mix — a c-record is for crossing to C,
+a plain record for everything else.
+
+A c-record field is one of the C-representable scalars — `int`, `int64`,
+`double`, `bool`, `text` (a `char *`), `ptr` — or `byte`, a single `0`..`255`
+that a C `char`/`uint8_t` member needs and that means nothing outside a layout.
+A `bool` occupies a C `int` (four bytes), matching how a C API declares a `BOOL`
+field. Nesting a c-record inside another, or a fixed array of them, is honest C
+but not laid out yet; a field like that is a build error that says so.
+
+### A struct across the boundary
+
+A c-record is declared as a local with `var` and starts zeroed; its fields are
+read and written by name; `address of` it is the pointer a C API expects; and
+`size of` it is the struct's `sizeof`, a compile-time constant. Given a C
+library `geo` with a `Point` and a function that moves one:
+
+```c
+typedef struct { int x; int y; } Point;
+void move_point(Point *p, int dx, int dy) { p->x += dx; p->y += dy; }
+```
+
+the OpenEPL side declares the record with the same layout and the function with
+a `Point` parameter — a c-record parameter means the C prototype takes a pointer
+to that struct, and the record is passed as that pointer automatically:
+
+```openepl
+module geometry
+
+record Point is c
+  x: int
+  y: int
+end
+
+dll move_point(p: Point, dx: int, dy: int) from "geo"
+
+sub main
+  var here: Point          # a zeroed c-record local
+  here.x = 3
+  here.y = 4
+  call move_point(here, 10, 20)   # C mutates the struct through the pointer
+  call print_int(here.x)          # 13
+  call print_int(here.y)          # 24
+
+  let bytes: int64 = size of Point
+  call print_int64(bytes)         # 8 — two ints, no padding
+end
+```
+
+`move_point` writes through the pointer, and the change is visible on the next
+line: `here` is one struct, in one place, that OpenEPL and C both hold.
+
+### Passing the pointer two ways
+
+A `dll` parameter typed as the c-record — `move_point(p: Point, ...)` above —
+takes the pointer for you. The other way is to type the parameter `ptr` and pass
+`address of` the record yourself, which is what a Win32 signature reads like when
+the API is declared in terms of the handle and the out-struct:
+
+```openepl
+module window
+target sharedlib
+
+record RECT is c
+  left: int
+  top: int
+  right: int
+  bottom: int
+end
+
+dll GetWindowRect(window: ptr, rect: ptr): bool from "user32"
+
+sub width_of(window: ptr): int
+  var box: RECT
+  let ok: bool = GetWindowRect(window, address of box)
+  if not ok
+    return 0
+  end
+  return box.right - box.left
+end
+```
+
+Both forms hand C the same address — the flat storage of the record. Use the
+typed parameter when you write the declaration, the `address of` form when the
+declaration is a transcription of a C header that already says `ptr`.
+
+### Layout, padding, and `size of`
+
+The layout is the target's C ABI — the same on x86-64 Linux and x64 Windows for
+these scalar fields. A field sits at the next offset aligned to its own width,
+and the struct is padded at the end to its widest member, so a record of a
+`byte`, an `int`, a `byte` and an `int64`:
+
+```openepl
+module layout
+
+record Mixed is c
+  a: byte
+  b: int
+  c: byte
+  d: int64
+end
+
+sub main
+  call print_int64(size of Mixed)   # 24: a@0, b@4, c@8, d@16, tail-padded
+end
+```
+
+is 24 bytes, not 14 — `b` is pushed to offset 4, `d` to offset 16, exactly as C
+lays it out. `size of Mixed` reports that number, and it is the number to pass to
+`mem_alloc` or to a C API that wants the size of the struct it is being given. A
+`byte` field reads back as an `int` in `0`..`255`, the same convention
+`ptr_read_byte` uses; storing an `int` into one keeps its low byte.
+
+A `text` field is a `char *`. Reading one copies the C string into a managed
+text you own — a NULL field reads as the empty text — so the value outlives the
+struct. Writing one stores the borrowed pointer behind an OpenEPL text: it is
+valid only while that text is, the same bargain `ptr_of_text` makes, so keep the
+text alive as long as the struct is in use.
 
 ## Callbacks: passing a sub to C
 
@@ -269,11 +414,161 @@ rest of the program is the program's own affair. A `text` parameter arrives as
 the C `char *` the caller passed, read for the duration of the call; a `text` the
 callback returns is storage the OpenEPL runtime owns and frees.
 
-Every target OpenEPL builds is 64-bit — x86-64 Linux, x64 Windows, and 64-bit
-macOS — and each has a single C calling convention, so `cdecl`, `stdcall` and
-`fastcall` all name the same one and a callback needs no convention marker. (A
-32-bit `stdcall` callback would; OpenEPL emits no 32-bit target, so it does not
-arise.)
+A callback sub may carry the same optional convention marker a `dll` does —
+`sub wndproc(hwnd: ptr, msg: int, wparam: int64, lparam: int64): int64 system` —
+to document the convention C calls it with. It changes nothing on any target
+today, for the reason [Calling conventions](#calling-conventions) gives next.
+
+## Calling conventions
+
+A C calling convention is the contract for a call: which registers or stack
+slots carry the arguments, who pops them afterwards, how the return comes back.
+`cdecl` and `stdcall` are two such contracts — on 32-bit x86 they differ in who
+cleans the stack, and calling a `stdcall` function as `cdecl` corrupts it. A
+`dll` declaration and a callback sub may name one, last on the line:
+
+```openepl
+module conventions
+
+dll MessageBoxA(handle: ptr, text: text, caption: text, kind: int): int from "user32" system
+dll SetWindowsHookExA(id: int, hook: ptr, hmod: ptr, thread: int): ptr from "user32" system
+
+sub keyboard_hook(code: int, wparam: int64, lparam: int64): int64 system
+  return 0
+end
+
+sub main
+  call print_text("declared with a convention; built the same as without one")
+end
+```
+
+`system` is the one to reach for. It means *the platform's own convention for
+its system APIs* — `stdcall` on 32-bit Windows, `cdecl` everywhere else — so a
+Win32 declaration written `from "user32" system` stays correct no matter the
+target. `stdcall` and `cdecl` name a specific convention outright, for a library
+that documents one.
+
+On every target OpenEPL builds today the marker is a **no-op**. The three
+targets — x86-64 Linux, x64 Windows, 64-bit macOS — are all 64-bit, and a 64-bit
+target has a *single* C calling convention: `cdecl`, `stdcall` and `system` all
+resolve to the same one, and the compiler emits identical code whether a
+declaration names a convention or leaves it off. The marker is accepted, checked
+against the set of three, and carried through the toolchain, but it does not
+change a single instruction.
+
+It is worth writing regardless, for two reasons. It documents intent — a reader
+of `from "user32" system` sees a Win32 call for what it is — and it is the fact a
+future 32-bit backend would need, where the conventions diverge and the marker
+would decide how the call is made. A declaration transcribed correctly today is
+one that keeps working if that target ever lands. An unrecognised word in the
+slot — `fastcall`, `pascal`, anything but the three — is a build error that names
+it, so a typo is caught rather than silently ignored.
+
+## Declaration kits
+
+A `dll` line, an `is c` record and the `const` a C API is written in terms of
+are the same in every program that reaches that API. `use` lets a *kit* carry
+them, so a program says `use win` and has `MessageBoxA`, `RECT` and `MB_OK`
+without transcribing a single one.
+
+A kit is the directory [Kits](./kits.md) describes. A kit that ships
+declarations puts them in one file beside its `lib.json`, named for the kit:
+`<name>.oed`. The file is a run of declarations with no `module` header —
+`dll`, `record` and `const`, and nothing else. A `sub`, a `form`, a component
+or a module variable does not belong in one and is refused, because a
+declaration bundle *declares*; it does not define or build.
+
+```text
+# win.oed — the bundle `use win` brings in
+dll MessageBoxA(handle: ptr, text: text, caption: text, kind: int): int from "user32" system
+dll GetLastError(): int from "kernel32" system
+
+record RECT is c
+  left: int
+  top: int
+  right: int
+  bottom: int
+end
+
+const MB_OK = 0
+const MB_YESNO = 4
+const WM_DESTROY = 2
+```
+
+`use win` finds the kit exactly as `use net` does — a `kits/` beside the
+project first, then `~/.openepl/kits/`, then the bundled `libs/` — and merges
+its declarations into the program as if they had been typed there. From then on
+`MessageBoxA` is called like any `dll`, `RECT` is a c-record like any other, and
+`MB_OK` is the number `0` everywhere a `0` could go:
+
+```text
+module hello
+use win
+
+sub main
+  let clicked: int = MessageBoxA(ptr_null(), "Built with a kit.", "Hello", MB_YESNO)
+  call print_int(clicked)
+end
+```
+
+A kit can ship declarations, C-implemented commands, or both: a `<name>.oed`
+beside a `<name>_libinfo.c` contributes to the one registry from both halves.
+`openepl commands --use <name>` lists a kit's `dll:`, `crecord:` and `const:`
+lines beside its `command:` lines, so Studio's completion and the reference see
+them; `openepl kits` reports the bundle a kit carries.
+
+### Constants
+
+A `const` names a literal — an integer, a double, a text or a bool — and stands
+for it everywhere a literal is allowed: a `dll` argument, a comparison, a `let`.
+It is module-level, and a program writes its own the same way a kit does:
+
+```openepl
+module flags
+
+const RETRIES = 3
+const GREETING = "ready"
+
+sub main
+  var left: int = RETRIES
+  while left > 0
+    left = left - 1
+  end
+  call print_text(GREETING)
+end
+```
+
+A constant is a single literal, nothing more — not another constant, not an
+expression — so its type is fixed where it is written and a reference to it
+costs nothing at run time. An `int` constant folds into an `int64` where one is
+wanted, the same widening a bare number gets, so `mem_alloc(SIZE)` reads the way
+it should.
+
+### Platform-only kits
+
+A kit that wraps a platform's own API works only on that platform: `MessageBoxA`
+lives in a Windows `user32`, and there is no Linux library to resolve it
+against. Such a kit says so in its `lib.json`:
+
+```json
+{ "display": "Win32", "platforms": ["windows"] }
+```
+
+Building a program that `use`s it for another operating system is a compile
+error that names the kit and the OS it needs, rather than a wall of linker
+errors at the end:
+
+```text
+$ openepl build hello.oir --os linux
+openepl: kit `win` supports windows — it cannot be built for linux. Build with `--os windows`.
+```
+
+Listing the kit's contents is still allowed anywhere — `openepl commands --use
+win` and the language server complete a Win32 declaration on a Linux machine, so
+the documentation and the editor work even where a build cannot. A kit with no
+`platforms` key is portable and builds everywhere, which is why the bundled
+libraries and a kit like `demoffi` — a small C library a program loads through
+its own `dll` lines — run on Linux and Windows alike.
 
 ## A library the loader runs: DllMain
 

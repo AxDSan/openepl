@@ -69,6 +69,19 @@ pub fn type_of_expr_hinted(
     reg: &Registry,
     components: &Components,
 ) -> Result<Ty, SemaError> {
+    // A bare name that is a constant (and is not shadowed by a local, a
+    // parameter or a module variable in `vars`) folds to its literal BEFORE any
+    // shape-dependent rule runs — so a constant behaves in every position
+    // exactly as the number it stands for, including the literal-to-`int64`
+    // widening below that a raw `0` gets but an `Expr::Var` would miss.
+    if let Expr::Var(name) = expr {
+        if !vars.contains_key(name) {
+            if let Some(c) = reg.const_(name) {
+                let value = c.value.clone();
+                return type_of_expr_hinted(&value, hint, vars, reg, components);
+            }
+        }
+    }
     match expr {
         Expr::ArrayLit(items) if items.is_empty() => match hint {
             Some(Ty::Array(e)) => Ok(Ty::Array(e)),
@@ -93,6 +106,24 @@ pub fn type_of_expr_hinted(
         // Without it a `ptr` offset or `mem_alloc(64)` could not be written
         // with the number in the source, since those parameters are `int64`.
         Expr::IntLit(_) if hint == Some(Ty::Int64) => Ok(Ty::Int64),
+        // A `var r: RECT` with no initializer: the declared type is the only
+        // thing that says which record, and it must be a c-record — a heap
+        // record is a reference with nothing to point at until it is built, so
+        // there is no honest zero value for one.
+        Expr::ZeroInit => match hint {
+            Some(Ty::Record(rec)) if reg.record(rec).map(|d| d.is_c).unwrap_or(false) => {
+                Ok(Ty::Record(rec))
+            }
+            Some(Ty::Record(rec)) if reg.record(rec).is_some() => err(format!(
+                "`{rec}` is a heap record and cannot be left uninitialised — build it with \
+                 `{rec}(...)`, or declare it `is c` for a zeroed c-record"
+            )),
+            Some(t) => err(format!(
+                "only a c-record `var` may be written without `= value`; `{}` needs one",
+                t.as_str()
+            )),
+            None => type_of_expr_bare(expr, vars, reg, components),
+        },
         _ => type_of_expr_bare(expr, vars, reg, components),
     }
 }
@@ -269,6 +300,16 @@ fn type_of_expr_bare(
             }
         }
         Expr::RecordLit { name, fields } => {
+            // A c-record has no `NAME(field: ...)` constructor: it is a flat
+            // value, declared `var r: NAME` and filled field by field, so a
+            // constructor call would have to allocate a heap object of the
+            // wrong shape. Point the author at the form that works.
+            if reg.record(name).map(|d| d.is_c).unwrap_or(false) {
+                return err(format!(
+                    "`{name}` is a c-record — it has no `{name}(...)` constructor; declare \
+                     `var r: {name}` and assign its fields"
+                ));
+            }
             let Some(def) = reg.record(name).cloned() else {
                 let mut known: Vec<&str> = reg.record_names().collect();
                 known.sort_unstable();
@@ -424,10 +465,24 @@ fn type_of_expr_bare(
         // link-time address to take — and its signature must be C-representable,
         // because the point is a pointer a C caller invokes with the C ABI.
         Expr::AddressOf(name) => {
-            if vars.contains_key(name) {
+            if let Some(vt) = vars.get(name).copied() {
+                // A c-record local has a real address — its flat storage — so
+                // `address of r` is the pointer a C API is handed. That is the
+                // one variable whose address means something here.
+                if let Ty::Record(rec) = vt {
+                    if reg.record(rec).map(|d| d.is_c).unwrap_or(false) {
+                        return Ok(Ty::Ptr);
+                    }
+                    return err(format!(
+                        "`address of {name}`: `{name}` is a heap record, which has no fixed \
+                         address to take — declare its type `is c` for a c-record with a \
+                         layout, or pass the record itself"
+                    ));
+                }
                 return err(format!(
-                    "`address of {name}` takes the address of a subroutine, but `{name}` \
-                     is a variable — a variable has no callable address"
+                    "`address of {name}` takes the address of a subroutine or a c-record, but \
+                     `{name}` is a {} variable — an ordinary variable has no callable address",
+                    vt.as_str()
                 ));
             }
             if reg.get(name).is_some() {
@@ -477,6 +532,32 @@ fn type_of_expr_bare(
             }
             Ok(Ty::Ptr)
         }
+        // `size of TYPE` is an `int64` byte count. A c-record's is its flat
+        // `sizeof`; a scalar's is its C width. A type with no by-value C layout
+        // — a heap record, an array, a dictionary — has no such number, and its
+        // "size" would be a pointer's, which is a trap worth refusing.
+        Expr::SizeOf(t) => match t {
+            Ty::Record(rec) => match reg.record(rec) {
+                Some(def) if def.is_c => Ok(Ty::Int64),
+                Some(_) => err(format!(
+                    "`size of {rec}`: `{rec}` is a heap record — it has no fixed byte size \
+                     (declare it `is c` for one)"
+                )),
+                None => err(format!("`size of {rec}`: there is no type `{rec}`")),
+            },
+            other if other.c_size_align().is_some() => Ok(Ty::Int64),
+            other => err(format!(
+                "`size of {}`: only a c-record or a scalar has a byte size",
+                other.as_str()
+            )),
+        },
+        // `ZeroInit` is the initializer of a `var r: RECT` with no `=`. It is
+        // legal only against a c-record hint; every other use is the checker's
+        // to reject, which it does through the hint being wrong or absent.
+        Expr::ZeroInit => err(
+            "an uninitialised `var` is only allowed for a c-record — this one has no type"
+                .to_string(),
+        ),
     }
 }
 
@@ -512,7 +593,10 @@ pub fn field_type(rec: &str, field: &str, reg: &Registry) -> Result<Ty, SemaErro
         return err(format!("unknown record `{rec}`"));
     };
     match def.field(field) {
-        Some((_, t)) => Ok(t),
+        // `.surface()` maps a c-record `byte` field to `int`: the type the
+        // field reads and writes as. It is identity for every other type, so
+        // heap-record fields are unaffected.
+        Some((_, t)) => Ok(t.surface()),
         None => {
             let known: Vec<&str> = def.fields.iter().map(|(n, _)| n.as_str()).collect();
             err(format!(

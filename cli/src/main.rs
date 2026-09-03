@@ -221,6 +221,15 @@ impl Os {
             _ => None,
         }
     }
+
+    /// The name a kit's `lib.json` `"platforms"` uses for this OS, for the
+    /// build's platform-gating check.
+    fn as_platform(self) -> &'static str {
+        match self {
+            Os::Linux => "linux",
+            Os::Windows => "windows",
+        }
+    }
 }
 
 /// The mingw-w64 cross toolchain, by the names the distributions install.
@@ -439,6 +448,52 @@ fn cmd_commands(repo_root: &Path, args: &[String]) -> i32 {
         for e in &desc.events {
             println!("event: {type_name} {e}");
         }
+    }
+
+    // Foreign declarations and constants a kit contributes through an `.oed`
+    // bundle. `dll:` and `const:` are ADDED line kinds, read by prefix like the
+    // others, so a reader that predates them is unaffected. A `dll` reads as a
+    // signature the same way a command does; a `const` reports its type.
+    let mut dlls: Vec<&str> = plan.registry.dll_names().collect();
+    dlls.sort_unstable();
+    for name in dlls {
+        let Some(d) = plan.registry.dll(name) else { continue };
+        let params = d
+            .sig
+            .params
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match d.sig.ret {
+            Some(r) => println!("dll: {name}({params}) -> {} from {}", r.as_str(), d.library),
+            None => println!("dll: {name}({params}) from {}", d.library),
+        }
+    }
+
+    let mut crecords: Vec<&str> = plan.registry.record_names().collect();
+    crecords.sort_unstable();
+    for name in crecords {
+        let Some(rec) = plan.registry.record(name) else { continue };
+        // Only a c-record has a byte layout a kit ships for interop; a plain
+        // heap record is a program's own business and is not listed here.
+        if !rec.is_c {
+            continue;
+        }
+        let fields = rec
+            .fields
+            .iter()
+            .map(|(n, t)| format!("{n}: {}", t.surface().as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("crecord: {name} {fields}");
+    }
+
+    let mut consts: Vec<&str> = plan.registry.const_names().collect();
+    consts.sort_unstable();
+    for name in consts {
+        let Some(c) = plan.registry.const_(name) else { continue };
+        println!("const: {name} {}", c.ty.as_str());
     }
     0
 }
@@ -782,6 +837,22 @@ fn compile_with(
     } else {
         libload::load_cross(&lib_root, &module.uses)?
     };
+
+    // A kit that restricts itself to a set of operating systems (a Win32
+    // declaration kit, say) cannot be built for one outside that set: the
+    // symbols it names live in that platform's own libraries. Named here, at
+    // the build, with the kit and the OS it needs — listing its contents stays
+    // allowed anywhere, which is why the gate is not in the loader.
+    for (kit, platforms) in &plan.gated {
+        if !platforms.iter().any(|p| p == os.as_platform()) {
+            return Err(format!(
+                "kit `{kit}` supports {} — it cannot be built for {}. Build with `--os {}`.",
+                platforms.join(", "),
+                os.as_platform(),
+                platforms.first().map(String::as_str).unwrap_or("<platform>")
+            ));
+        }
+    }
 
     if let Err(errs) = validate_hinted(&module, &plan.registry, &repo_root) {
         let joined = errs

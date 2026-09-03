@@ -359,6 +359,29 @@ impl Server {
             for name in reg.component_names() {
                 items.push(item(name, CompletionItemKind::CLASS, "component".into()));
             }
+            // Foreign functions, record types and constants a kit's `.oed`
+            // bundle contributed. They are in the registry the same way a
+            // command is — the file that `use`s the kit never spells them out —
+            // so completion has to read them from here, not from the file's own
+            // index. A `dll` is called like a function; a record is a type; a
+            // constant stands for its literal.
+            for name in reg.dll_names() {
+                let detail = reg
+                    .dll(name)
+                    .map(|d| signature_text(name, &d.sig))
+                    .unwrap_or_else(|| "foreign function".into());
+                items.push(item(name, CompletionItemKind::FUNCTION, detail));
+            }
+            for name in reg.record_names() {
+                items.push(item(name, CompletionItemKind::STRUCT, "record type".into()));
+            }
+            for name in reg.const_names() {
+                let detail = reg
+                    .const_(name)
+                    .map(|c| format!("constant: {}", c.ty.as_str()))
+                    .unwrap_or_else(|| "constant".into());
+                items.push(item(name, CompletionItemKind::CONSTANT, detail));
+            }
         }
         for (name, kind) in ix.names_in_scope(ix.scope_at_line(line_no)) {
             let (k, detail) = match kind {

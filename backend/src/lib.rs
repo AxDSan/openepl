@@ -60,6 +60,10 @@ fn llvm_ty(t: Ty) -> &'static str {
         // Bool is int-sized, matching the ABI's BOOL: `icmp` yields i1, which we
         // widen immediately so slot marshaling has one less width to handle.
         Ty::Bool => "i32",
+        // A byte is a c-record field width (`i8` in the flat struct). It never
+        // becomes a `Val`'s type — a byte field reads as `int` — so this only
+        // serves the field GEP's load/store.
+        Ty::Byte => "i8",
         // Signature-only types; `resolve_ret` replaces them with what the call
         // actually produced before any value carries one.
         Ty::AnyArray | Ty::AnyElem | Ty::AnyDict => "ptr",
@@ -89,6 +93,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     with_subs.register_subs(m);
     with_subs.register_dlls(m);
     with_subs.register_records(m);
+    with_subs.register_consts(m);
     let reg = &with_subs;
 
     let target = m.target();
@@ -705,6 +710,60 @@ impl Lowerer<'_> {
         slot
     }
 
+    /// Reserve `size` raw bytes on the stack — the flat storage of a c-record.
+    /// `[size x i8]` gives one whole object with byte-addressable fields, so a
+    /// field GEP is a plain byte offset and the layout is ours, not LLVM's.
+    fn alloca_bytes(&mut self, size: i64) -> String {
+        let slot = format!("%v{}", self.allocas.len());
+        self.allocas
+            .push(format!("  {slot} = alloca [{size} x i8]\n"));
+        slot
+    }
+
+    /// The `sizeof` of a c-record, from the one layout function every consumer
+    /// shares.
+    fn c_record_size(&self, rec: &str) -> Result<i64, LowerError> {
+        let def = self.reg.record(rec).ok_or_else(|| LowerError {
+            msg: format!("unknown record `{rec}`"),
+        })?;
+        let (_, size) = def.c_layout().ok_or_else(|| LowerError {
+            msg: format!("c-record `{rec}` has a field with no C layout"),
+        })?;
+        Ok(size)
+    }
+
+    /// The byte offset and *declared* field type (a `byte` stays `byte` here —
+    /// the load/store needs its real width; `surface` maps it to `int` only for
+    /// the resulting `Val`) of one field of a c-record.
+    fn c_field(&self, rec: &str, field: &str) -> Result<(i64, Ty), LowerError> {
+        let def = self.reg.record(rec).ok_or_else(|| LowerError {
+            msg: format!("unknown record `{rec}`"),
+        })?;
+        let (pos, ty) = def.field(field).ok_or_else(|| LowerError {
+            msg: format!("c-record `{rec}` has no field `{field}`"),
+        })?;
+        let (offsets, _) = def.c_layout().ok_or_else(|| LowerError {
+            msg: format!("c-record `{rec}` has a field with no C layout"),
+        })?;
+        Ok((offsets[pos - 1], ty))
+    }
+
+    /// A pointer to a field inside a c-record's flat storage: `base` + offset.
+    /// A zero offset is `base` itself, which reads better and is the same
+    /// address.
+    fn c_field_ptr(&mut self, base: &str, offset: i64) -> String {
+        if offset == 0 {
+            return base.to_string();
+        }
+        let p = self.fresh();
+        writeln!(
+            self.body,
+            "  {p} = getelementptr inbounds i8, ptr {base}, i64 {offset}"
+        )
+        .unwrap();
+        p
+    }
+
     fn store_global(&mut self, name: &str, v: &Val) {
         writeln!(
             self.body,
@@ -725,6 +784,28 @@ impl Lowerer<'_> {
                 value,
                 mutable: _,
             } => {
+                // A c-record local is a flat struct on the stack, not a pointer
+                // to a heap object: allocate its exact size, zero it, and record
+                // the name as bound to that storage. There is no value to
+                // evaluate — a c-record `var` is only ever the zeroed default —
+                // and reading the name later hands back this address, not a
+                // load (see the `Var` arm).
+                if let Ty::Record(rec) = ty {
+                    if self.reg.record(rec).map(|d| d.is_c).unwrap_or(false) {
+                        let size = self.c_record_size(rec)?;
+                        let slot = self.alloca_bytes(size);
+                        // The zero-init sits at the statement, not the function
+                        // top, so a `var r: RECT` inside a loop re-zeroes each
+                        // pass, exactly as C's block-scoped struct would.
+                        writeln!(
+                            self.body,
+                            "  store [{size} x i8] zeroinitializer, ptr {slot}"
+                        )
+                        .unwrap();
+                        self.vars.insert(name.clone(), (slot, *ty));
+                        return Ok(());
+                    }
+                }
                 let v = self.eval_hinted(value, Some(*ty))?;
                 if v.ty != *ty {
                     return err(format!(
@@ -977,6 +1058,12 @@ impl Lowerer<'_> {
                 value,
             } => {
                 if let Some(Ty::Record(rec)) = self.var_ty(component) {
+                    // A c-record's field is a store into flat storage; the plain
+                    // record's stays the heap `oe_rec_set` below.
+                    if self.reg.record(rec).map(|d| d.is_c).unwrap_or(false) {
+                        let base = self.eval(&Expr::Var(component.clone()))?;
+                        return self.emit_c_field_write(rec, &base.operand, property, value);
+                    }
                     let def = self.reg.record(rec).cloned().ok_or_else(|| LowerError {
                         msg: format!("unknown record `{rec}`"),
                     })?;
@@ -1235,6 +1322,18 @@ impl Lowerer<'_> {
     /// so the destination's declaration is the only thing that knows. The
     /// validator has already agreed the hint fits.
     fn eval_hinted(&mut self, e: &Expr, hint: Option<Ty>) -> Result<Val, LowerError> {
+        // A bare name that is a constant (and is not a local or a module
+        // variable) folds to its literal here, before any other rule — so the
+        // constant is lowered exactly as the literal it stands for, including
+        // the `int64` widening below. The checker agreed to the same fold.
+        if let Expr::Var(name) = e {
+            if !self.vars.contains_key(name) && !self.globals.contains_key(name) {
+                if let Some(c) = self.reg.const_(name) {
+                    let value = c.value.clone();
+                    return self.eval_hinted(&value, hint);
+                }
+            }
+        }
         if let Expr::ArrayLit(items) = e {
             let elem = match (items.first(), hint) {
                 (Some(first), _) => {
@@ -1369,8 +1468,13 @@ impl Lowerer<'_> {
         })
     }
 
-    /// Read one field of an already-lowered record.
+    /// Read one field of an already-lowered record. `base` is the record's
+    /// value: a heap pointer for a plain record, the flat storage's address for
+    /// a c-record (a c-record `Var` yields its own address, not a load).
     fn emit_field_read(&mut self, rec: &str, base: &Val, field: &str) -> Result<Val, LowerError> {
+        if self.reg.record(rec).map(|d| d.is_c).unwrap_or(false) {
+            return self.emit_c_field_read(rec, &base.operand, field);
+        }
         let def = self.reg.record(rec).cloned().ok_or_else(|| LowerError {
             msg: format!("unknown record `{rec}`"),
         })?;
@@ -1387,6 +1491,115 @@ impl Lowerer<'_> {
         .unwrap();
         let res = self.emit_ret_from_i64(ty, &raw);
         Ok(Val { ty, operand: res })
+    }
+
+    /// Read one field of a c-record from its flat storage: a GEP to the field's
+    /// byte offset, then a load of the field's real width. The result is the
+    /// field's *surface* type — a `byte` comes back as an `int` `0`..`255`, the
+    /// same convention `ptr_read_byte` uses.
+    fn emit_c_field_read(
+        &mut self,
+        rec: &str,
+        base: &str,
+        field: &str,
+    ) -> Result<Val, LowerError> {
+        let (offset, fty) = self.c_field(rec, field)?;
+        let fp = self.c_field_ptr(base, offset);
+        let out = match fty {
+            // A byte is one `i8` widened to the `int` it reads as, unsigned so
+            // 200 is 200 and not -56.
+            Ty::Byte => {
+                let raw = self.fresh();
+                writeln!(self.body, "  {raw} = load i8, ptr {fp}").unwrap();
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = zext i8 {raw} to i32").unwrap();
+                return Ok(Val { ty: Ty::Int, operand: t });
+            }
+            // C truth is any non-zero int, and a C API fills a `BOOL` field with
+            // whatever its flag arithmetic produced (`7`, `0x100`), not always
+            // `1`. Normalise to 0/1 so `f.on = true` and `not f.on` are right —
+            // the same normalisation a returned `dll` bool gets.
+            Ty::Bool => {
+                let raw = self.fresh();
+                writeln!(self.body, "  {raw} = load i32, ptr {fp}").unwrap();
+                let nz = self.fresh();
+                writeln!(self.body, "  {nz} = icmp ne i32 {raw}, 0").unwrap();
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = zext i1 {nz} to i32").unwrap();
+                return Ok(Val { ty: Ty::Bool, operand: t });
+            }
+            // A `char*` a C API wrote into the struct is borrowed and outlives
+            // nothing in particular, so copy it into a managed text exactly as a
+            // `dll` that returns text does — `oe_dll_text` also turns a NULL
+            // field into the empty text.
+            Ty::Text => {
+                self.needs_dll_text = true;
+                let raw = self.fresh();
+                writeln!(self.body, "  {raw} = load ptr, ptr {fp}").unwrap();
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = call ptr @oe_dll_text(ptr {raw})").unwrap();
+                t
+            }
+            _ => {
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = load {}, ptr {fp}", llvm_ty(fty)).unwrap();
+                t
+            }
+        };
+        Ok(Val { ty: fty.surface(), operand: out })
+    }
+
+    /// Write one field of a c-record into its flat storage: evaluate the value
+    /// against the field's surface type, then store it at the field's offset in
+    /// the field's real width.
+    fn emit_c_field_write(
+        &mut self,
+        rec: &str,
+        base: &str,
+        field: &str,
+        value: &openepl_ir::Expr,
+    ) -> Result<(), LowerError> {
+        let (offset, fty) = self.c_field(rec, field)?;
+        let want = fty.surface();
+        let v = self.eval_hinted(value, Some(want))?;
+        if v.ty != want {
+            return err(format!(
+                "c-record `{rec}` field `{field}` is {}, cannot store {}",
+                want.as_str(),
+                v.ty.as_str()
+            ));
+        }
+        let fp = self.c_field_ptr(base, offset);
+        match fty {
+            // The `int` value narrows to the one byte the field holds; the top
+            // 24 bits are the author's to keep in range, as with `ptr_write_byte`.
+            Ty::Byte => {
+                let b = self.fresh();
+                writeln!(self.body, "  {b} = trunc i32 {} to i8", v.operand).unwrap();
+                writeln!(self.body, "  store i8 {b}, ptr {fp}").unwrap();
+            }
+            // The stored `char*` is borrowed: it is valid while the text that
+            // backs it is, exactly like `ptr_of_text`. A runtime-produced empty
+            // text is NULL, so store a pointer to `""` instead, matching how a
+            // text argument crosses to a `dll`.
+            Ty::Text => {
+                let empty = self.cstr("");
+                let isnull = self.fresh();
+                writeln!(self.body, "  {isnull} = icmp eq ptr {}, null", v.operand).unwrap();
+                let sel = self.fresh();
+                writeln!(
+                    self.body,
+                    "  {sel} = select i1 {isnull}, ptr {empty}, ptr {}",
+                    v.operand
+                )
+                .unwrap();
+                writeln!(self.body, "  store ptr {sel}, ptr {fp}").unwrap();
+            }
+            _ => {
+                writeln!(self.body, "  store {} {}, ptr {fp}", llvm_ty(fty), v.operand).unwrap();
+            }
+        }
+        Ok(())
     }
 
     /// The declared type of a variable, local first then module-level — the
@@ -1556,6 +1769,17 @@ impl Lowerer<'_> {
             }
             Expr::Var(name) => {
                 if let Some((slot, ty)) = self.vars.get(name).cloned() {
+                    // A c-record local IS its storage: the name evaluates to the
+                    // address of the flat struct, not a value loaded out of a
+                    // slot. That address is what a field GEP walks, what `dll`
+                    // passes for a struct pointer, and what `address of` hands
+                    // to C — so there is nothing to load, and loading would read
+                    // the first bytes of the struct as if they were a pointer.
+                    if let Ty::Record(rec) = ty {
+                        if self.reg.record(rec).map(|d| d.is_c).unwrap_or(false) {
+                            return Ok(Val { ty, operand: slot });
+                        }
+                    }
                     let t = self.fresh();
                     writeln!(self.body, "  {t} = load {}, ptr {slot}", llvm_ty(ty)).unwrap();
                     Ok(Val { ty, operand: t })
@@ -1670,10 +1894,49 @@ impl Lowerer<'_> {
             // section, which is exactly what keeps `--gc-sections` from dropping
             // a sub whose address is taken but which nothing calls directly, the
             // same way an event handler's thunk keeps its handler alive.
-            Expr::AddressOf(name) => Ok(Val {
-                ty: Ty::Ptr,
-                operand: format!("@{}", user_symbol(name)),
-            }),
+            Expr::AddressOf(name) => {
+                // `address of r` for a c-record local is that local's own
+                // address — the pointer a C API is handed. A c-record `Var`
+                // already evaluates to its address, so this is the same operand,
+                // typed `ptr`. Otherwise it is a subroutine's function symbol
+                // (see the note below), which the checker has proven callable.
+                if let Some((slot, Ty::Record(rec))) = self.vars.get(name).cloned() {
+                    if self.reg.record(rec).map(|d| d.is_c).unwrap_or(false) {
+                        return Ok(Val { ty: Ty::Ptr, operand: slot });
+                    }
+                }
+                // The sub's own convention marker (`Sub::conv`), if any, is not
+                // encoded on this function pointer for the same reason a `dll`'s
+                // is not: one C convention per 64-bit target. A 32-bit backend
+                // would read it from the `Sub` AST node when emitting the sub's
+                // definition, not here.
+                Ok(Val {
+                    ty: Ty::Ptr,
+                    operand: format!("@{}", user_symbol(name)),
+                })
+            }
+            // `size of TYPE` is a compile-time constant: a c-record's flat
+            // `sizeof`, or a scalar's C width. The checker has already agreed the
+            // type has one, so this folds to the number with no runtime cost.
+            Expr::SizeOf(t) => {
+                let size = match t {
+                    Ty::Record(rec) => self.c_record_size(rec)?,
+                    other => other.c_size_align().map(|(s, _)| s).ok_or_else(|| LowerError {
+                        msg: format!("`size of {}` has no C layout", other.as_str()),
+                    })?,
+                };
+                Ok(Val {
+                    ty: Ty::Int64,
+                    operand: size.to_string(),
+                })
+            }
+            // A bare `ZeroInit` never reaches here: it is the initializer of a
+            // c-record `var`, consumed by the `Let` arm before any value is
+            // evaluated. Reaching it means the checker let one through somewhere
+            // it should not have.
+            Expr::ZeroInit => err(
+                "an uninitialised c-record value is only valid as `var r: RECT`".to_string(),
+            ),
             Expr::Cmp(op, l, r) => {
                 let lv = self.eval(l)?;
                 let rv = self.eval(r)?;
@@ -2035,6 +2298,12 @@ impl Lowerer<'_> {
         )
         .unwrap();
 
+        // `dll.conv` (stdcall/cdecl/system) is intentionally NOT emitted onto
+        // the `call`: every target OpenEPL builds is 64-bit with a single C
+        // convention, so the three markers name the same one and a textual
+        // callconv here would only risk perturbing the proven `--os windows`
+        // path for no behavioural gain. The marker is carried on the `DllSig`
+        // for a future 32-bit backend, which WOULD read it at this point.
         match sig.ret {
             None => {
                 writeln!(self.body, "  call void {fp}({arglist})").unwrap();

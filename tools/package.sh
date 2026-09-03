@@ -47,7 +47,12 @@ echo "==> studio"
 ./designer/build.sh >/dev/null
 
 # --- assemble -------------------------------------------------------------
-rm -rf "$OUT"
+# A clean dist: every earlier version's tree and archives for THIS platform
+# go, so dist/ holds only what this build produced — no stale bundle a
+# release upload or a `ls dist` could pick up by mistake.
+rm -rf "$ROOT"/dist/openepl-*-linux-x86_64 "$ROOT"/dist/openepl-*-linux-x86_64.tar.gz \
+       "$ROOT"/dist/openepl-*-linux-x86_64.zip "$ROOT"/dist/openepl-*-linux-x86_64.*.sha256 \
+       "$ROOT"/dist/openepl-*-linux-x86_64.tar.gz.sha256 "$ROOT"/dist/openepl-*-linux-x86_64.zip.sha256
 mkdir -p "$OUT"/{bin,licenses}
 
 install -m755 target/release/openepl "$OUT/bin/openepl"

@@ -103,3 +103,15 @@ A template named here appears in `openepl templates` and can be created with
 openepl templates
 openepl new units-starter converter
 ```
+
+## Shipping declarations
+
+A kit can also carry a bundle of foreign *declarations* — `dll` calls, `is c`
+records and `const` values — in a file named for the kit, `<name>.oed`, beside
+`lib.json`. `use <name>` merges them into a program as if it had typed them, so
+a kit like `win` can supply `MessageBoxA`, `RECT` and `MB_OK` with no
+hand-written `dll` line. A kit may ship declarations, C-implemented commands, or
+both; a kit that is *only* declarations needs no `*_libinfo.c` at all. The file
+format, constants, and the `"platforms"` key that pins a kit to an operating
+system are covered under
+[Declaration kits](./interop.md#declaration-kits).

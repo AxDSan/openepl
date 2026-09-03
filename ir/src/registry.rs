@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Module, RecordDef, Signature, Ty};
+use crate::{CallConv, ConstDef, Module, RecordDef, Signature, Ty};
 
 /// A foreign function the module declared with `dll`.  Held beside subs and
 /// commands so a call resolves it the same way, but it carries the two extra
@@ -20,6 +20,10 @@ pub struct DllSig {
     pub library: String,
     /// The exported symbol to resolve (the `as` override, or the name itself).
     pub symbol: String,
+    /// The declared calling convention, or `None`. Carried from the declaration
+    /// for a future 32-bit backend; the backend emits the same code either way,
+    /// because every target it builds today is 64-bit with one C convention.
+    pub conv: Option<CallConv>,
 }
 
 /// A component property, as declared in a library's `ComponentDesc`.
@@ -106,6 +110,15 @@ pub struct Registry {
     /// for all of them is what keeps the validator and the backend agreeing
     /// about what `point` means.
     records: HashMap<String, RecordDef>,
+    /// Named constants (`const MB_OK = 0`), by name.
+    ///
+    /// A constant shares the one flat name space with commands, subs, dlls and
+    /// records — `register_consts` reports a collision rather than overwriting
+    /// — because a reference to it is written where any of those could be. It
+    /// is read-only and stores its literal value, which the checker types and
+    /// the backend folds. A kit's declaration bundle contributes to this map
+    /// the same way a program's own `const` lines do.
+    consts: HashMap<String, ConstDef>,
     /// What each component event hands its handler, keyed by
     /// `(component type, event)`.
     ///
@@ -126,6 +139,7 @@ impl Registry {
             subs: HashMap::new(),
             dlls: HashMap::new(),
             records: HashMap::new(),
+            consts: HashMap::new(),
             event_params: HashMap::new(),
         }
     }
@@ -157,6 +171,8 @@ impl Registry {
             if self.map.contains_key(&d.name)
                 || self.subs.contains_key(&d.name)
                 || self.dlls.contains_key(&d.name)
+                || self.consts.contains_key(&d.name)
+                || self.records.contains_key(&d.name)
             {
                 collisions.push(d.name.clone());
                 continue;
@@ -167,6 +183,7 @@ impl Registry {
                     sig: d.signature(),
                     library: d.library.clone(),
                     symbol: d.symbol_name().to_string(),
+                    conv: d.conv,
                 },
             );
         }
@@ -201,6 +218,7 @@ impl Registry {
                 || self.subs.contains_key(&rec.name)
                 || self.dlls.contains_key(&rec.name)
                 || self.records.contains_key(&rec.name)
+                || self.consts.contains_key(&rec.name)
             {
                 collisions.push(rec.name.clone());
                 continue;
@@ -218,6 +236,92 @@ impl Registry {
     /// Known record type names, for diagnostics.
     pub fn record_names(&self) -> impl Iterator<Item = &str> {
         self.records.keys().map(|s| s.as_str())
+    }
+
+    /// Insert one record declaration directly (a kit's declaration bundle),
+    /// collision-checked across the whole callable name space; `false` if the
+    /// name was already taken. The module-level `register_records` reports the
+    /// name to the validator instead — this is the loader's door, where a
+    /// collision is a kit-authoring error and the caller says which kit.
+    pub fn insert_record(&mut self, rec: RecordDef) -> bool {
+        if self.map.contains_key(&rec.name)
+            || self.subs.contains_key(&rec.name)
+            || self.dlls.contains_key(&rec.name)
+            || self.records.contains_key(&rec.name)
+            || self.consts.contains_key(&rec.name)
+        {
+            return false;
+        }
+        self.records.insert(rec.name.clone(), rec);
+        true
+    }
+
+    /// Insert one foreign-function declaration directly (a kit's bundle),
+    /// collision-checked; `false` if the name was already taken.
+    pub fn insert_dll(&mut self, name: impl Into<String>, sig: DllSig) -> bool {
+        let name = name.into();
+        if self.map.contains_key(&name)
+            || self.subs.contains_key(&name)
+            || self.dlls.contains_key(&name)
+            || self.records.contains_key(&name)
+            || self.consts.contains_key(&name)
+        {
+            return false;
+        }
+        self.dlls.insert(name, sig);
+        true
+    }
+
+    /// Record every named constant in `m`, returning the names that collide
+    /// with a command, a subroutine, a `dll`, a record or another constant
+    /// (the caller reports them — the validator has the line numbers).
+    ///
+    /// A constant is written in expression position, so it shares the one flat
+    /// name space with everything else callable-or-nameable.
+    pub fn register_consts(&mut self, m: &Module) -> Vec<String> {
+        let mut collisions = Vec::new();
+        for c in m.consts() {
+            if !self.insert_const(c.clone()) {
+                collisions.push(c.name.clone());
+            }
+        }
+        collisions
+    }
+
+    /// Insert one constant directly (a program's `const` or a kit's bundle),
+    /// collision-checked across the whole name space; `false` if taken.
+    pub fn insert_const(&mut self, c: ConstDef) -> bool {
+        if self.map.contains_key(&c.name)
+            || self.subs.contains_key(&c.name)
+            || self.dlls.contains_key(&c.name)
+            || self.records.contains_key(&c.name)
+            || self.consts.contains_key(&c.name)
+        {
+            return false;
+        }
+        self.consts.insert(c.name.clone(), c);
+        true
+    }
+
+    /// The constant named `name`, if there is one.
+    pub fn const_(&self, name: &str) -> Option<&ConstDef> {
+        self.consts.get(name)
+    }
+
+    /// The type of the constant named `name`, if there is one — the fold the
+    /// checker performs when it meets a bare name that is a constant.
+    pub fn const_ty(&self, name: &str) -> Option<Ty> {
+        self.consts.get(name).map(|c| c.ty)
+    }
+
+    /// Whether `name` names a constant.
+    pub fn is_const(&self, name: &str) -> bool {
+        self.consts.contains_key(name)
+    }
+
+    /// Constant names, for diagnostics and listing.
+    pub fn const_names(&self) -> impl Iterator<Item = &str> {
+        self.consts.keys().map(|s| s.as_str())
     }
 
     /// The signature of a user subroutine, if `name` is one.

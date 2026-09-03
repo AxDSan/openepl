@@ -22,8 +22,9 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use openepl_ir::registry::{ComponentDesc, ComponentKind, PropertyDesc};
-use openepl_ir::{Registry, Signature, Ty};
+use openepl_ir::registry::{ComponentDesc, ComponentKind, DllSig, PropertyDesc};
+use openepl_ir::validate::validate_decls;
+use openepl_ir::{parse, Item, Module, Registry, Signature, Target, Ty};
 
 #[cfg(unix)]
 extern "C" {
@@ -133,6 +134,13 @@ pub struct LibPlan {
     /// it (the UI stack, for example). Only populated for libraries actually
     /// used, so a console program never links the UI.
     pub build: BuildConfig,
+    /// Kits that restrict themselves to a set of operating systems, as
+    /// `(kit name, platforms)` — from a declaration kit's `lib.json`
+    /// `"platforms"`. Empty for a portable kit. The *build* consults this to
+    /// refuse a windows-only kit on a Linux target; listing (`openepl
+    /// commands`, the language server) does not, so a Win32 kit still documents
+    /// and completes on a machine that cannot build for Windows.
+    pub gated: Vec<(String, Vec<String>)>,
 }
 
 /// Compiler/linker additions a library needs, from its `lib.json`.
@@ -191,6 +199,7 @@ fn load_with(
     let mut registry = Registry::new();
     let mut impl_sources = Vec::new();
     let mut build = BuildConfig::default();
+    let mut gated: Vec<(String, Vec<String>)> = Vec::new();
 
     // (library name, directory) — core is implicit and first.
     let mut libs: Vec<(String, PathBuf)> = vec![("core".into(), repo_root.join("runtime"))];
@@ -225,31 +234,157 @@ fn load_with(
             .filter(|p| filename(p).ends_with("_libinfo.c"))
             .cloned()
             .collect();
-        if so_srcs.is_empty() {
+
+        // A kit's declaration bundle: pure `dll`, `record` and `const` lines the
+        // parser reads, merged into the registry as if the program had typed
+        // them. A kit may ship one, C-implemented commands, or both.
+        let decls = read_decls(dir, name)?;
+
+        // A kit must carry SOMETHING the compiler can see: a metadata TU with
+        // commands, or a declaration bundle. Neither, and there is nothing to
+        // use — the same "not a kit" the resolver already refuses to list.
+        if so_srcs.is_empty() && decls.is_none() {
             return Err(format!(
-                "library `{name}`: no *_libinfo.c metadata source found in {}",
+                "library `{name}`: no `{name}_libinfo.c` metadata source and no \
+                 `{name}.oed` declaration bundle found in {}",
                 dir.display()
             ));
         }
-        // Impl sources to link: everything except the metadata TU, which must
-        // never reach a shipped program.
-        for p in &sources {
-            if !filename(p).ends_with("_libinfo.c") {
-                impl_sources.push(p.clone());
+
+        // The declaration bundle. Validated on its own (as a sharedlib, so the
+        // entry-point rule does not fire) against the registry so far, then its
+        // dlls, records and constants are merged in. A collision here is a
+        // kit-authoring fault, named with the kit.
+        if let Some(mut decl_mod) = decls {
+            decl_mod.target = Some(Target::SharedLib);
+            // Validate the bundle in isolation against the registry so far, so
+            // a malformed record or a `dll` taking a non-`is c` record fails
+            // with the kit's own name rather than surfacing later in a program.
+            if let Err(errs) = validate_decls(&decl_mod, &registry) {
+                let joined = errs
+                    .iter()
+                    .map(|e| format!("    - {e}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(format!(
+                    "kit `{name}` declaration bundle `{name}.oed` is invalid:\n{joined}"
+                ));
+            }
+            for rec in decl_mod.records() {
+                if !registry.insert_record(rec.clone()) {
+                    return Err(format!(
+                        "kit `{name}`: record `{}` collides with an already-registered name",
+                        rec.name
+                    ));
+                }
+            }
+            for d in decl_mod.dlls() {
+                let sig = DllSig {
+                    sig: d.signature(),
+                    library: d.library.clone(),
+                    symbol: d.symbol_name().to_string(),
+                    conv: d.conv,
+                };
+                if !registry.insert_dll(d.name.clone(), sig) {
+                    return Err(format!(
+                        "kit `{name}`: `dll {}` collides with an already-registered name",
+                        d.name
+                    ));
+                }
+            }
+            for c in decl_mod.consts() {
+                if !registry.insert_const(c.clone()) {
+                    return Err(format!(
+                        "kit `{name}`: constant `{}` collides with an already-registered name",
+                        c.name
+                    ));
+                }
             }
         }
 
-        build.merge(&manifest);
+        // A kit that declares `"platforms"` is usable only on those; the build
+        // checks it against the target OS. Recorded for every load path, acted
+        // on only by the build — listing a kit's contents is allowed anywhere.
+        if !manifest.platforms.is_empty() && name != "core" {
+            gated.push((name.clone(), manifest.platforms.clone()));
+        }
 
-        let so_path = build_introspection_so(repo_root, name, &so_srcs, &manifest)?;
-        introspect_into(&so_path, name, &mut registry)?;
+        // Impl sources and the introspection `.so` belong to the C-implemented
+        // half of a kit, marked by a `_libinfo.c`. A declaration-only kit has
+        // none: its `.c`, if any, is a runtime library a `dll` loads by name at
+        // run time, not something static-linked into the program — harvesting
+        // it here would put the symbols in the image AND have the loader open a
+        // second copy.
+        if !so_srcs.is_empty() {
+            for p in &sources {
+                if !filename(p).ends_with("_libinfo.c") {
+                    impl_sources.push(p.clone());
+                }
+            }
+            build.merge(&manifest);
+            let so_path = build_introspection_so(repo_root, name, &so_srcs, &manifest)?;
+            introspect_into(&so_path, name, &mut registry)?;
+        }
     }
 
     Ok(LibPlan {
         registry,
         impl_sources,
         build,
+        gated,
     })
+}
+
+/// Read a kit's declaration bundle, `<dir>/<name>.oed`, if it has one.
+///
+/// This is the ONE reader of an `.oed`: the loader merges what it returns into
+/// the registry, and `openepl kits` lists it — two readers of one file is the
+/// drift the CLI keeps a single parser for `.oir` to avoid. The file is a
+/// module body without the header: a run of `dll`, `record` and `const`
+/// declarations and nothing else. It is parsed by prepending a synthetic
+/// `module <name>` line and reusing the whole language parser, so a declaration
+/// in a kit reads exactly as one in a program; a `sub`, a `form`, a component,
+/// a module variable, a `target` or a `use` is refused, because a declaration
+/// bundle declares, it does not define or build.
+pub fn read_decls(dir: &Path, name: &str) -> Result<Option<Module>, String> {
+    let path = dir.join(format!("{name}.oed"));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let body =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    // The header is one prepended line, so a parse error's line number is one
+    // past the `.oed`'s own — subtract it back before reporting.
+    let src = format!("module {name}\n{body}");
+    let module = parse(&src).map_err(|e| {
+        format!(
+            "{}:{}: {}",
+            path.display(),
+            e.line.saturating_sub(1).max(1),
+            e.msg
+        )
+    })?;
+    if !module.uses.is_empty() {
+        return Err(format!(
+            "{}: a declaration bundle may not `use` another kit",
+            path.display()
+        ));
+    }
+    for item in &module.items {
+        let what = match item {
+            Item::Dll(_) | Item::UserType(_) | Item::Const(_) => continue,
+            Item::Sub(_) => "a subroutine",
+            Item::Form(_) => "a form",
+            Item::Component(_) => "a component",
+            Item::Var(_) => "a module variable",
+        };
+        return Err(format!(
+            "{}: a declaration bundle holds only `dll`, `record` and `const` — {what} \
+             does not belong in one",
+            path.display()
+        ));
+    }
+    Ok(Some(module))
 }
 
 fn filename(p: &Path) -> String {
@@ -546,6 +681,11 @@ pub struct Manifest {
     /// configuration has been folded into the fields above and the feature
     /// macro is defined.
     pub optional_enabled: bool,
+    /// The operating systems this kit may be used on (`"platforms"` in
+    /// `lib.json`), lower-cased. Empty means portable — usable everywhere. A
+    /// declaration kit that wraps a platform's own API (Win32) sets this so a
+    /// build for another OS fails with a message rather than a link error.
+    pub platforms: Vec<String>,
 }
 
 impl Manifest {
@@ -568,6 +708,10 @@ impl Manifest {
             pkg_config: json_array(&text, "pkg_config"),
             link_args: json_array(&text, "link_args"),
             requires_hint: json_string(&text, "requires_hint"),
+            platforms: json_array(&text, "platforms")
+                .iter()
+                .map(|p| p.to_lowercase())
+                .collect(),
             ..Default::default()
         };
         m.include_dirs = json_array(&text, "include_dirs")

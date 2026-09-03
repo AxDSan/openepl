@@ -116,6 +116,14 @@ pub enum Ty {
     /// `int64`. Arithmetic on it is explicit (`ptr_offset`); `ptr_null()` is
     /// the zero address.
     Ptr,
+    /// A single byte (`0`..`255`) — a C-layout `record` field type only. It
+    /// exists so a c-record can match a real C struct with `char`/`uint8_t`
+    /// members and the padding around them; `Ty::from_keyword` deliberately
+    /// does not produce it, so `byte` stays an ordinary word everywhere but a
+    /// c-record field, and a byte field is *read and written as `int`*
+    /// (`Ty::surface` maps it) — the type never becomes a value's type, crosses
+    /// a slot, or takes part in arithmetic under its own name.
+    Byte,
     /// An array of `Elem`. The value in the slot is a pointer to a
     /// runtime-owned array object, exactly as text is a pointer.
     Array(Elem),
@@ -155,6 +163,7 @@ impl Ty {
             Ty::Bool => "bool",
             Ty::Bytes => "bytes",
             Ty::Ptr => "ptr",
+            Ty::Byte => "byte",
             Ty::Array(Elem::Int) => "int[]",
             Ty::Array(Elem::Int64) => "int64[]",
             Ty::Array(Elem::Double) => "double[]",
@@ -185,6 +194,37 @@ impl Ty {
             "bool" => Ty::Bool,
             "bytes" => Ty::Bytes,
             "ptr" => Ty::Ptr,
+            _ => return None,
+        })
+    }
+
+    /// The type a value of this field type *appears as* in the language.
+    ///
+    /// Every type is itself but `byte`, which is a c-record layout width with
+    /// no life of its own: a byte field reads and writes as an `int` in
+    /// `0`..`255`, exactly as `ptr_read_byte` does. Keeping this in one place is
+    /// what lets `Ty::Byte` stay walled inside a c-record's field table.
+    pub fn surface(self) -> Ty {
+        match self {
+            Ty::Byte => Ty::Int,
+            other => other,
+        }
+    }
+
+    /// This field type's size and alignment in a C struct, on every 64-bit
+    /// target OpenEPL emits (x86-64 SysV and Windows x64 agree for scalars).
+    /// `None` for a type that has no by-value C layout — the aggregates and the
+    /// signature-only tags — so the caller can reject it with a real message.
+    pub fn c_size_align(self) -> Option<(i64, i64)> {
+        Some(match self {
+            Ty::Byte => (1, 1),
+            Ty::Int => (4, 4),
+            // C's `int`-sized truth, so a c-record `bool` lines up with a `BOOL`
+            // / `int` field a C API declares.
+            Ty::Bool => (4, 4),
+            Ty::Int64 | Ty::Double => (8, 8),
+            // A `char*` and a raw pointer are both one 8-byte machine word.
+            Ty::Text | Ty::Ptr => (8, 8),
             _ => return None,
         })
     }
@@ -246,6 +286,10 @@ impl Ty {
             Ty::Bool => 8,   // OE_SDT_BOOL
             Ty::Bytes => 10, // OE_SDT_BIN
             Ty::Ptr => 14,   // OE_SDT_PTR
+            // A byte is a c-record layout type; it never crosses the slot ABI
+            // (a byte field surfaces as `int`), so this arm exists only to keep
+            // the match exhaustive and is never reached in marshaling.
+            Ty::Byte => 3, // reads as OE_SDT_INT
             Ty::Array(e) => ARRAY | e.ty().sdt_tag(),
             Ty::AnyArray => ARRAY | ALL,
             Ty::AnyElem => ALL,
@@ -429,6 +473,17 @@ pub enum Expr {
     /// subroutine in this language, so the operand is a bare identifier, not an
     /// arbitrary expression.
     AddressOf(String),
+    /// `size of TYPE` — the size in bytes of a type's C layout, an `int64`
+    /// compile-time constant the backend folds to a number. For a c-record it
+    /// is the flat struct's `sizeof` (with padding); for a scalar it is that
+    /// scalar's C width. It is what a program passes to `mem_alloc`, or to a C
+    /// API that wants the size of the struct it is being handed.
+    SizeOf(Ty),
+    /// The implicit initializer of `var r: RECT` written with no `= EXPR`: a
+    /// c-record local whose flat storage starts all-zero. It carries no type of
+    /// its own — the `let`'s declared type says which c-record — so the checker
+    /// only ever sees it with a hint, and it is valid nowhere else.
+    ZeroInit,
 }
 
 /// A source position: a 1-based line and 1-based **byte** columns, `end_col`
@@ -577,6 +632,14 @@ pub struct Sub {
     /// Declared return type; `None` is a sub that returns nothing and may only
     /// be invoked with `call`.
     pub ret: Option<Ty>,
+    /// The calling convention marker on the sub header (`sub wndproc(...): int64
+    /// system`). It documents the convention C will invoke this sub with when
+    /// its `address of` is handed across, and — like a `dll`'s — is a no-op on
+    /// every 64-bit target OpenEPL emits, carried for a future 32-bit backend.
+    /// It lives only on this AST node: `Signature` (what the registry keeps for
+    /// argument checking) deliberately does not carry it, so a future backend
+    /// reads it via `module.subs()`, not `reg.sub()`.
+    pub conv: Option<CallConv>,
     /// 1-based source line of the `sub` keyword; 0 when unknown.
     pub line: usize,
     /// Where the name is written, for a diagnostic about the subroutine itself.
@@ -667,6 +730,58 @@ pub enum Item {
     /// `.dylib` that is resolved and bound at the first call. This is the one
     /// door out to a C API the language does not wrap.
     Dll(DllDecl),
+    /// A named compile-time constant: `const MB_OK = 0`.
+    ///
+    /// Its value is a single literal, so its type is the literal's type and a
+    /// reference to it folds to that literal everywhere a literal is allowed —
+    /// a `dll` argument, a comparison, a `let` initializer. It exists so a kit
+    /// can ship the `WM_*` / `MB_*` families a C API is written in terms of
+    /// without a program spelling the magic numbers out.
+    Const(ConstDef),
+}
+
+/// The C calling convention a foreign call — or a sub whose address is handed to
+/// C — is made with. It is a documentation-and-forward-compat marker only:
+/// every target OpenEPL emits today is 64-bit (x86-64 Linux, x64 Windows, 64-bit
+/// macOS), and each of those has a *single* C convention, so `cdecl`, `stdcall`
+/// and `system` all name the same one and the backend emits identical code for
+/// each. The marker is carried so a future 32-bit backend — where the three
+/// diverge and a mismatched `stdcall`/`cdecl` corrupts the stack — has the fact
+/// the source stated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallConv {
+    /// `cdecl`: the caller cleans the stack. The one convention on every 64-bit
+    /// target, and the C default on 32-bit non-Windows.
+    Cdecl,
+    /// `stdcall`: the callee cleans the stack. The Win32 API convention on
+    /// 32-bit Windows; identical to `cdecl` on 64-bit.
+    Stdcall,
+    /// `system`: whatever a platform uses for its *system* APIs — `stdcall` on
+    /// 32-bit Windows, `cdecl` everywhere else. The portable choice for a Win32
+    /// declaration, because it stays correct if a 32-bit target ever lands.
+    System,
+}
+
+impl CallConv {
+    /// Parse a convention marker word; `None` for anything that is not one, so
+    /// the parser can name the allowed set in its own diagnostic.
+    pub fn parse(word: &str) -> Option<CallConv> {
+        match word {
+            "cdecl" => Some(CallConv::Cdecl),
+            "stdcall" => Some(CallConv::Stdcall),
+            "system" => Some(CallConv::System),
+            _ => None,
+        }
+    }
+
+    /// The marker word, as written in source.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CallConv::Cdecl => "cdecl",
+            CallConv::Stdcall => "stdcall",
+            CallConv::System => "system",
+        }
+    }
 }
 
 /// A foreign function declared for calling: `dll NAME(params): ret from "lib" as "sym"`.
@@ -693,6 +808,11 @@ pub struct DllDecl {
     /// The exported symbol name, from `as "..."`; `None` means the symbol has
     /// the same name as the declaration, which is the common case.
     pub symbol: Option<String>,
+    /// The calling convention marker, from the optional word after `from`/`as`
+    /// (`... from "user32" system`). `None` when the declaration names none.
+    /// A no-op on every target OpenEPL emits — see `CallConv` — carried for a
+    /// future 32-bit backend.
+    pub conv: Option<CallConv>,
     /// 1-based source line of the `dll` keyword; 0 when unknown.
     pub line: usize,
     /// Where the name is written, for a diagnostic about the declaration itself.
@@ -729,6 +849,12 @@ pub struct RecordDef {
     /// Fields in declaration order. The order is the layout: a field is reached
     /// by index at run time, so no field name reaches the shipped binary.
     pub fields: Vec<(String, Ty)>,
+    /// `record NAME is c`: this record has a fixed C memory layout — a flat
+    /// struct with natural alignment and padding — rather than the default
+    /// runtime-heap object. A c-record is a value whose storage is a stack
+    /// alloca; `address of` it yields the pointer a C API expects. A plain
+    /// record (`is_c == false`) is unchanged: a reference to a heap object.
+    pub is_c: bool,
     /// 1-based source line of the `record` keyword; 0 when unknown.
     pub line: usize,
 }
@@ -741,6 +867,62 @@ impl RecordDef {
             .position(|(n, _)| n == name)
             .map(|i| (i + 1, self.fields[i].1))
     }
+
+    /// The C-struct layout of an `is c` record: the byte offset of each field
+    /// (parallel to `fields`) and the total `sizeof`, computed with natural
+    /// alignment — a field sits at the next offset that is a multiple of its
+    /// alignment, and the whole struct is rounded up to its largest field's
+    /// alignment so an array of them would stride correctly. `None` if any
+    /// field has no by-value C layout (an aggregate), which the validator has
+    /// already rejected for an `is c` record.
+    ///
+    /// This is the single source of truth for `size of`, for a field GEP, and
+    /// for the padding the tests check against clang — there is no second
+    /// place layout could be computed and disagree.
+    pub fn c_layout(&self) -> Option<(Vec<i64>, i64)> {
+        let mut offsets = Vec::with_capacity(self.fields.len());
+        let mut cursor: i64 = 0;
+        let mut max_align: i64 = 1;
+        for (_, fty) in &self.fields {
+            let (size, align) = fty.c_size_align()?;
+            // Round the cursor up to this field's alignment before placing it —
+            // the padding a C compiler inserts is exactly this rounding.
+            cursor = (cursor + align - 1) / align * align;
+            offsets.push(cursor);
+            cursor += size;
+            if align > max_align {
+                max_align = align;
+            }
+        }
+        // Tail padding: the struct's size is a multiple of its widest member's
+        // alignment, so `a[1]` begins as aligned as `a[0]` did.
+        let size = (cursor + max_align - 1) / max_align * max_align;
+        Some((offsets, size))
+    }
+}
+
+/// A named compile-time constant: `const NAME = LITERAL`.
+///
+/// The value is always a literal (an integer, a double, a text or a bool — the
+/// parser folds a leading `-` into the number), so `ty` is fixed at parse time
+/// and a reference to the name behaves in every position exactly as the literal
+/// would. A constant is module-level, like a `GlobalVar`, but read-only and
+/// with no storage: it never reaches the binary as anything but the number it
+/// stands for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstDef {
+    pub name: String,
+    /// The literal the name stands for: `IntLit`, `DoubleLit`, `TextLit` or
+    /// `BoolLit`. Held as an `Expr` so the checker and the backend can fold a
+    /// reference by evaluating it in place, reusing every literal path.
+    pub value: Expr,
+    /// The value's type, computed from the literal at parse time (an `int`
+    /// literal that overflows `i32` is `int64`, as everywhere else).
+    pub ty: Ty,
+    /// 1-based source line of the `const` keyword; 0 when unknown.
+    pub line: usize,
+    /// Where the name is written, for a diagnostic about the constant itself.
+    pub name_span: Span,
 }
 
 /// A module-level variable.
@@ -864,6 +1046,14 @@ impl Module {
     pub fn records(&self) -> impl Iterator<Item = &RecordDef> {
         self.items.iter().filter_map(|i| match i {
             Item::UserType(r) => Some(r),
+            _ => None,
+        })
+    }
+
+    /// Iterate the named constants, in declaration order.
+    pub fn consts(&self) -> impl Iterator<Item = &ConstDef> {
+        self.items.iter().filter_map(|i| match i {
+            Item::Const(c) => Some(c),
             _ => None,
         })
     }

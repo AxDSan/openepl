@@ -4,7 +4,8 @@
 //! ```text
 //! module  := "module" IDENT NEWLINE item*
 //! item    := sub
-//! sub     := "sub" IDENT params? (":" type)? NEWLINE stmt* "end" NEWLINE
+//! sub     := "sub" IDENT params? (":" type)? conv? NEWLINE stmt* "end" NEWLINE
+//! conv    := "stdcall" | "cdecl" | "system"
 //! params  := "(" (IDENT ":" type ("," IDENT ":" type)*)? ")"
 //! stmt    := let | call | return | for | break | continue
 //! return  := "return" expr? NEWLINE
@@ -26,10 +27,8 @@
 //! ```
 
 use crate::lexer::{lex, Spanned, Tok};
-use crate::{
-    intern, BinOp, CmpOp, Component, DllDecl, Elem, Expr, Form, GlobalVar, Ident, Item, LogicalOp,
-    Module, RecordDef, Span, Stmt, StmtKind, Sub, Target, Ty,
-};
+use crate::{intern, BinOp, CallConv, CmpOp, Component, ConstDef, DllDecl, Elem, Expr, Form, GlobalVar, Ident, Item,
+    LogicalOp, Module, RecordDef, Span, Stmt, StmtKind, Sub, Target, Ty,};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -199,6 +198,13 @@ impl Parser {
                 // otherwise, and reserving `dll` would steal the word from every
                 // program that has a variable called that.
                 Tok::Ident(w) if w == "dll" => items.push(Item::Dll(self.dll_decl()?)),
+                // `const NAME = LITERAL` — a named constant. `const` is a SOFT
+                // keyword matched only here: `const foo = 1` and a component
+                // `const foo` differ by the `=`, and reserving the word would
+                // steal it from every program that has a variable called that.
+                Tok::Ident(w) if w == "const" => {
+                    items.push(Item::Const(self.const_def()?))
+                }
                 // `type id` at module level is a NON-VISUAL component — a timer,
                 // a server. It reads exactly as it does inside a form, because
                 // the only thing it lacks is a rectangle to be drawn in; the
@@ -211,8 +217,8 @@ impl Parser {
                 Tok::Eof => break,
                 other => {
                     return self.err(format!(
-                        "expected `sub`, `dll`, `form`, `var`, a component, or end of file, \
-                         found {other:?}"
+                        "expected `sub`, `dll`, `const`, `form`, `var`, a component, or end of \
+                         file, found {other:?}"
                     ))
                 }
             }
@@ -221,7 +227,7 @@ impl Parser {
     }
 
     /// ```text
-    /// sub := "sub" IDENT params? (":" type)? NEWLINE stmt* "end" NEWLINE
+    /// sub := "sub" IDENT params? (":" type)? conv? NEWLINE stmt* "end" NEWLINE
     /// ```
     ///
     /// Both the parameter list and the return type are optional, so `sub main`
@@ -271,6 +277,11 @@ impl Parser {
         } else {
             None
         };
+        // An optional trailing convention marker, the same one a `dll` takes:
+        // `sub wndproc(...): int64 system`. It documents the convention C calls
+        // this sub with when its `address of` is handed across, and is a no-op
+        // on every 64-bit target — carried for a future 32-bit backend.
+        let conv = self.call_conv_opt(&format!("subroutine `{name}`"))?;
         self.expect(&Tok::Newline, "newline after subroutine name")?;
 
         let mut body = Vec::new();
@@ -305,6 +316,7 @@ impl Parser {
             name,
             params,
             ret,
+            conv,
             line: sub_line,
             name_span,
             body,
@@ -313,7 +325,7 @@ impl Parser {
 
     /// ```text
     /// dll := "dll" IDENT "(" ffiparams? ")" (":" ffitype)?
-    ///        "from" STRING ("as" STRING)? NEWLINE
+    ///        "from" STRING ("as" STRING)? conv? NEWLINE
     /// ```
     ///
     /// A foreign function: the same header a `sub` has, but ending in `from` and
@@ -339,7 +351,7 @@ impl Parser {
             loop {
                 let pname = self.ident("parameter name")?;
                 self.expect(&Tok::Colon, "`:` after parameter name")?;
-                let pty = self.ffi_type(&name)?;
+                let pty = self.ffi_type(&name, true)?;
                 if params.iter().any(|(n, _)| *n == pname) {
                     return self.err(format!(
                         "foreign function `{name}` declares parameter `{pname}` twice"
@@ -364,7 +376,7 @@ impl Parser {
         // foreign function.
         let ret = if matches!(self.peek(), Tok::Colon) {
             self.bump();
-            Some(self.ffi_type(&name)?)
+            Some(self.ffi_type(&name, false)?)
         } else {
             None
         };
@@ -414,6 +426,22 @@ impl Parser {
             None
         };
 
+        // `stdcall` / `cdecl` / `system` — an optional convention marker, last
+        // on the line after `from` and any `as`. It is documentation and
+        // forward-compat: the backend emits the same call for every target it
+        // builds (all 64-bit, one C convention), and carries the marker for a
+        // future 32-bit backend.
+        let conv = self.call_conv_opt(&format!("foreign function `{name}`"))?;
+        // `as` belongs before the convention (`from "x" as "y" system`). A
+        // trailing `as` is the two written out of order — name that, rather than
+        // let `expect(Newline)` blame the `as` token with a generic message.
+        if conv.is_some() && matches!(self.peek(), Tok::Ident(w) if w == "as") {
+            return self.err(format!(
+                "foreign function `{name}`: write `as \"symbol\"` before the calling \
+                 convention, not after it"
+            ));
+        }
+
         self.expect(&Tok::Newline, "newline after foreign function declaration")?;
         Ok(DllDecl {
             name,
@@ -421,6 +449,7 @@ impl Parser {
             ret,
             library,
             symbol,
+            conv,
             line: dll_line,
             name_span,
         })
@@ -430,14 +459,50 @@ impl Parser {
     /// a dictionary, a byte-set or a record is refused here — a later stage may
     /// pass one *by pointer*, but nothing in this stage marshals an aggregate
     /// across the boundary by value.
-    fn ffi_type(&mut self, dll_name: &str) -> Result<Ty, ParseError> {
+    fn ffi_type(&mut self, dll_name: &str, allow_record: bool) -> Result<Ty, ParseError> {
         let t = self.type_keyword()?;
         match t {
             Ty::Int | Ty::Int64 | Ty::Double | Ty::Bool | Ty::Text | Ty::Ptr => Ok(t),
+            // A bare record name is allowed as a PARAMETER: a c-record parameter
+            // means the C prototype takes a pointer to that struct, and the
+            // caller passes the c-record (or `address of` it). The parser does
+            // not yet know the record is `is c`, so the validator confirms it —
+            // and rejects a heap record, or an undeclared name, with the line.
+            // A record RETURN is refused here: handing a struct back by value is
+            // a different ABI this stage does not implement — return a `ptr`.
+            Ty::Record(_) if allow_record => Ok(t),
+            Ty::Record(n) => self.err(format!(
+                "foreign function `{dll_name}`: a `dll` cannot return the record `{n}` by \
+                 value — return a `ptr` to it (or an out-parameter typed `{n}`)"
+            )),
             other => self.err(format!(
                 "foreign function `{dll_name}`: `{}` cannot cross the C boundary — a `dll` \
-                 signature takes int, int64, double, bool, text or ptr",
+                 signature takes int, int64, double, bool, text, ptr or a c-record parameter",
                 other.as_str()
+            )),
+        }
+    }
+
+    /// An optional calling-convention marker at the end of a `dll` or `sub`
+    /// header, before the newline: `stdcall`, `cdecl` or `system`. It is a soft
+    /// keyword — a plain identifier the parser recognises only in this trailing
+    /// position — so none of the three is reserved anywhere else. An identifier
+    /// here that is not one of the three is refused, with the allowed set named,
+    /// rather than left to trip the newline check with a worse message. `what`
+    /// is the thing being declared, for that diagnostic.
+    fn call_conv_opt(&mut self, what: &str) -> Result<Option<CallConv>, ParseError> {
+        let word = match self.peek() {
+            Tok::Ident(w) => w.clone(),
+            _ => return Ok(None),
+        };
+        match CallConv::parse(&word) {
+            Some(conv) => {
+                self.bump();
+                Ok(Some(conv))
+            }
+            None => self.err(format!(
+                "{what}: `{word}` is not a calling convention — use stdcall, cdecl or system \
+                 (or leave it off; on a 64-bit target they are the same)"
             )),
         }
     }
@@ -507,12 +572,89 @@ impl Parser {
     }
 
     /// ```text
+    /// const := "const" IDENT "=" literal NEWLINE
+    /// literal := "-"? (INT | FLOAT | STRING | "true" | "false")
+    /// ```
+    ///
+    /// A named constant is a single literal, nothing more: no arithmetic, no
+    /// reference to another constant. Keeping the value a bare literal is what
+    /// lets its type be known here and lets every later stage fold a reference
+    /// to it by evaluating the one literal it stands for.
+    fn const_def(&mut self) -> Result<ConstDef, ParseError> {
+        let line = self.line();
+        self.bump(); // `const`, a soft keyword consumed here
+        let name_span = self.span_at(self.pos);
+        let name = self.ident("constant name")?;
+        self.expect(&Tok::Eq, "`=` after a constant name")?;
+        let (value, ty) = self.const_literal(&name)?;
+        self.expect(&Tok::Newline, "newline after a constant")?;
+        Ok(ConstDef { name, value, ty, line, name_span })
+    }
+
+    /// The literal on the right of `const NAME =`: an integer, a double, a text
+    /// or a bool, with an optional leading `-` folded into the number exactly
+    /// as a negated literal is folded elsewhere. Anything richer — a variable,
+    /// a call, an expression — is refused here, where the message can say a
+    /// constant is a literal.
+    fn const_literal(&mut self, name: &str) -> Result<(Expr, Ty), ParseError> {
+        let negate = matches!(self.peek(), Tok::Minus);
+        if negate {
+            self.bump();
+        }
+        let (expr, ty) = match self.bump() {
+            Tok::Int(v) => {
+                let v = if negate { v.checked_neg().ok_or_else(|| ParseError {
+                    line: self.line(),
+                    msg: format!("constant `{name}`: the value is out of range"),
+                })? } else { v };
+                // An `int` literal that does not fit `i32` types `int64`, the
+                // same rule `int_literal_type` applies everywhere else.
+                let ty = if i32::try_from(v).is_ok() { Ty::Int } else { Ty::Int64 };
+                (Expr::IntLit(v), ty)
+            }
+            Tok::Float(v) => (Expr::DoubleLit(if negate { -v } else { v }), Ty::Double),
+            Tok::Str(_) | Tok::True | Tok::False if negate => {
+                return self.err(format!(
+                    "constant `{name}`: `-` may only precede a number"
+                ))
+            }
+            Tok::Str(s) => (Expr::TextLit(s), Ty::Text),
+            Tok::True => (Expr::BoolLit(true), Ty::Bool),
+            Tok::False => (Expr::BoolLit(false), Ty::Bool),
+            other => {
+                return self.err(format!(
+                    "constant `{name}` must be a literal (a number, a text or a bool), \
+                     found {other:?}"
+                ))
+            }
+        };
+        Ok((expr, ty))
+    }
+
+    /// ```text
     /// record := "record" IDENT NEWLINE (IDENT ":" type NEWLINE)+ "end" NEWLINE
     /// ```
     fn record_def(&mut self) -> Result<RecordDef, ParseError> {
         let line = self.line();
         self.bump(); // `record`
         let name = self.ident("record name")?;
+        // `record NAME is c` marks a C-layout record. `is` and `c` are two
+        // ordinary idents in this one spot — soft, like `record` itself — so a
+        // record whose fields happen to be named `is` or `c` is unaffected: the
+        // marker is only these two words, in this order, before the newline.
+        let is_c = if matches!(self.peek(), Tok::Ident(w) if w == "is") {
+            self.bump(); // `is`
+            match self.bump() {
+                Tok::Ident(w) if w == "c" => true,
+                other => {
+                    return self.err(format!(
+                        "expected `c` after `is` in `record {name} is c`, found {other:?}"
+                    ))
+                }
+            }
+        } else {
+            false
+        };
         self.expect(&Tok::Newline, "newline after record name")?;
         let mut fields: Vec<(String, Ty)> = Vec::new();
         loop {
@@ -525,7 +667,11 @@ impl Parser {
                 Tok::Ident(field) => {
                     self.bump();
                     self.expect(&Tok::Colon, "`:` after a field name")?;
-                    let ty = self.type_keyword()?;
+                    let ty = if is_c {
+                        self.crecord_field_type(&name)?
+                    } else {
+                        self.type_keyword()?
+                    };
                     self.expect(&Tok::Newline, "newline after a field")?;
                     if fields.iter().any(|(n, _)| *n == field) {
                         return self
@@ -555,7 +701,36 @@ impl Parser {
                 ),
             });
         }
-        Ok(RecordDef { name, fields, line })
+        Ok(RecordDef { name, fields, is_c, line })
+    }
+
+    /// A field type inside a `record NAME is c`: the C-representable scalar set
+    /// a `dll` allows, plus `byte` (a single `char`/`uint8_t` member) which is
+    /// meaningful only in a C layout. A nested c-record by value and a fixed
+    /// array are honest C, but this stage does not lay them out — the message
+    /// says so rather than letting `type_keyword` read the word as some other
+    /// record name and failing further along.
+    fn crecord_field_type(&mut self, rec: &str) -> Result<Ty, ParseError> {
+        // `byte` is not a `Ty::from_keyword` keyword — it stays an ordinary
+        // word elsewhere — so it is recognised here, by spelling, before the
+        // general type parse turns an unknown word into a record name.
+        if matches!(self.peek(), Tok::Ident(w) if w == "byte") {
+            self.bump();
+            return Ok(Ty::Byte);
+        }
+        let t = self.type_keyword()?;
+        match t {
+            Ty::Int | Ty::Int64 | Ty::Double | Ty::Bool | Ty::Text | Ty::Ptr => Ok(t),
+            Ty::Record(_) => self.err(format!(
+                "c-record `{rec}`: a field that is another record or an array is not laid \
+                 out yet — a c-record field is int, int64, double, bool, text, ptr or byte"
+            )),
+            other => self.err(format!(
+                "c-record `{rec}`: `{}` is not a C-layout field type — use int, int64, \
+                 double, bool, text, ptr or byte",
+                other.as_str()
+            )),
+        }
     }
 
     /// A component instance; `type_name` has already been consumed.
@@ -724,8 +899,18 @@ impl Parser {
         let name = self.ident("variable name")?;
         self.expect(&Tok::Colon, "`:` after variable name")?;
         let ty = self.type_keyword()?;
-        self.expect(&Tok::Eq, "`=`")?;
-        let value = self.expr()?;
+        // `var r: RECT` with no `= EXPR` is a zeroed c-record local. The parser
+        // cannot yet know `RECT` is a c-record (one pass), so it accepts the
+        // omitted initializer for any type and hands the checker a `ZeroInit`,
+        // which the checker allows only for a c-record `var`. A missing `=` on
+        // an ordinary type becomes a clear "only a c-record may be left
+        // uninitialised" there, with the declared type to name.
+        let value = if matches!(self.peek(), Tok::Newline) {
+            Expr::ZeroInit
+        } else {
+            self.expect(&Tok::Eq, "`=`")?;
+            self.expr()?
+        };
         self.expect(&Tok::Newline, "newline after `let`")?;
         Ok(self.finish(StmtKind::Let {
             name,
@@ -1154,6 +1339,17 @@ impl Parser {
                     let sub = self.ident("the name of a subroutine after `address of`")?;
                     return Ok(Expr::AddressOf(sub));
                 }
+                // `size of TYPE` — a compile-time byte count. `size` is a soft
+                // keyword the same way `address` is: it means this only before
+                // `of`, so a variable named `size` is untouched. The operand is
+                // a type (a c-record name or a scalar), read with the same
+                // `type_keyword` a declaration uses, so `size of RECT` and
+                // `size of int` share one parse.
+                if name == "size" && matches!(self.peek(), Tok::Ident(w) if w == "of") {
+                    self.bump(); // `of`
+                    let ty = self.type_keyword()?;
+                    return Ok(Expr::SizeOf(ty));
+                }
                 // `point(x: 1, y: 2)` — a record. A named first argument is
                 // what separates it from a call, and two tokens of lookahead
                 // are enough to see one.
@@ -1303,6 +1499,91 @@ mod tests {
         };
         assert_eq!(*ty, Ty::Ptr);
         assert_eq!(*value, Expr::AddressOf("h".to_string()));
+    }
+
+    #[test]
+    fn parses_a_calling_convention_on_a_dll() {
+        // After `from`, and after an `as`, and each of the three markers.
+        let m = parse(
+            "module m\n\
+             dll a(): int from \"x\" system\n\
+             dll b(): int from \"x\" as \"bb\" stdcall\n\
+             dll c(): int from \"x\" cdecl\n\
+             dll d(): int from \"x\"\n",
+        )
+        .unwrap();
+        let convs: Vec<Option<CallConv>> = m.dlls().map(|d| d.conv).collect();
+        assert_eq!(
+            convs,
+            vec![
+                Some(CallConv::System),
+                Some(CallConv::Stdcall),
+                Some(CallConv::Cdecl),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_a_calling_convention_on_a_sub() {
+        // A bare sub, a sub with a return type, and one with neither marker.
+        let m = parse(
+            "module m\n\
+             sub bare system\nend\n\
+             sub shaped(a: int): int64 stdcall\n  return 0\nend\n\
+             sub plain\nend\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.subs().find(|s| s.name == "bare").unwrap().conv,
+            Some(CallConv::System)
+        );
+        assert_eq!(
+            m.subs().find(|s| s.name == "shaped").unwrap().conv,
+            Some(CallConv::Stdcall)
+        );
+        assert_eq!(m.subs().find(|s| s.name == "plain").unwrap().conv, None);
+    }
+
+    #[test]
+    fn rejects_an_unknown_calling_convention() {
+        // On a `dll` and on a `sub`; the message names the offender and the set.
+        for src in [
+            "module m\ndll f(): int from \"x\" fastcall\n",
+            "module m\nsub f(a: int): int pascal\n  return 0\nend\n",
+        ] {
+            let e = parse(src).expect_err("an unknown convention must be rejected");
+            assert!(
+                e.msg.contains("stdcall"),
+                "the diagnostic should name the allowed set, got: {}",
+                e.msg
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_convention_before_as() {
+        // `as` must come first; a trailing `as` names the ordering, not a bad
+        // convention.
+        let e = parse("module m\ndll f(): int from \"x\" system as \"g\"\n")
+            .expect_err("a convention before `as` must be rejected");
+        assert!(
+            e.msg.contains("before the calling convention"),
+            "the diagnostic should point at the `as`/convention order, got: {}",
+            e.msg
+        );
+    }
+
+    /// The three words are only conventions in the trailing position. Anywhere
+    /// else — a variable, a parameter name — they stay ordinary identifiers.
+    #[test]
+    fn a_convention_word_is_a_soft_keyword() {
+        let m =
+            parse("module m\nsub main\n  var system: int = 1\n  system = system + 1\nend\n").unwrap();
+        let main = m.subs().next().unwrap();
+        assert!(matches!(main.body[0].kind, StmtKind::Let { .. }));
+        assert!(matches!(main.body[1].kind, StmtKind::Assign { .. }));
+        assert_eq!(main.conv, None);
     }
 
     /// `address` is only special before `of`: on its own it is an ordinary name,
@@ -1546,6 +1827,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_constants_and_types_them_by_their_literal() {
+        let m = parse(
+            "module m\nconst A = 42\nconst BIG = 5000000000\nconst NEG = -7\n             const PI = 3.5\nconst TAG = \"hi\"\nconst OK = true\nsub main\nend\n",
+        )
+        .unwrap();
+        let cs: Vec<_> = m.consts().collect();
+        assert_eq!(cs.len(), 6, "six constants");
+        assert_eq!(cs[0].ty, Ty::Int);
+        assert!(matches!(cs[0].value, Expr::IntLit(42)));
+        assert_eq!(cs[1].ty, Ty::Int64, "a value past i32 is int64");
+        assert!(matches!(cs[2].value, Expr::IntLit(-7)), "a leading `-` folds into the number");
+        assert_eq!(cs[3].ty, Ty::Double);
+        assert_eq!(cs[4].ty, Ty::Text);
+        assert_eq!(cs[5].ty, Ty::Bool);
+    }
+
+    #[test]
+    fn a_constant_must_be_a_literal_not_an_expression() {
+        let e = parse("module m\nconst A = 1 + 2\nsub main\nend\n").unwrap_err();
+        // The `+ 2` is left over after the literal `1`, so the newline check
+        // trips — the point is only that a compound value does not parse.
+        assert!(e.line > 0, "a non-literal constant must be rejected: {}", e.msg);
+    }
+
+    #[test]
+    fn const_is_a_soft_keyword() {
+        // `const` is only a declaration at module-item position; as a variable
+        // name inside a sub it is an ordinary word.
+        let m = parse("module m\nsub main\n  var const: int = 1\n  const = 2\nend\n").unwrap();
+        assert!(m.consts().next().is_none(), "no module constant here");
+    }
+
+    #[test]
     fn precedence() {
         // 2 + 3 * 4 == 2 + (3*4)
         let m = parse("module m\nsub main\n  let x: int = 2 + 3 * 4\nend\n").unwrap();
@@ -1561,5 +1875,55 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// `record NAME is c` marks the record C-layout and lets a field be `byte`,
+    /// which is not a type keyword anywhere else.
+    #[test]
+    fn parses_a_c_layout_record_with_a_byte_field() {
+        let m = parse(
+            "module m\nrecord Mixed is c\n  a: byte\n  b: int\nend\nsub main\nend\n",
+        )
+        .unwrap();
+        let rec = m.records().next().expect("a record");
+        assert!(rec.is_c, "`is c` should mark the record C-layout");
+        assert_eq!(rec.fields[0], ("a".to_string(), Ty::Byte));
+        assert_eq!(rec.fields[1], ("b".to_string(), Ty::Int));
+        let (offsets, size) = rec.c_layout().expect("a C layout");
+        assert_eq!(offsets, vec![0, 4], "b is aligned to offset 4");
+        assert_eq!(size, 8, "the struct is padded to its widest member");
+    }
+
+    /// A plain `record` keeps `is_c` false, and `byte` there is a record name,
+    /// not the layout type — the containment holds.
+    #[test]
+    fn a_plain_record_is_not_c_layout() {
+        let m = parse("module m\nrecord point\n  x: int\nend\nsub main\nend\n").unwrap();
+        assert!(!m.records().next().unwrap().is_c);
+    }
+
+    /// `var r: RECT` with no `= value` is a zeroed c-record local; `size of` and
+    /// `address of` are the two operators a c-record adds.
+    #[test]
+    fn parses_zero_init_and_size_of() {
+        let m = parse(
+            "module m\nrecord RECT is c\n  n: int\nend\n\
+             sub main\n  var r: RECT\n  let s: int64 = size of RECT\nend\n",
+        )
+        .unwrap();
+        let Item::Sub(sub) = m.items.iter().find(|i| matches!(i, Item::Sub(_))).unwrap()
+        else {
+            panic!()
+        };
+        assert!(
+            matches!(&sub.body[0].kind, StmtKind::Let { value: Expr::ZeroInit, .. }),
+            "an uninitialised `var` is `ZeroInit`: {:?}",
+            sub.body[0].kind
+        );
+        assert!(
+            matches!(&sub.body[1].kind, StmtKind::Let { value: Expr::SizeOf(Ty::Record("RECT")), .. }),
+            "`size of RECT` is `SizeOf(Record)`: {:?}",
+            sub.body[1].kind
+        );
     }
 }

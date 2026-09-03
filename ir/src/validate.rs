@@ -83,6 +83,25 @@ pub fn validate(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
 /// `validate`, with what the caller knows about libraries the module has not
 /// used — see [`Hints`].
 pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Vec<ValidateError>> {
+    validate_impl(m, reg, hints, false)
+}
+
+/// Validate a kit's declaration bundle (`.oed`): the same record, `dll` and
+/// `const` checks a program gets, but without the entry-point and export rules
+/// — a bundle declares, it does not run or export, so "a library needs a
+/// subroutine" is not its contract to meet. This is what lets the loader catch
+/// a malformed kit (a `dll` taking a non-`is c` record, a field of an unknown
+/// type, a name that collides with itself) with the kit's own name.
+pub fn validate_decls(m: &Module, reg: &Registry) -> Result<(), Vec<ValidateError>> {
+    validate_impl(m, reg, &Hints::default(), true)
+}
+
+fn validate_impl(
+    m: &Module,
+    reg: &Registry,
+    hints: &Hints,
+    decls_only: bool,
+) -> Result<(), Vec<ValidateError>> {
     let mut errs: Vec<ValidateError> = Vec::new();
     // Every diagnostic carries a position (all zero when it is not known), so
     // an editor can put the squiggle where the problem is.
@@ -141,6 +160,37 @@ pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Ve
             Span::line(line),
         );
     }
+    // Constants join the same flat name space last, so a `const` that clashes
+    // with anything already registered — a command, a sub, a `dll`, a record or
+    // a constant a kit contributed — is the one reported.
+    for name in with_subs.register_consts(m) {
+        let line = m.consts().find(|c| c.name == name).map_or(0, |c| c.line);
+        push(
+            format!(
+                "constant `{name}` has the same name as a library command, a subroutine, \
+                 a `dll`, a record or another constant — rename the constant"
+            ),
+            Span::line(line),
+        );
+    }
+    // A module variable and a constant are both module-level bindings of one
+    // name, and `register_consts` cannot see the variables (they are not in the
+    // registry). Catch the clash here, where both lists are in hand, so a `var`
+    // never silently shadows a kit's constant.
+    {
+        let const_names: HashSet<&str> = with_subs.const_names().collect();
+        for g in m.globals() {
+            if const_names.contains(g.name.as_str()) {
+                push(
+                    format!(
+                        "module variable `{}` has the same name as a constant — rename one",
+                        g.name
+                    ),
+                    Span::default(),
+                );
+            }
+        }
+    }
     let reg = &with_subs;
 
     // --- record declarations ---------------------------------------------
@@ -157,12 +207,91 @@ pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Ve
     }
     check_record_cycles(&records, &mut push);
 
+    // --- c-record placement ----------------------------------------------
+    //
+    // A c-record is a flat value with a fixed layout; it lives as a `var`
+    // local, a `dll` pointer parameter, or the operand of `address of` / `size
+    // of`, and nowhere the language treats a record as a heap reference. Reject
+    // the heap positions here so a c-record can never reach a path that would
+    // call `oe_rec_*` on a struct that is not one.
+    //
+    // A `dll` parameter typed as a record is the one place a record name is
+    // *wanted*: it says the C prototype takes a pointer to that struct. Require
+    // it to be `is c` — a heap record has no C layout to point at.
+    for d in m.dlls() {
+        for (pname, pty) in &d.params {
+            if let Ty::Record(n) = pty {
+                match reg.record(n) {
+                    Some(def) if def.is_c => {}
+                    Some(_) => push(
+                        format!(
+                            "foreign function `{}`: parameter `{pname}` is the heap record \
+                             `{n}` — a `dll` takes a pointer to a C struct, so declare `{n}` \
+                             `is c`",
+                            d.name
+                        ),
+                        Span::line(d.line),
+                    ),
+                    None => push(
+                        format!(
+                            "foreign function `{}`: parameter `{pname}` has unknown type `{n}`",
+                            d.name
+                        ),
+                        Span::line(d.line),
+                    ),
+                }
+            }
+        }
+    }
+    // The heap-only positions: a c-record is barred from each, with a message
+    // that names the position. `find_c_record` looks through a list or a
+    // dictionary element too, since `RECT[]` and `RECT{}` are heap containers.
+    let mut bar = |ty: Ty, where_: &str, span: Span| {
+        if let Some(n) = find_c_record(ty, reg) {
+            push(
+                format!(
+                    "c-record `{n}` cannot be {where_} — a c-record is a flat value, not a \
+                     heap object; pass `address of` it, or a `ptr`, instead"
+                ),
+                span,
+            );
+        }
+    };
+    for g in m.globals() {
+        bar(g.ty, "a module variable", Span::default());
+    }
+    for sub in m.subs() {
+        if let Some(t) = sub.ret {
+            bar(t, "a subroutine's return", sub.name_span);
+        }
+        for (_, pty) in &sub.params {
+            bar(*pty, "a subroutine parameter", sub.name_span);
+        }
+    }
+    for rec in &records {
+        for (fname, fty) in &rec.fields {
+            // A heap record holding a c-record field, or a list/dict of them:
+            // the outer record is a heap object, so its field is a reference,
+            // and a c-record is not one. (An `is c` record's own fields are the
+            // scalar set the parser already enforced, so this only fires on a
+            // plain record.)
+            if !rec.is_c {
+                bar(
+                    *fty,
+                    &format!("the field `{fname}` of a heap record"),
+                    Span::line(rec.line),
+                );
+            }
+        }
+    }
+
     // --- entry point -----------------------------------------------------
     // What counts as a valid entry depends on the target: a GUI module is
     // entered through its form, a console module needs `main`, and a library
-    // has no entry at all — it is called by a host.
+    // has no entry at all — it is called by a host. A declaration bundle has no
+    // entry contract at all, so the whole block is skipped for one.
     let target = m.target();
-    if target.is_executable() {
+    if !decls_only && target.is_executable() {
         if forms.is_empty() && !sub_names.contains("main") {
             push("module has no `main` subroutine and no `form` (nothing to run)".into(), Span::default());
         }
@@ -175,7 +304,7 @@ pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Ve
         if target == Target::Gui && forms.is_empty() {
             push("`target gui` but the module declares no form".into(), Span::default());
         }
-    } else {
+    } else if !decls_only {
         if subs.is_empty() {
             push(
                 format!(
@@ -457,6 +586,20 @@ pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Ve
                                 stmt.span,
                             );
                         }
+                        // A c-record local is only ever zero-initialised: it has
+                        // no constructor, and copying one struct into another is
+                        // not modelled, so `var r: RECT = anything` is refused
+                        // in favour of the bare `var r: RECT` the layout allows.
+                        if find_c_record(*ty, reg).is_some()
+                            && !matches!(value, Expr::ZeroInit)
+                        {
+                            push(format!(
+                                "in `{}`: a c-record `{name}` is declared `var {name}: {}` with \
+                                 no initializer (it starts zeroed); set its fields afterwards",
+                                sub.name,
+                                ty.as_str()
+                            ), stmt.span);
+                        }
                         match type_of_expr_hinted(value, Some(*ty), &vars, reg, &components) {
                             Ok(got) if got == *ty => {}
                             Ok(got) => push(format!(
@@ -494,6 +637,18 @@ pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Ve
                                 &vars,
                                 &mut push,
                             ),
+                            Some(expected) if find_c_record(expected, reg).is_some() => {
+                                // A c-record name cannot be reassigned: there is
+                                // no value to give it (no constructor, and a
+                                // copy of another struct is not modelled). Write
+                                // its fields, or the bytes through a `ptr`.
+                                push(format!(
+                                    "in `{}`: `{name}` is a c-record and cannot be reassigned — \
+                                     set its fields (`{name}.field = ...`) or write through \
+                                     `address of {name}`",
+                                    sub.name
+                                ), stmt.span);
+                            }
                             Some(expected) => {
                                 let is_local = local_names.contains(name);
                                 let is_mutable = if is_local {
@@ -1088,6 +1243,21 @@ fn check_initializer(
 /// where a word that names nothing is caught — and it has to run at every
 /// declaration site, since a misspelt type reaching the backend is a crash
 /// rather than a diagnostic.
+/// The c-record name reachable in `ty` — the type itself, or the element of a
+/// list or dictionary of them — or `None` if none is. Used to bar a c-record
+/// from the heap positions where a record is a reference.
+fn find_c_record(ty: Ty, reg: &Registry) -> Option<&'static str> {
+    let name = match ty {
+        Ty::Record(n) => n,
+        Ty::Array(Elem::Record(n)) | Ty::Dict(Elem::Record(n)) => n,
+        _ => return None,
+    };
+    match reg.record(name) {
+        Some(def) if def.is_c => Some(name),
+        _ => None,
+    }
+}
+
 fn undeclared_type(ty: Ty, reg: &Registry) -> Option<&'static str> {
     let name = match ty {
         Ty::Record(n) => n,
@@ -1635,6 +1805,33 @@ mod tests {
             .find(|e| e.msg.contains("same name as a library command"))
             .unwrap_or_else(|| panic!("{e:?}"));
         assert_eq!(bad.line, 2);
+    }
+
+    #[test]
+    fn a_constant_is_usable_where_a_literal_is() {
+        // A const folds to its literal, so it types like one in a comparison,
+        // an argument and arithmetic.
+        accepts(
+            "module m\nconst ANSWER = 42\nsub main\n  if ANSWER = 42\n    call print_int(ANSWER + 1)\n  end\nend\n",
+        );
+    }
+
+    #[test]
+    fn rejects_a_constant_that_shadows_a_command() {
+        let e = errors("module m\nconst length = 3\nsub main\nend\n");
+        assert!(
+            e.iter().any(|e| e.msg.contains("constant `length`") && e.msg.contains("library command")),
+            "a const may not take a command's name: {e:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_module_variable_and_a_constant_of_one_name() {
+        let e = errors("module m\nconst N = 1\nvar N: int = 2\nsub main\nend\n");
+        assert!(
+            e.iter().any(|e| e.msg.contains("same name as a constant")),
+            "a var and a const of one name must clash: {e:?}"
+        );
     }
 
     #[test]

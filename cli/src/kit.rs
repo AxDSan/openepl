@@ -147,10 +147,17 @@ pub fn user_kits_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".openepl").join("kits"))
 }
 
-/// A directory is a kit when it holds the metadata TU the compiler dlopens.
-/// That is the same test `use` applies, so nothing can be listed that cannot
-/// then be used.
+/// A directory is a kit when it holds the metadata TU the compiler dlopens
+/// (`*_libinfo.c`) or a declaration bundle named for the directory
+/// (`<name>.oed`). That is the same test `use` and the loader apply, so nothing
+/// can be listed that cannot then be used, and a declaration-only kit — one
+/// that ships `dll`/`record`/`const` lines and no C — is a first-class kit.
 fn is_kit_dir(dir: &Path) -> bool {
+    if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+        if dir.join(format!("{name}.oed")).is_file() {
+            return true;
+        }
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
@@ -213,6 +220,24 @@ pub fn cmd_list(repo_root: &Path) -> i32 {
                 component,
                 k.dir.join(icon).display()
             );
+        }
+        // A kit's declaration bundle, read through the ONE `.oed` reader the
+        // loader uses — so what `openepl kits` says a kit declares and what a
+        // program gets from `use` can never disagree. A bundle that will not
+        // parse is simply not listed here; the build is where that error is
+        // worth stopping for.
+        if let Ok(Some(decls)) = crate::libload::read_decls(&k.dir, &k.name) {
+            for d in decls.dlls() {
+                println!("dll: {} {} {}", k.name, d.name, d.library);
+            }
+            for rec in decls.records() {
+                if rec.is_c {
+                    println!("crecord: {} {}", k.name, rec.name);
+                }
+            }
+            for c in decls.consts() {
+                println!("const: {} {} {}", k.name, c.name, c.ty.as_str());
+            }
         }
     }
     0

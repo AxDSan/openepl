@@ -155,6 +155,13 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `config_set_int` | int, text, text, int | bool |
 | `config_set` | int, text, text, text | bool |
 
+## demoffi
+
+`use demoffi`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+
 ## file
 
 `use file`

@@ -1,0 +1,20 @@
+# demoffi — a declaration bundle. `use demoffi` brings every line here into a
+# program with no local `dll`, `record` or `const`. This is a plain kit (no
+# "platforms" in lib.json), so it builds on Linux and Windows alike.
+#
+# The `dll` that takes DemoPoint is written BEFORE the record it names on
+# purpose: a declaration bundle is registered whole before any cross-reference
+# is checked, so order inside it does not matter.
+
+dll demoffi_add(a: int, b: int): int from "demoffi"
+dll demoffi_greeting(): text from "demoffi"
+dll demoffi_move(p: DemoPoint, dx: int, dy: int) from "demoffi"
+
+record DemoPoint is c
+  x: int
+  y: int
+end
+
+const DEMO_ANSWER = 42
+const DEMO_SCALE = 10
+const DEMO_TAG = "demoffi"
