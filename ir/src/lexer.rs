@@ -22,6 +22,17 @@ pub enum Tok {
     And,
     Or,
     Not,
+    /// `bnot` — bitwise complement. Reserved, exactly as `not` is.
+    ///
+    /// The *infix* bitwise words (`band`, `bor`, `bxor`, `shl`, `shr`, `ushr`)
+    /// are soft keywords the parser recognises only in operator position,
+    /// where an identifier could never have appeared — so a name spelled like
+    /// one keeps working. A prefix operator has no such shelter: `bnot(x)` and
+    /// `bnot -1` read as the operator and as a call or a subtraction equally
+    /// well, and choosing wrong is a wrong answer rather than an error. So
+    /// this one is a keyword, and a name spelled `bnot` is refused where it is
+    /// written instead of quietly meaning something else.
+    BNot,
     True,
     False,
     Use,
@@ -31,6 +42,12 @@ pub enum Tok {
     // Literals / identifiers
     Ident(String),
     Int(i64),
+    /// A hex or binary literal — `0xFF`, `0b1010`. Kept as the raw **bit
+    /// pattern** rather than a signed value, because how wide it is depends on
+    /// where it lands: `0x8000_0000` is `int` -2147483648 on its own and
+    /// `int64` 2147483648 where an `int64` is wanted, and folding either
+    /// reading in here would make the other one unreachable.
+    Bits(u64),
     Float(f64),
     Str(String),
     // Punctuation / operators
@@ -214,6 +231,60 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                 push(&mut out, Tok::Str(s), line, start_col);
                 i = ni;
             }
+            // `0x...` / `0b...` — a bit pattern, before the decimal path, which
+            // would otherwise read `0b1010` as the number 0 and the name
+            // `b1010`.
+            _ if c == b'0'
+                && i + 1 < n
+                && matches!(bytes[i + 1], b'x' | b'X' | b'b' | b'B') =>
+            {
+                let base = if matches!(bytes[i + 1], b'x' | b'X') { 16u32 } else { 2u32 };
+                let start = i;
+                i += 2;
+                let digits_start = i;
+                let mut value: u64 = 0;
+                let mut digits = 0usize;
+                while i < n && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+                    if bytes[i] == b'_' {
+                        i += 1;
+                        continue;
+                    }
+                    let d = (bytes[i] as char).to_digit(base).ok_or_else(|| LexError {
+                        line,
+                        msg: format!(
+                            "`{}` is not a {} digit in `{}`",
+                            bytes[i] as char,
+                            if base == 16 { "hexadecimal" } else { "binary" },
+                            &src[start..i + 1]
+                        ),
+                    })?;
+                    // More than 64 bits has no type to land in, and silently
+                    // dropping the top of a bit pattern is the worst possible
+                    // answer.
+                    value = value
+                        .checked_mul(base as u64)
+                        .and_then(|v| v.checked_add(d as u64))
+                        .ok_or_else(|| LexError {
+                            line,
+                            msg: format!(
+                                "the literal `{}` needs more than 64 bits",
+                                &src[start..i + 1]
+                            ),
+                        })?;
+                    digits += 1;
+                    i += 1;
+                }
+                if digits == 0 {
+                    return Err(LexError {
+                        line,
+                        msg: format!(
+                            "`{}` has no digits after it",
+                            &src[start..digits_start]
+                        ),
+                    });
+                }
+                push(&mut out, Tok::Bits(value), line, start_col);
+            }
             _ if c.is_ascii_digit() => {
                 let start = i;
                 while i < n && bytes[i].is_ascii_digit() {
@@ -262,6 +333,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     "and" => Tok::And,
                     "or" => Tok::Or,
                     "not" => Tok::Not,
+                    "bnot" => Tok::BNot,
                     "true" => Tok::True,
                     "false" => Tok::False,
                     "call" => Tok::Call,

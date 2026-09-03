@@ -7,19 +7,29 @@
 //! sub     := "sub" IDENT params? (":" type)? conv? NEWLINE stmt* "end" NEWLINE
 //! conv    := "stdcall" | "cdecl" | "system"
 //! params  := "(" (IDENT ":" type ("," IDENT ":" type)*)? ")"
-//! stmt    := let | call | return | for | break | continue
+//! stmt    := let | call | indirect | return | for | break | continue
 //! return  := "return" expr? NEWLINE
 //! let     := "let" IDENT ":" type "=" expr NEWLINE
 //! call    := "call" IDENT "(" (expr ("," expr)*)? ")" NEWLINE
+//! indirect:= "call" "through" target "(" (expr ("," expr)*)? ")"
+//!            (":" type)? conv? NEWLINE
+//! target  := "(" expr ")" | IDENT ("." IDENT)? ("[" expr "]" | "." IDENT)*
 //! record  := "record" IDENT NEWLINE (IDENT ":" type NEWLINE)+ "end" NEWLINE
 //! type    := ("int" | "int64" | "double" | "text" | "bool" | "bytes" | IDENT)
 //!            ("[" "]" | "{" "}")?
-//! expr    := term (("+" | "-") term)*
+//! expr    := bor (("+" | "-") term)*   -- see the precedence table below
+//! bor     := bxor ("bor" bxor)*
+//! bxor    := band ("bxor" band)*
+//! band    := shift ("band" shift)*
+//! shift   := sum (("shl" | "shr" | "ushr") sum)*
+//! sum     := term (("+" | "-") term)*
 //! term    := factor (("*" | "/" | "%") factor)*
-//! factor  := "-"? postfix
+//! factor  := ("-" | "bnot")? postfix
 //! postfix := primary ("[" expr "]" | "." IDENT)*
-//! primary := INT | FLOAT | STRING | list | dict | new | call | IDENT
-//!          | "(" expr ")"
+//! primary := INT | BITS | FLOAT | STRING | list | dict | new | call | IDENT
+//!          | "(" expr ")" | indirect-expr
+//! indirect-expr := the `indirect` statement's shape without the NEWLINE, used
+//!            for its value; the `: type` is then required.
 //! list    := "[" (expr ("," expr)*)? "]"
 //! dict    := "{" (expr ":" expr ("," expr ":" expr)*)? "}"
 //! new     := IDENT "(" IDENT ":" expr ("," IDENT ":" expr)* ")"
@@ -27,7 +37,8 @@
 //! ```
 
 use crate::lexer::{lex, Spanned, Tok};
-use crate::{carray, intern, BinOp, CallConv, CmpOp, Component, ConstDef, DllDecl, Elem, Expr, Form, GlobalVar, Ident, Item,
+use crate::sema::{bits_bare_type, bits_value};
+use crate::{carray, intern, BinOp, BitOp, CallConv, CmpOp, Component, ConstDef, DllDecl, Elem, Expr, Form, GlobalVar, Ident, Item,
     LogicalOp, Module, RecordDef, Span, Stmt, StmtKind, Sub, Target, Ty,};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -351,7 +362,7 @@ impl Parser {
             loop {
                 let pname = self.ident("parameter name")?;
                 self.expect(&Tok::Colon, "`:` after parameter name")?;
-                let pty = self.ffi_type(&name, true)?;
+                let pty = self.ffi_type(&format!("foreign function `{name}`"), true)?;
                 if params.iter().any(|(n, _)| *n == pname) {
                     return self.err(format!(
                         "foreign function `{name}` declares parameter `{pname}` twice"
@@ -376,7 +387,7 @@ impl Parser {
         // foreign function.
         let ret = if matches!(self.peek(), Tok::Colon) {
             self.bump();
-            Some(self.ffi_type(&name, false)?)
+            Some(self.ffi_type(&format!("foreign function `{name}`"), false)?)
         } else {
             None
         };
@@ -455,11 +466,16 @@ impl Parser {
         })
     }
 
-    /// A type in a `dll` signature: the C-representable subset only. An array,
+    /// A type in a C signature — a `dll` declaration's, or the one a
+    /// `call through` site writes: the C-representable subset only. An array,
     /// a dictionary, a byte-set or a record is refused here — a later stage may
     /// pass one *by pointer*, but nothing in this stage marshals an aggregate
     /// across the boundary by value.
-    fn ffi_type(&mut self, dll_name: &str, allow_record: bool) -> Result<Ty, ParseError> {
+    ///
+    /// `subject` is the whole naming phrase the diagnostic opens with
+    /// (``foreign function `add` `` or `` `call through` ``), so the one rule
+    /// serves both surfaces and their messages still read as themselves.
+    fn ffi_type(&mut self, subject: &str, allow_record: bool) -> Result<Ty, ParseError> {
         let t = self.type_keyword()?;
         match t {
             Ty::Int | Ty::Int64 | Ty::Double | Ty::Bool | Ty::Text | Ty::Ptr => Ok(t),
@@ -472,11 +488,11 @@ impl Parser {
             // a different ABI this stage does not implement — return a `ptr`.
             Ty::Record(_) if allow_record => Ok(t),
             Ty::Record(n) => self.err(format!(
-                "foreign function `{dll_name}`: a `dll` cannot return the record `{n}` by \
+                "{subject}: a C call cannot return the record `{n}` by \
                  value — return a `ptr` to it (or an out-parameter typed `{n}`)"
             )),
             other => self.err(format!(
-                "foreign function `{dll_name}`: `{}` cannot cross the C boundary — a `dll` \
+                "{subject}: `{}` cannot cross the C boundary — a C \
                  signature takes int, int64, double, bool, text, ptr or a c-record parameter",
                 other.as_str()
             )),
@@ -611,6 +627,18 @@ impl Parser {
                 // same rule `int_literal_type` applies everywhere else.
                 let ty = if i32::try_from(v).is_ok() { Ty::Int } else { Ty::Int64 };
                 (Expr::IntLit(v), ty)
+            }
+            // `const WS_POPUP = 0x8000_0000`. A constant is its literal, so it
+            // keeps the literal's width-from-context behaviour: the declared
+            // type here is what the pattern means *on its own*, and a use that
+            // wants an `int64` still gets the 64-bit reading.
+            Tok::Bits(v) if !negate => (Expr::BitsLit(v), bits_bare_type(v)),
+            Tok::Bits(v) => {
+                let n = bits_value(v).checked_neg().ok_or_else(|| ParseError {
+                    line: self.line(),
+                    msg: format!("constant `{name}`: the value is out of range"),
+                })?;
+                (Expr::IntLit(n), if i32::try_from(n).is_ok() { Ty::Int } else { Ty::Int64 })
             }
             Tok::Float(v) => (Expr::DoubleLit(if negate { -v } else { v }), Ty::Double),
             Tok::Str(_) | Tok::True | Tok::False if negate => {
@@ -1224,11 +1252,89 @@ impl Parser {
     fn stmt_call(&mut self) -> Result<Stmt, ParseError> {
         let start = self.pos;
         self.expect(&Tok::Call, "`call`")?;
+        // `call through <ptr>(args...)` — an indirect call in statement
+        // position, its result (if the site declares one) discarded, exactly as
+        // `call add(1, 2)` discards a subroutine's.
+        if matches!(self.peek(), Tok::Ident(w) if w == "through") {
+            let (callee, args, ret, conv) = self.call_through_tail()?;
+            self.expect(&Tok::Newline, "newline after call")?;
+            return Ok(self.finish(
+                StmtKind::CallThrough { callee, args, ret, conv },
+                start,
+            ));
+        }
         let cmd = self.ident("command name")?;
         self.expect(&Tok::LParen, "`(`")?;
         let args = self.arg_list()?;
         self.expect(&Tok::Newline, "newline after call")?;
         Ok(self.finish(StmtKind::Call { cmd, args }, start))
+    }
+
+    /// The whole of `through <callee>(args...)[: type][convention]`, with the
+    /// `call` already consumed — shared by the statement and the expression, so
+    /// the two forms cannot drift into different grammars.
+    ///
+    /// `through` is a *soft* keyword: it is recognised only in this one slot,
+    /// straight after `call`, so a variable, a field or a parameter named
+    /// `through` is untouched everywhere else.
+    fn call_through_tail(
+        &mut self,
+    ) -> Result<(Expr, Vec<Expr>, Option<Ty>, Option<CallConv>), ParseError> {
+        self.bump(); // `through`
+        let callee = self.call_through_callee()?;
+        self.expect(&Tok::LParen, "`(` starting the arguments of `call through`")?;
+        let args = self.arg_list()?;
+        // `: type` — the C return. Absent is a `void` call, the same reading a
+        // `dll` line with no `: type` has.
+        let ret = if matches!(self.peek(), Tok::Colon) {
+            self.bump();
+            Some(self.ffi_type("`call through`", false)?)
+        } else {
+            None
+        };
+        let conv = self.call_conv_opt("`call through`")?;
+        // A second `(` here means the callee was written as a call —
+        // `call through dlsym(h, "add")(1, 2)` — and the first parenthesis was
+        // read as the argument list, because that is what a parenthesis after
+        // the callee means. Say so, rather than leave it to trip the newline.
+        if matches!(self.peek(), Tok::LParen) {
+            return self.err(
+                "`call through` read `(...)` as its arguments, and there is a second `(...)` \
+                 after it — a callee that is itself a call goes in parentheses, as in \
+                 `call through (GetProcAddress(h, \"add\"))(1, 2)`"
+                    .to_string(),
+            );
+        }
+        Ok((callee, args, ret, conv))
+    }
+
+    /// The address half of a `call through`: `(any expression)`, or a name and
+    /// the `.field` / `[i]` path from it.
+    ///
+    /// A bare name may NOT be followed by `(` here, because that `(` opens the
+    /// argument list — which is why the callee is parsed by this narrow rule
+    /// rather than by `expr()`. Anything more involved is written in
+    /// parentheses: `call through (ptr_read_ptr(vtable, 24))(object)` is how a
+    /// COM method, read out of the object's own table, is reached.
+    fn call_through_callee(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek(), Tok::LParen) {
+            self.bump();
+            let e = self.expr()?;
+            self.expect(&Tok::RParen, "`)` closing the callee of `call through`")?;
+            return Ok(e);
+        }
+        let name = self.ident("a `ptr` value, or `(expression)`, after `call through`")?;
+        // The first `.` is a `GetProperty` and later ones are `Field`, exactly
+        // as `primary` builds them — so `r.fn_ptr` types by the same rule that
+        // reads it anywhere else.
+        let base = if matches!(self.peek(), Tok::Dot) {
+            self.bump();
+            let property = self.ident("field name")?;
+            Expr::GetProperty { component: name, property }
+        } else {
+            Expr::Var(name)
+        };
+        self.postfix(base)
     }
 
     /// Parse a comma-separated argument list, assuming the opening `(` has been
@@ -1287,7 +1393,7 @@ impl Parser {
     /// rather than `(a < b) < c`, which would silently compare a bool to a
     /// number and give a confidently wrong answer.
     fn cmp_expr(&mut self) -> Result<Expr, ParseError> {
-        let lhs = self.sum()?;
+        let lhs = self.bor_expr()?;
         let op = match self.peek() {
             Tok::Eq => CmpOp::Eq,
             Tok::Ne => CmpOp::Ne,
@@ -1298,7 +1404,7 @@ impl Parser {
             _ => return Ok(lhs),
         };
         self.bump();
-        let rhs = self.sum()?;
+        let rhs = self.bor_expr()?;
         if matches!(
             self.peek(),
             Tok::Eq | Tok::Ne | Tok::Lt | Tok::Le | Tok::Gt | Tok::Ge
@@ -1308,6 +1414,74 @@ impl Parser {
             );
         }
         Ok(Expr::Cmp(op, Box::new(lhs), Box::new(rhs)))
+    }
+
+    /// The word an infix operator is spelled with, when the next token is one.
+    ///
+    /// `band`, `shl` and their siblings are **soft** keywords: they are read as
+    /// operators only here, where a complete operand has just been parsed and
+    /// an identifier could never have begun anything. A variable, a parameter
+    /// or a field named `band` therefore keeps working everywhere else, and no
+    /// program that compiled before this existed stops compiling.
+    fn infix_word(&self) -> Option<&str> {
+        match self.peek() {
+            Tok::Ident(w) => Some(w.as_str()),
+            _ => None,
+        }
+    }
+
+    /// `bor` — the loosest bitwise level, and looser than a comparison, so
+    /// `flags band WS_VISIBLE <> 0` reads the way it looks. (C binds these
+    /// tighter than `==`, which is the reason C programmers parenthesise every
+    /// flag test; OpenEPL does not need them to.)
+    fn bor_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.bxor_expr()?;
+        while self.infix_word() == Some("bor") {
+            self.bump();
+            let rhs = self.bxor_expr()?;
+            lhs = Expr::Bit(BitOp::Or, Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn bxor_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.band_expr()?;
+        while self.infix_word() == Some("bxor") {
+            self.bump();
+            let rhs = self.band_expr()?;
+            lhs = Expr::Bit(BitOp::Xor, Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn band_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.shift_expr()?;
+        while self.infix_word() == Some("band") {
+            self.bump();
+            let rhs = self.shift_expr()?;
+            lhs = Expr::Bit(BitOp::And, Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    /// Shifts bind tighter than the bitwise levels and looser than `+`, so
+    /// `1 shl n band mask` is `(1 shl n) band mask` and `x shl a + b` is
+    /// `x shl (a + b)` — the second is C's ordering, and the reading a count
+    /// computed with `+` wants.
+    fn shift_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.sum()?;
+        loop {
+            let op = match self.infix_word() {
+                Some("shl") => BitOp::Shl,
+                Some("shr") => BitOp::Shr,
+                Some("ushr") => BitOp::Ushr,
+                _ => break,
+            };
+            self.bump();
+            let rhs = self.sum()?;
+            lhs = Expr::Bit(op, Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
     }
 
     fn sum(&mut self) -> Result<Expr, ParseError> {
@@ -1352,9 +1526,23 @@ impl Parser {
                     Some(n) => Expr::IntLit(n),
                     None => return self.err("integer literal out of range"),
                 },
+                // `-0xFF` is the number -255: a leading `-` says the pattern was
+                // meant as a magnitude, so it collapses to a plain integer
+                // literal here and stops being width-dependent.
+                Expr::BitsLit(v) => match bits_value(v).checked_neg() {
+                    Some(n) => Expr::IntLit(n),
+                    None => return self.err("integer literal out of range"),
+                },
                 Expr::DoubleLit(v) => Expr::DoubleLit(-v),
                 other => Expr::Neg(Box::new(other)),
             });
+        }
+        // `bnot EXPR` — every bit flipped. Unlike the infix words this is a
+        // reserved keyword; see `Tok::BNot` for why a prefix operator cannot
+        // be a soft one.
+        if matches!(self.peek(), Tok::BNot) {
+            self.bump();
+            return Ok(Expr::BitNot(Box::new(self.factor()?)));
         }
         let primary = self.primary()?;
         self.postfix(primary)
@@ -1447,10 +1635,31 @@ impl Parser {
             self.expect(&Tok::RBrace, "`}` closing the dictionary")?;
             return Ok(Expr::DictLit(pairs));
         }
+        // `call through <ptr>(args...): T` used for its value. `call` is a
+        // keyword, so it began no expression before this and nothing can be
+        // shadowed by allowing it here.
+        if matches!(self.peek(), Tok::Call) {
+            self.bump();
+            if !matches!(self.peek(), Tok::Ident(w) if w == "through") {
+                return self.err(
+                    "`call` inside an expression is only `call through <ptr>(...)`; a command \
+                     or subroutine is called by name, without `call`, when its result is wanted"
+                        .to_string(),
+                );
+            }
+            let (callee, args, ret, conv) = self.call_through_tail()?;
+            return Ok(Expr::CallThrough {
+                callee: Box::new(callee),
+                args,
+                ret,
+                conv,
+            });
+        }
         match self.bump() {
             Tok::True => Ok(Expr::BoolLit(true)),
             Tok::False => Ok(Expr::BoolLit(false)),
             Tok::Int(v) => Ok(Expr::IntLit(v)),
+            Tok::Bits(v) => Ok(Expr::BitsLit(v)),
             Tok::Float(v) => Ok(Expr::DoubleLit(v)),
             Tok::Str(s) => Ok(Expr::TextLit(s)),
             Tok::Ident(name) => {
@@ -1721,6 +1930,61 @@ mod tests {
         assert!(matches!(main.body[0].kind, StmtKind::Let { .. }));
         assert!(matches!(main.body[1].kind, StmtKind::Assign { .. }));
         assert_eq!(main.conv, None);
+    }
+
+    /// `call through <ptr>(args): T` parses in both positions, and the shape it
+    /// carries is the callee, the arguments and the site's declared return.
+    #[test]
+    fn parses_call_through_as_a_value_and_as_a_statement() {
+        let m = parse(
+            "module m\nsub main\n  var fp: ptr = ptr_null()\n  \
+             let n: int = call through fp(10, 20): int\n  call through fp(1)\nend\n",
+        )
+        .unwrap();
+        let s = m.subs().next().unwrap();
+        let StmtKind::Let { value, .. } = &s.body[1].kind else {
+            panic!("expected a let")
+        };
+        let Expr::CallThrough { callee, args, ret, conv } = value else {
+            panic!("expected a call through, got {value:?}")
+        };
+        assert_eq!(**callee, Expr::Var("fp".to_string()));
+        assert_eq!(args.len(), 2);
+        assert_eq!(*ret, Some(Ty::Int));
+        assert_eq!(*conv, None);
+
+        let StmtKind::CallThrough { ret, args, .. } = &s.body[2].kind else {
+            panic!("expected a call-through statement, got {:?}", s.body[2].kind)
+        };
+        // No `: type` on the statement: a C `void` call.
+        assert_eq!(*ret, None);
+        assert_eq!(args.len(), 1);
+    }
+
+    /// A callee in parentheses is any expression — the vtable read a COM call
+    /// is made of — and a trailing convention marker is accepted as on a `dll`.
+    #[test]
+    fn parses_a_parenthesised_callee_and_a_convention() {
+        let m = parse(
+            "module m\nsub main\n  var t: ptr = ptr_null()\n  \
+             call through (ptr_read_ptr(t, 0))(t) system\nend\n",
+        )
+        .unwrap();
+        let s = m.subs().next().unwrap();
+        let StmtKind::CallThrough { callee, conv, .. } = &s.body[1].kind else {
+            panic!("expected a call-through statement")
+        };
+        assert!(matches!(callee, Expr::Call { cmd, .. } if cmd == "ptr_read_ptr"));
+        assert_eq!(*conv, Some(CallConv::System));
+    }
+
+    /// `through` means something only straight after `call`; everywhere else it
+    /// is an ordinary identifier.
+    #[test]
+    fn through_is_a_soft_keyword() {
+        let m = parse("module m\nsub main\n  var through: int = 1\n  through = through + 1\nend\n")
+            .expect("`through` must stay a usable name");
+        assert_eq!(m.subs().next().unwrap().body.len(), 2);
     }
 
     /// `address` is only special before `of`: on its own it is an ordinary name,
@@ -2016,6 +2280,99 @@ mod tests {
 
     /// `record NAME is c` marks the record C-layout and lets a field be `byte`,
     /// which is not a type keyword anywhere else.
+    /// The bitwise level of the table, checked by shape rather than by reading
+    /// the functions. The two that matter most: a comparison is looser than
+    /// every bitwise operator (so a flag test needs no parentheses), and a
+    /// shift is tighter than `band` but looser than `+`.
+    #[test]
+    fn bitwise_precedence() {
+        let src = "module m\n\
+                   sub main\n\
+                     let a: bool = f band m <> 0\n\
+                     let b: int = 1 shl 4 band 255\n\
+                     let c: int = 1 shl 2 + 2\n\
+                     let d: int = 1 bor 6 band 4\n\
+                   end\n";
+        let m = parse(src).unwrap();
+        let Item::Sub(s) = &m.items[0] else { panic!() };
+        let value = |i: usize| match &s.body[i].kind {
+            StmtKind::Let { value, .. } => value.clone(),
+            other => panic!("{other:?}"),
+        };
+        // `(f band m) <> 0`, not `f band (m <> 0)`.
+        assert!(
+            matches!(value(0), Expr::Cmp(CmpOp::Ne, l, _) if matches!(*l, Expr::Bit(BitOp::And, ..)))
+        );
+        // `(1 shl 4) band 255`.
+        assert!(
+            matches!(value(1), Expr::Bit(BitOp::And, l, _) if matches!(*l, Expr::Bit(BitOp::Shl, ..)))
+        );
+        // `1 shl (2 + 2)`.
+        assert!(
+            matches!(value(2), Expr::Bit(BitOp::Shl, _, r) if matches!(*r, Expr::Bin(BinOp::Add, ..)))
+        );
+        // `1 bor (6 band 4)`.
+        assert!(
+            matches!(value(3), Expr::Bit(BitOp::Or, _, r) if matches!(*r, Expr::Bit(BitOp::And, ..)))
+        );
+    }
+
+    /// The infix operator words are soft keywords: they mean the operator only
+    /// where an operator can go, so a name is still a name. `bnot` is the one
+    /// that is reserved — see `Tok::BNot` for why a prefix operator cannot be
+    /// soft.
+    #[test]
+    fn the_infix_operator_words_are_soft_keywords() {
+        let src = "module m\n\
+                   sub main\n\
+                     let band: int = 1\n\
+                     let shl: int = band\n\
+                     let x: int = shl shl band\n\
+                   end\n";
+        let m = parse(src).unwrap();
+        let Item::Sub(s) = &m.items[0] else { panic!() };
+        assert_eq!(s.body.len(), 3);
+        assert!(
+            matches!(&s.body[1].kind, StmtKind::Let { value: Expr::Var(n), .. } if n == "band")
+        );
+        // `shl shl band` is the name, the operator, the name.
+        let StmtKind::Let { value: Expr::Bit(BitOp::Shl, l, r), .. } = &s.body[2].kind else {
+            panic!("{:?}", s.body[2].kind)
+        };
+        assert!(matches!(&**l, Expr::Var(n) if n == "shl"));
+        assert!(matches!(&**r, Expr::Var(n) if n == "band"));
+        // `bnot` is reserved, so it is never a name.
+        assert!(parse("module m\nsub main\n  let bnot: int = 1\nend\n").is_err());
+        let m = parse("module m\nsub main\n  let x: int = bnot 1\nend\n").unwrap();
+        let Item::Sub(s) = &m.items[0] else { panic!() };
+        assert!(matches!(&s.body[0].kind, StmtKind::Let { value: Expr::BitNot(_), .. }));
+    }
+
+    /// A hex or binary literal reaches the tree as the bits that were written;
+    /// how wide they are is decided later, by what they meet.
+    #[test]
+    fn parses_bit_patterns() {
+        let src = "module m\n\
+                   sub main\n\
+                     let a: int = 0xFF\n\
+                     let b: int = 0b1010\n\
+                     let c: int = 0xDEAD_BEEF\n\
+                     let d: int = -0x10\n\
+                   end\n";
+        let m = parse(src).unwrap();
+        let Item::Sub(s) = &m.items[0] else { panic!() };
+        let value = |i: usize| match &s.body[i].kind {
+            StmtKind::Let { value, .. } => value.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(value(0), Expr::BitsLit(0xFF));
+        assert_eq!(value(1), Expr::BitsLit(0b1010));
+        assert_eq!(value(2), Expr::BitsLit(0xDEAD_BEEF));
+        // A leading `-` says the pattern was meant as a magnitude, so it
+        // collapses to a plain number and stops depending on its width.
+        assert_eq!(value(3), Expr::IntLit(-16));
+    }
+
     #[test]
     fn parses_a_c_layout_record_with_a_byte_field() {
         let m = parse(

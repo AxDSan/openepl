@@ -1,0 +1,37 @@
+# The same plug-in, loaded the Windows way: LoadLibraryA and GetProcAddress
+# from the `win` kit hand back an address, and `call through` calls it.
+#
+# Before `call through` existed this was the wall the kit hit — GetProcAddress
+# returned a `ptr` to a function that nothing in the language could call.
+module plugwin
+use win
+
+sub main
+  let lib: ptr = LoadLibraryA("plug.dll")
+  if ptr_is_null(lib)
+    call print_text("plug.dll did not load")
+    return
+  end
+
+  let add_fn: ptr = GetProcAddress(lib, "add")
+  call print_int(call through add_fn(5, 10): int system)
+
+  let name_fn: ptr = GetProcAddress(lib, "name")
+  call print_text(call through name_fn(): text system)
+
+  let cell: ptr = mem_alloc(4)
+  call ptr_write_int(cell, 0, 41)
+  call through (GetProcAddress(lib, "bump"))(cell) system
+  call print_int(ptr_read_int(cell, 0))
+  call mem_free(cell)
+
+  # A pointer read out of a table, as a COM method is read out of a vtable.
+  let table: ptr = mem_alloc(8)
+  call ptr_write_ptr(table, 0, add_fn)
+  call print_int(call through (ptr_read_ptr(table, 0))(20, 22): int system)
+  call mem_free(table)
+
+  if FreeLibrary(lib)
+    call print_text("done")
+  end
+end

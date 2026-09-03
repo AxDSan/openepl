@@ -71,16 +71,14 @@ not breakpoints, stepping or variable inspection.
 - Local variables are visible for the whole subroutine, not just the block
   they were declared in. A `for` loop's variable follows the same rule, so two
   loops in one subroutine need two different variable names.
-- A `ptr` that holds a function's address cannot be called. `address of`
-  makes one and a `dll` can take one, but there is no indirect call, so the
-  pointer `GetProcAddress` answers can be stored and passed on and not
-  invoked — and COM, whose every method call goes through a vtable, is out of
-  reach for the same reason.
-- No bitwise operators and no bitwise commands: there is no `and`, `or`,
-  `xor`, `not` or shift on an integer. Combining flags works because flag bits
-  are disjoint, so `PROCESS_VM_READ + PROCESS_VM_WRITE` is the number C's `|`
-  gives — but testing one bit out of a word has no spelling beyond arithmetic
-  with `%` and `/`.
+- An indirect call — `call through fp(a, b): int` — is checked for the two
+  things that can be known: the callee is a `ptr`, and every argument has a
+  shape C can be handed. Nothing checks the signature *against the function*,
+  because at the call there is no function, only an address; a wrong argument
+  count, width or return type is a wrong C prototype, with whatever that does.
+  COM is reachable this way — a vtable slot is a `ptr_read_ptr` and a
+  `call through` — but nothing is bound for it: `IUnknown`, the `HRESULT`
+  conventions and the `this` argument are all written out by hand.
 - No mixing of numeric types in one expression: `d + 1` where `d` is a
   `double` is an error, not an implicit conversion. Write
   `d + int_to_double(1)`.

@@ -14,13 +14,15 @@
 namespace openepl::designer {
 
 inline bool is_keyword(const std::string& w) {
-    // `target`, `to` and `step` are soft keywords in the grammar — highlighted,
-    // but still usable as identifiers elsewhere.
+    // `target`, `to`, `step`, `through` and the infix bitwise words are soft
+    // keywords in the grammar — highlighted, but still usable as identifiers
+    // elsewhere, which a line tokenizer cannot tell apart and does not try to.
     static const char* kw[] = {"module", "use",  "form", "sub",  "end",  "let",   "var",
                                "target", "sharedlib", "staticlib", "console", "gui",
                                "call",   "on",   "if",   "else", "while", "and",  "or",
                                "not",    "true", "false", "int", "int64", "double", "text", "bool",
-                               "return", "for",  "break", "continue", "to", "step"};
+                               "return", "for",  "break", "continue", "to", "step",
+                               "through", "band", "bor", "bxor", "bnot", "shl", "shr", "ushr"};
     for (const char* k : kw) {
         if (w == k) return true;
     }
@@ -76,7 +78,21 @@ inline std::string highlight_line(const std::string& line) {
         }
         if (std::isdigit((unsigned char)c)) {
             size_t j = i;
-            while (j < line.size() && (std::isdigit((unsigned char)line[j]) || line[j] == '.')) j++;
+            // `0x...` and `0b...` first, or `0x8000_0000` paints as the number
+            // `0` beside an identifier. Their digits may be grouped with `_`,
+            // which a decimal literal may not be — the lexer draws the same
+            // line.
+            const bool bits = c == '0' && j + 1 < line.size() &&
+                              (line[j + 1] == 'x' || line[j + 1] == 'X' ||
+                               line[j + 1] == 'b' || line[j + 1] == 'B');
+            if (bits) {
+                j += 2;
+                while (j < line.size() &&
+                       (std::isalnum((unsigned char)line[j]) || line[j] == '_')) j++;
+            } else {
+                while (j < line.size() &&
+                       (std::isdigit((unsigned char)line[j]) || line[j] == '.')) j++;
+            }
             out += "<span class='n'>" + escape_code(line.substr(i, j - i)) + "</span>";
             i = j;
             continue;

@@ -439,6 +439,49 @@ pub enum LogicalOp {
     Or,
 }
 
+/// A bitwise operator. Separate from `BinOp` because these are the operators
+/// that work on a value's *bits* rather than its magnitude: they are defined
+/// on `int` and `int64` only, they never touch `double`, and they are spelled
+/// as words rather than as symbols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitOp {
+    /// `band` — bitwise AND. Masking, and the way a flag is tested.
+    And,
+    /// `bor` — bitwise OR. How flags are combined.
+    Or,
+    /// `bxor` — bitwise exclusive OR.
+    Xor,
+    /// `shl` — shift left.
+    Shl,
+    /// `shr` — shift right, keeping the sign (an arithmetic shift): a negative
+    /// value stays negative. `ushr` is the one that shifts zeros in.
+    Shr,
+    /// `ushr` — shift right filling with zeros (a logical shift), which is what
+    /// a value used as a bit pattern rather than as a number wants.
+    Ushr,
+}
+
+impl BitOp {
+    /// The word it is written with, for a diagnostic.
+    pub fn word(self) -> &'static str {
+        match self {
+            BitOp::And => "band",
+            BitOp::Or => "bor",
+            BitOp::Xor => "bxor",
+            BitOp::Shl => "shl",
+            BitOp::Shr => "shr",
+            BitOp::Ushr => "ushr",
+        }
+    }
+
+    /// Shifts are the asymmetric ones: the right operand is a *count*, not a
+    /// second value, so it carries its own type and the result takes the left
+    /// operand's.
+    pub fn is_shift(self) -> bool {
+        matches!(self, BitOp::Shl | BitOp::Shr | BitOp::Ushr)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -467,6 +510,24 @@ impl BinOp {
 pub enum Expr {
     /// Integer literal — typed `int` unless it overflows `i32` (then `int64`).
     IntLit(i64),
+    /// A hex or binary literal (`0xFF`, `0b1010`, `0xDEAD_BEEF`), held as the
+    /// bit pattern that was written.
+    ///
+    /// It is not an `IntLit` because a bit pattern has no sign until something
+    /// says how wide it is, and the answer differs by context:
+    ///
+    /// * where an `int64` is wanted it is that pattern in 64 bits, so
+    ///   `0x8000_0000` is 2147483648 — which is what a `DWORD` constant such as
+    ///   `HKEY_CLASSES_ROOT` means when it reaches an `int64` parameter;
+    /// * on its own, a pattern of 32 bits or fewer is an `int` with exactly
+    ///   those bits, so `0x8000_0000` is -2147483648 and `0xFFFF_FFFF` is -1 —
+    ///   which is what a mask means when it meets an `int`;
+    /// * a pattern wider than 32 bits is an `int64` with exactly those bits.
+    ///
+    /// Folding either reading in the lexer would make the other unreachable,
+    /// so the choice is deferred to the one place that knows: the type the
+    /// destination declares.
+    BitsLit(u64),
     /// Floating-point literal (`double`).
     DoubleLit(f64),
     /// Text literal (decoded, unescaped bytes).
@@ -487,6 +548,11 @@ pub enum Expr {
     Logical(LogicalOp, Box<Expr>, Box<Expr>),
     /// `not EXPR`.
     Not(Box<Expr>),
+    /// `a band b`, `x shl 8` — a bitwise operation on `int` or `int64`.
+    Bit(BitOp, Box<Expr>, Box<Expr>),
+    /// `bnot EXPR` — every bit flipped. The bitwise counterpart of `not`,
+    /// which is the one for truth values.
+    BitNot(Box<Expr>),
     /// `xs[i]` — one element of an array, or one byte of a byte-set (which
     /// reads as an `int` 0..255). Bounds are checked at run time; a constant
     /// index the checker can see is checked before the program is built.
@@ -547,6 +613,25 @@ pub enum Expr {
     /// scalar's C width. It is what a program passes to `mem_alloc`, or to a C
     /// API that wants the size of the struct it is being handed.
     SizeOf(Ty),
+    /// `call through EXPR(args...): RetType` — a call to a function whose
+    /// address is only known at run time.
+    ///
+    /// This is the counterpart of a `dll` line. A `dll` names a symbol the
+    /// linker resolves; this names a `ptr` the program is holding —
+    /// `GetProcAddress` handed it back, or it was read out of a COM vtable, or
+    /// a plugin registered it — and the *call site* supplies the C signature
+    /// that a `dll` declaration would otherwise have carried. The argument
+    /// types are whatever the argument expressions are; `ret` is the `: T`
+    /// after the parentheses, and `None` is a C `void` call.
+    CallThrough {
+        /// The address to call. Must type as `ptr`.
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+        ret: Option<Ty>,
+        /// A trailing convention marker, as on a `dll` — a no-op on every
+        /// 64-bit target, carried for a future 32-bit backend.
+        conv: Option<CallConv>,
+    },
     /// The implicit initializer of `var r: RECT` written with no `= EXPR`: a
     /// c-record local whose flat storage starts all-zero. It carries no type of
     /// its own — the `let`'s declared type says which c-record — so the checker
@@ -637,6 +722,16 @@ pub enum StmtKind {
     /// `call CMD(args...)` — a call in statement position; a non-void return is
     /// discarded.
     Call { cmd: String, args: Vec<Expr> },
+    /// `call through EXPR(args...)` in statement position — the same indirect
+    /// call as the expression, with any result discarded. A `: T` may still be
+    /// written (a C function that returns a value the program does not want),
+    /// exactly as `call add(1, 2)` discards a `sub`'s result.
+    CallThrough {
+        callee: Expr,
+        args: Vec<Expr>,
+        ret: Option<Ty>,
+        conv: Option<CallConv>,
+    },
     /// `xs[i] = EXPR` — replace one element in place.
     ///
     /// This changes the array, not the name, so it is allowed on a `let`: the

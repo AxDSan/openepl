@@ -20,8 +20,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::sema::{
-    callee, check_args_labeled, field_type, property_desc, type_of_expr_hinted, type_of_expr_in,
-    Components,
+    callee, check_args_labeled, check_call_through, field_type, property_desc, type_of_expr_hinted,
+    type_of_expr_in, Components,
 };
 use crate::registry::{ComponentKind, PropertyDesc};
 use crate::{
@@ -750,6 +750,16 @@ fn validate_impl(
                             }
                         }
                     },
+                    // `call through <ptr>(...)` — an indirect call for its
+                    // effect. There is no name to resolve and no signature to
+                    // check against: the site declares the signature, so what
+                    // is checked is that the callee is an address and every
+                    // argument has a C shape.
+                    StmtKind::CallThrough { callee: target, args, .. } => {
+                        if let Err(e) = check_call_through(target, args, &vars, reg, &components) {
+                            report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push);
+                        }
+                    }
                     StmtKind::If { arms, otherwise } => {
                         for (cond, body) in arms {
                             check_condition(cond, &vars, reg, hints, &components, &sub.name, stmt, &mut push);
@@ -871,7 +881,14 @@ fn validate_impl(
                                 };
                                 match type_of_expr_in(index, &vars, reg, &components) {
                                     Ok(Ty::Int) => {
-                                        if let Expr::IntLit(v) = index {
+                                        // A bit pattern is a number here like
+                                        // any other, so `xs[0x0]` is caught too.
+                                        let written = match index {
+                                            Expr::IntLit(v) => Some(*v),
+                                            Expr::BitsLit(v) => Some(crate::sema::bits_value(*v)),
+                                            _ => None,
+                                        };
+                                        if let Some(v) = written.as_ref() {
                                             // Indexing counts from 1. Catching a
                                             // literal 0 here is worth the special
                                             // case: it is the one mistake every
@@ -1296,8 +1313,8 @@ fn check_initializer(
             check_initializer(l, globals, reg)?;
             check_initializer(r, globals, reg)
         }
-        Expr::Neg(e) | Expr::Not(e) => check_initializer(e, globals, reg),
-        Expr::Cmp(_, l, r) | Expr::Logical(_, l, r) => {
+        Expr::Neg(e) | Expr::Not(e) | Expr::BitNot(e) => check_initializer(e, globals, reg),
+        Expr::Cmp(_, l, r) | Expr::Logical(_, l, r) | Expr::Bit(_, l, r) => {
             check_initializer(l, globals, reg)?;
             check_initializer(r, globals, reg)
         }
@@ -1340,6 +1357,15 @@ fn check_initializer(
         Expr::GetProperty { .. } => {
             Err("cannot read a component property before the form exists".to_string())
         }
+        // The address to call comes from somewhere — a `GetProcAddress`, a
+        // `dlsym`, a vtable — and nothing has run yet at module-initialiser
+        // time, so the pointer can only be null here. Refusing it names that,
+        // rather than leaving a call through address zero to fault at start-up.
+        Expr::CallThrough { .. } => Err(
+            "cannot make an indirect call here; module variable initializers may use literals \
+             and command calls only"
+                .to_string(),
+        ),
         _ => Ok(()),
     }
 }

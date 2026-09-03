@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 use openepl_ir::sema::resolve_ret;
 use openepl_ir::registry::{ComponentKind, DllSig};
 use openepl_ir::{
-    BinOp, CmpOp, Component, Elem, Expr, LogicalOp, Module, Registry, Signature, Ty,
+    BinOp, BitOp, CmpOp, Component, Elem, Expr, LogicalOp, Module, Registry, Signature, Ty,
 };
 
 /// Accessibility role for a form root (`OE_ROLE_WINDOW`, abi/openepl_abi.h).
@@ -397,6 +397,9 @@ impl Lowerer<'_> {
         Ok(match e {
             Expr::TextLit(s) => s.clone(),
             Expr::IntLit(v) => v.to_string(),
+            // A property written as a bit pattern (`width = 0x1E0`) is a
+            // literal like any other; the UI layer wants the number.
+            Expr::BitsLit(v) => openepl_ir::sema::bits_value(*v).to_string(),
             Expr::DoubleLit(v) => format!("{v}"),
             Expr::BoolLit(b) => b.to_string(),
             _ => return err("component property values must be literals in v0.2"),
@@ -947,6 +950,10 @@ impl Lowerer<'_> {
                 self.eval_call(cmd, args)?; // any return value discarded
                 Ok(())
             }
+            StmtKind::CallThrough { callee, args, ret, conv: _ } => {
+                self.eval_call_through(callee, args, *ret)?; // result discarded
+                Ok(())
+            }
             StmtKind::If { arms, otherwise } => {
                 let done = self.fresh_label("endif");
                 for (cond, body) in arms {
@@ -1392,6 +1399,27 @@ impl Lowerer<'_> {
                     operand: v.to_string(),
                 });
             }
+        }
+        // A hex/binary pattern takes the width its destination declares, and
+        // gains zeros rather than a sign doing it — `0x8000_0000` is the `int`
+        // sign bit on its own and `int64` 2147483648 here. The checker agreed
+        // to the same reading (`bits_value_int64`).
+        if let Expr::BitsLit(v) = e {
+            if hint == Some(Ty::Int64) {
+                return Ok(Val {
+                    ty: Ty::Int64,
+                    operand: openepl_ir::sema::bits_value_int64(*v).to_string(),
+                });
+            }
+        }
+        // Bitwise operators are intercepted here, not in `eval_inner`, because
+        // their operands want the surrounding hint: `var s: int64 = A bor B`
+        // must read both patterns as 64-bit ones, exactly as the checker did.
+        if let Expr::Bit(op, l, r) = e {
+            return self.eval_bit(*op, l, r, hint);
+        }
+        if let Expr::BitNot(inner) = e {
+            return self.eval_bitnot(inner, hint);
         }
         self.eval_inner(e)
     }
@@ -1924,9 +1952,153 @@ impl Lowerer<'_> {
         }
     }
 
+    /// `a band b`, `x shl 8`. The checker has already agreed the types; this
+    /// repeats enough of the rule to pick the right LLVM instruction and to
+    /// refuse rather than emit nonsense if it is ever reached without one.
+    fn eval_bit(
+        &mut self,
+        op: BitOp,
+        l: &Expr,
+        r: &Expr,
+        hint: Option<Ty>,
+    ) -> Result<Val, LowerError> {
+        let want = match hint {
+            Some(Ty::Int) | Some(Ty::Int64) => hint,
+            _ => None,
+        };
+        let lv = self.eval_hinted(l, want)?;
+        if !matches!(lv.ty, Ty::Int | Ty::Int64) {
+            return err(format!(
+                "`{}` works on int and int64 values; its left side is {}",
+                op.word(),
+                lv.ty.as_str()
+            ));
+        }
+        if op.is_shift() {
+            return self.eval_shift(op, lv, r);
+        }
+        // The narrow side of a mixed pair is widened by re-reading it as a
+        // 64-bit pattern. Only a literal (or a constant, which is one) changes
+        // type under a hint — the checker proved that — so the value already
+        // emitted for it is a bare constant and emitting it again costs no
+        // instruction.
+        let rv = self.eval_hinted(r, if lv.ty == Ty::Int64 { Some(Ty::Int64) } else { want })?;
+        let (lv, rv) = if lv.ty == rv.ty {
+            (lv, rv)
+        } else if rv.ty == Ty::Int64 {
+            (self.eval_hinted(l, Some(Ty::Int64))?, rv)
+        } else {
+            return err(format!(
+                "`{}` needs both sides to be the same width: {} vs {}",
+                op.word(),
+                lv.ty.as_str(),
+                rv.ty.as_str()
+            ));
+        };
+        let opcode = match op {
+            BitOp::And => "and",
+            BitOp::Or => "or",
+            BitOp::Xor => "xor",
+            _ => unreachable!("shifts left above"),
+        };
+        let t = self.fresh();
+        writeln!(
+            self.body,
+            "  {t} = {opcode} {} {}, {}",
+            llvm_ty(lv.ty),
+            lv.operand,
+            rv.operand
+        )
+        .unwrap();
+        Ok(Val { ty: lv.ty, operand: t })
+    }
+
+    /// `x shl n`, `x shr n`, `x ushr n`.
+    ///
+    /// The count is a count, not a second value: it is brought to the value's
+    /// own width and the result is the value's type. A count at or beyond that
+    /// width has no answer the hardware agrees on — LLVM calls the result
+    /// poison, which is a silent wrong answer later — so a count written as a
+    /// literal is refused at build time, and one computed at run time is taken
+    /// modulo the width. That is one `and` instruction, no branch, and what
+    /// the machine would have done anyway.
+    fn eval_shift(&mut self, op: BitOp, lv: Val, r: &Expr) -> Result<Val, LowerError> {
+        let rv = self.eval(r)?;
+        if !matches!(rv.ty, Ty::Int | Ty::Int64) {
+            return err(format!(
+                "the count `{}` shifts by must be int or int64, not {}",
+                op.word(),
+                rv.ty.as_str()
+            ));
+        }
+        let width: i64 = if lv.ty == Ty::Int64 { 64 } else { 32 };
+        let count = if let Ok(k) = rv.operand.parse::<i64>() {
+            if !(0..width).contains(&k) {
+                return err(format!(
+                    "`{}` by {k}: an {} can be shifted by 0 to {}",
+                    op.word(),
+                    lv.ty.as_str(),
+                    width - 1
+                ));
+            }
+            k.to_string()
+        } else {
+            let c = if rv.ty == lv.ty {
+                rv.operand.clone()
+            } else {
+                let t = self.fresh();
+                if lv.ty == Ty::Int64 {
+                    writeln!(self.body, "  {t} = sext i32 {} to i64", rv.operand).unwrap();
+                } else {
+                    writeln!(self.body, "  {t} = trunc i64 {} to i32", rv.operand).unwrap();
+                }
+                t
+            };
+            let m = self.fresh();
+            writeln!(self.body, "  {m} = and {} {c}, {}", llvm_ty(lv.ty), width - 1).unwrap();
+            m
+        };
+        let opcode = match op {
+            BitOp::Shl => "shl",
+            BitOp::Shr => "ashr",
+            BitOp::Ushr => "lshr",
+            _ => unreachable!("only shifts reach here"),
+        };
+        let t = self.fresh();
+        writeln!(
+            self.body,
+            "  {t} = {opcode} {} {}, {count}",
+            llvm_ty(lv.ty),
+            lv.operand
+        )
+        .unwrap();
+        Ok(Val { ty: lv.ty, operand: t })
+    }
+
+    /// `bnot x` — every bit flipped, which is `xor` with all ones.
+    fn eval_bitnot(&mut self, e: &Expr, hint: Option<Ty>) -> Result<Val, LowerError> {
+        let want = match hint {
+            Some(Ty::Int) | Some(Ty::Int64) => hint,
+            _ => None,
+        };
+        let v = self.eval_hinted(e, want)?;
+        if !matches!(v.ty, Ty::Int | Ty::Int64) {
+            return err(format!(
+                "`bnot` flips the bits of an int or an int64, got {}",
+                v.ty.as_str()
+            ));
+        }
+        let t = self.fresh();
+        writeln!(self.body, "  {t} = xor {} {}, -1", llvm_ty(v.ty), v.operand).unwrap();
+        Ok(Val { ty: v.ty, operand: t })
+    }
+
     fn eval_inner(&mut self, e: &Expr) -> Result<Val, LowerError> {
         match e {
             // Intercepted by `eval_hinted`, which is the only caller.
+            Expr::Bit(..) | Expr::BitNot(_) => {
+                err("a bitwise operator is lowered by `eval_hinted`")
+            }
             Expr::ArrayLit(_) => err("`[]` here does not say what it holds"),
             Expr::DictLit(_) => err("`{}` here does not say what it holds"),
             Expr::RecordLit { name, fields } => self.eval_record_lit(name, fields),
@@ -1964,6 +2136,13 @@ impl Lowerer<'_> {
                         operand: v.to_string(),
                     })
                 }
+            }
+            Expr::BitsLit(v) => {
+                let ty = openepl_ir::sema::bits_bare_type(*v);
+                Ok(Val {
+                    ty,
+                    operand: openepl_ir::sema::bits_value(*v).to_string(),
+                })
             }
             Expr::DoubleLit(v) => Ok(Val {
                 ty: Ty::Double,
@@ -2141,6 +2320,17 @@ impl Lowerer<'_> {
                     ty: Ty::Ptr,
                     operand: format!("@{}", user_symbol(name)),
                 })
+            }
+            // `call through EXPR(args...): T` in a value position. The checker
+            // has proven the callee is a `ptr` and that the site declares a
+            // return type, so the result is always there to hand back.
+            Expr::CallThrough { callee, args, ret, conv: _ } => {
+                match self.eval_call_through(callee, args, *ret)? {
+                    Some(v) => Ok(v),
+                    None => err(
+                        "a `call through` with no return type has no value".to_string(),
+                    ),
+                }
             }
             // `size of TYPE` is a compile-time constant: a c-record's flat
             // `sizeof`, or a scalar's C width. The checker has already agreed the
@@ -2483,30 +2673,8 @@ impl Lowerer<'_> {
                     v.ty.as_str()
                 ));
             }
-            // A `text` marshals as the `char*` backing it. That pointer is NULL
-            // for a runtime-produced empty text (an allocation that failed, a
-            // `last_error_text` with nothing to say), and a C function running
-            // `strlen` on NULL would fault — so a null text is handed a pointer
-            // to `""` instead. A literal `""` is already a real pointer, so the
-            // common case takes the fast side of the `select`.
-            let operand = if want == Ty::Text {
-                let empty = self.cstr("");
-                let isnull = self.fresh();
-                writeln!(self.body, "  {isnull} = icmp eq ptr {}, null", v.operand).unwrap();
-                let sel = self.fresh();
-                writeln!(
-                    self.body,
-                    "  {sel} = select i1 {isnull}, ptr {empty}, ptr {}",
-                    v.operand
-                )
-                .unwrap();
-                sel
-            } else {
-                v.operand.clone()
-            };
-            ops.push(format!("{} {}", llvm_ty(want), operand));
+            ops.push(self.marshal_c_arg(want, &v));
         }
-        let arglist = ops.join(", ");
 
         // Resolve once, cache in a per-declaration global: a call in a loop
         // pays the load-and-lookup cost a single time. `oe_dll_get` reads the
@@ -2531,7 +2699,54 @@ impl Lowerer<'_> {
         // callconv here would only risk perturbing the proven `--os windows`
         // path for no behavioural gain. The marker is carried on the `DllSig`
         // for a future 32-bit backend, which WOULD read it at this point.
-        match sig.ret {
+        self.emit_c_call(&fp, &ops, sig.ret)
+    }
+
+    /// One argument, in the C representation the boundary wants.
+    ///
+    /// A `text` marshals as the `char*` backing it. That pointer is NULL for a
+    /// runtime-produced empty text (an allocation that failed, a
+    /// `last_error_text` with nothing to say), and a C function running
+    /// `strlen` on NULL would fault — so a null text is handed a pointer to
+    /// `""` instead. A literal `""` is already a real pointer, so the common
+    /// case takes the fast side of the `select`. Everything else is already its
+    /// own C representation: an `int` is an `i32`, a `ptr` is the pointer, and a
+    /// c-record `Val` is the address of its flat storage.
+    fn marshal_c_arg(&mut self, want: Ty, v: &Val) -> String {
+        let operand = if want == Ty::Text {
+            let empty = self.cstr("");
+            let isnull = self.fresh();
+            writeln!(self.body, "  {isnull} = icmp eq ptr {}, null", v.operand).unwrap();
+            let sel = self.fresh();
+            writeln!(
+                self.body,
+                "  {sel} = select i1 {isnull}, ptr {empty}, ptr {}",
+                v.operand
+            )
+            .unwrap();
+            sel
+        } else {
+            v.operand.clone()
+        };
+        format!("{} {}", llvm_ty(want), operand)
+    }
+
+    /// Emit the `call` itself, given a callee operand and marshalled arguments,
+    /// and bring the C result back into an OpenEPL value.
+    ///
+    /// `fp` is a `ptr`-typed operand however it was obtained — the address
+    /// `oe_dll_get` resolved for a `dll`, or the run-time pointer a
+    /// `call through` was handed. Under opaque pointers those are the same
+    /// thing to LLVM, which is why one emitter serves both and a returned
+    /// `char*` or C truth is converted in exactly one place.
+    fn emit_c_call(
+        &mut self,
+        fp: &str,
+        ops: &[String],
+        ret: Option<Ty>,
+    ) -> Result<Option<Val>, LowerError> {
+        let arglist = ops.join(", ");
+        match ret {
             None => {
                 writeln!(self.body, "  call void {fp}({arglist})").unwrap();
                 Ok(None)
@@ -2570,6 +2785,45 @@ impl Lowerer<'_> {
                 Ok(Some(Val { ty: t, operand: r }))
             }
         }
+    }
+
+    /// Lower `call through EXPR(args...): T` — a C call whose callee is a value
+    /// rather than a symbol.
+    ///
+    /// The only difference from a `dll` call is where the address comes from.
+    /// There is no `oe_dll_get`, no cache and no library to open: the program
+    /// already holds the pointer. Under opaque pointers the `ptr` IS the callee
+    /// operand — there is no bitcast to a function type to emit — so the same
+    /// `call <ret> %fp(args)` a `dll` produces is what comes out here, which is
+    /// why the two share `marshal_c_arg` and `emit_c_call` rather than each
+    /// having their own idea of how a `text` crosses.
+    ///
+    /// Each argument's own type is the parameter type: the call site declared
+    /// the signature by writing the expressions, so there is nothing to check
+    /// an argument against — the checker has already proven each has a C shape.
+    /// `conv` is not emitted, for the reason a `dll`'s is not.
+    fn eval_call_through(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        ret: Option<Ty>,
+    ) -> Result<Option<Val>, LowerError> {
+        let target = self.eval(callee)?;
+        if target.ty != Ty::Ptr {
+            return err(format!(
+                "`call through` needs a ptr to call, got {}",
+                target.ty.as_str()
+            ));
+        }
+        // The address is evaluated FIRST, before the arguments, so a callee
+        // expression with a side effect happens where it is written.
+        let fp = target.operand.clone();
+        let mut ops: Vec<String> = Vec::new();
+        for a in args {
+            let v = self.eval(a)?;
+            ops.push(self.marshal_c_arg(v.ty, &v));
+        }
+        self.emit_c_call(&fp, &ops, ret)
     }
 
     /// Lower a command call via the slot ABI; returns the result if non-void.

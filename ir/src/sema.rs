@@ -36,6 +36,40 @@ pub fn int_literal_type(v: i64) -> Ty {
     }
 }
 
+/// The value a hex/binary literal stands for **on its own** — with nothing
+/// saying how wide it should be.
+///
+/// A pattern of 32 bits or fewer is an `int` holding exactly those bits, so
+/// `0x8000_0000` is -2147483648 and `0xFFFF_FFFF` is -1: a mask written for a
+/// 32-bit value has to *be* that 32-bit value. A wider pattern is the `int64`
+/// with those bits, so `0xFFFF_FFFF_FFFF_FFFF` is -1 again, one word up.
+pub fn bits_value(v: u64) -> i64 {
+    if v <= u32::MAX as u64 {
+        (v as u32) as i32 as i64
+    } else {
+        v as i64
+    }
+}
+
+/// The value a hex/binary literal stands for where an `int64` is wanted: the
+/// same bits in 64, so a narrow pattern gains zeros rather than a sign.
+///
+/// This is the reading a Win32 `DWORD` constant needs — `HKEY_CLASSES_ROOT` is
+/// `0x8000_0000`, and as an `int64` it must be 2147483648, not -2147483648.
+pub fn bits_value_int64(v: u64) -> i64 {
+    v as i64
+}
+
+/// The static type of a hex/binary literal with nothing to widen it: `int` for
+/// a pattern that fits 32 bits, `int64` for a wider one.
+pub fn bits_bare_type(v: u64) -> Ty {
+    if v <= u32::MAX as u64 {
+        Ty::Int
+    } else {
+        Ty::Int64
+    }
+}
+
 /// Infer the type of `expr` under a variable environment and command registry.
 pub fn type_of_expr(
     expr: &Expr,
@@ -106,6 +140,17 @@ pub fn type_of_expr_hinted(
         // Without it a `ptr` offset or `mem_alloc(64)` could not be written
         // with the number in the source, since those parameters are `int64`.
         Expr::IntLit(_) if hint == Some(Ty::Int64) => Ok(Ty::Int64),
+        // A bit pattern takes the width its destination declares. This is the
+        // same literal-only widening the line above performs, and the reason
+        // `0x8000_0000` can be both the `int` sign bit and the `int64`
+        // 2147483648 without the source having to say which.
+        Expr::BitsLit(_) if hint == Some(Ty::Int64) => Ok(Ty::Int64),
+        // Bitwise operators are typed here rather than in `type_of_expr_bare`
+        // because they pass the surrounding hint down to their operands: in
+        // `var style: int64 = WS_POPUP bor WS_VISIBLE` both constants must read
+        // as 64-bit patterns, and only this function knows that.
+        Expr::Bit(op, l, r) => bit_type(*op, l, r, hint, vars, reg, components),
+        Expr::BitNot(e) => bitnot_type(e, hint, vars, reg, components),
         // A `var r: RECT` with no initializer: the declared type is the only
         // thing that says which record, and it must be a c-record — a heap
         // record is a reference with nothing to point at until it is built, so
@@ -128,6 +173,141 @@ pub fn type_of_expr_hinted(
     }
 }
 
+/// The value of a shift count that is written down — a literal, or a constant,
+/// which is a literal with a name. `None` when it is computed at run time.
+fn literal_count(e: &Expr, vars: &HashMap<String, Ty>, reg: &Registry) -> Option<i64> {
+    match e {
+        Expr::IntLit(v) => Some(*v),
+        Expr::BitsLit(v) => Some(bits_value(*v)),
+        Expr::Var(name) if !vars.contains_key(name) => {
+            let c = reg.const_(name)?;
+            let value = c.value.clone();
+            literal_count(&value, vars, reg)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `t` is a type made of bits a program may address one by one.
+/// `double` is deliberately not: its bits are an IEEE encoding, and `and`-ing
+/// two of them is almost never what was meant.
+fn is_bitwise(t: Ty) -> bool {
+    matches!(t, Ty::Int | Ty::Int64)
+}
+
+/// The type of `l <op> r` for a bitwise operator.
+///
+/// Two rules, and they differ because the two shapes differ:
+///
+/// * `band`/`bor`/`bxor` combine two values, so both sides must end up the
+///   same width. The hint reaches both, and where one side is `int64` and the
+///   other a *literal* that typed `int`, the literal is re-read as 64 bits —
+///   the same literal-only widening `+` would need and the reason
+///   `wparam band 0xFFFF` works with an `int64` `wparam`. An `int` **variable**
+///   is not widened: that would be the implicit conversion the language does
+///   not have, so it is an error naming `int_to_int64`.
+/// * A shift's right operand is a *count*, not a second value. It carries its
+///   own type and the result is the left operand's, exactly as in C.
+#[allow(clippy::too_many_arguments)]
+fn bit_type(
+    op: crate::BitOp,
+    l: &Expr,
+    r: &Expr,
+    hint: Option<Ty>,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
+    let want = match hint {
+        Some(Ty::Int) | Some(Ty::Int64) => hint,
+        _ => None,
+    };
+    let mut lt = type_of_expr_hinted(l, want, vars, reg, components)?;
+    if !is_bitwise(lt) {
+        return err(format!(
+            "`{}` works on int and int64 values; its left side is {}",
+            op.word(),
+            lt.as_str()
+        ));
+    }
+    if op.is_shift() {
+        let rt = type_of_expr_in(r, vars, reg, components)?;
+        if !is_bitwise(rt) {
+            return err(format!(
+                "the count `{}` shifts by must be int or int64, not {}",
+                op.word(),
+                rt.as_str()
+            ));
+        }
+        // A count at or past the value's own width has no answer — shifting a
+        // 32-bit value by 32 is not zero, it is whatever the machine felt like
+        // — so a count written down is refused here, where the message can
+        // carry a line number. A count computed at run time is taken modulo
+        // the width by the backend.
+        let width: i64 = if lt == Ty::Int64 { 64 } else { 32 };
+        if let Some(k) = literal_count(r, vars, reg) {
+            if !(0..width).contains(&k) {
+                return err(format!(
+                    "`{}` by {k}: an {} can be shifted by 0 to {}",
+                    op.word(),
+                    lt.as_str(),
+                    width - 1
+                ));
+            }
+        }
+        return Ok(lt);
+    }
+    let mut rt = type_of_expr_hinted(r, want, vars, reg, components)?;
+    if !is_bitwise(rt) {
+        return err(format!(
+            "`{}` works on int and int64 values; its right side is {}",
+            op.word(),
+            rt.as_str()
+        ));
+    }
+    if lt != rt {
+        // Re-read the narrow side as 64 bits. Only a literal (or a constant,
+        // which is one by another name) changes type under a hint, so a
+        // variable falls through to the message below.
+        if lt == Ty::Int64 {
+            rt = type_of_expr_hinted(r, Some(Ty::Int64), vars, reg, components)?;
+        } else {
+            lt = type_of_expr_hinted(l, Some(Ty::Int64), vars, reg, components)?;
+        }
+    }
+    if lt != rt {
+        return err(format!(
+            "`{}` needs both sides to be the same width: {} vs {} — widen the int one \
+             with `int_to_int64(...)`",
+            op.word(),
+            lt.as_str(),
+            rt.as_str()
+        ));
+    }
+    Ok(lt)
+}
+
+fn bitnot_type(
+    e: &Expr,
+    hint: Option<Ty>,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
+    let want = match hint {
+        Some(Ty::Int) | Some(Ty::Int64) => hint,
+        _ => None,
+    };
+    let t = type_of_expr_hinted(e, want, vars, reg, components)?;
+    if !is_bitwise(t) {
+        return err(format!(
+            "`bnot` flips the bits of an int or an int64, got {}",
+            t.as_str()
+        ));
+    }
+    Ok(t)
+}
+
 fn type_of_expr_bare(
     expr: &Expr,
     vars: &HashMap<String, Ty>,
@@ -136,6 +316,9 @@ fn type_of_expr_bare(
 ) -> Result<Ty, SemaError> {
     match expr {
         Expr::IntLit(v) => Ok(int_literal_type(*v)),
+        Expr::BitsLit(v) => Ok(bits_bare_type(*v)),
+        Expr::Bit(op, l, r) => bit_type(*op, l, r, None, vars, reg, components),
+        Expr::BitNot(e) => bitnot_type(e, None, vars, reg, components),
         Expr::DoubleLit(_) => Ok(Ty::Double),
         Expr::TextLit(_) => Ok(Ty::Text),
         Expr::Var(name) => vars.get(name).copied().ok_or_else(|| SemaError {
@@ -580,6 +763,27 @@ fn type_of_expr_bare(
             }
             Ok(Ty::Ptr)
         }
+        // `call through EXPR(args...): T` — an indirect C call. The site is
+        // the declaration: the callee is a run-time address, the arguments
+        // carry their own types, and `: T` is the return. Everything the
+        // checker can say about it is said by `check_call_through`; the one
+        // extra rule *here* is that a value position needs a return type.
+        Expr::CallThrough {
+            callee,
+            args,
+            ret,
+            conv: _,
+        } => {
+            check_call_through(callee, args, vars, reg, components)?;
+            match ret {
+                Some(t) => Ok(*t),
+                None => err(
+                    "`call through` here has no return type, so it has no value — write \
+                     `: int` (or whatever C returns) after the arguments, or make it a \
+                     `call through ...` statement",
+                ),
+            }
+        }
         // `size of TYPE` is an `int64` byte count. A c-record's is its flat
         // `sizeof`; a scalar's is its C width. A type with no by-value C layout
         // — a heap record, an array, a dictionary — has no such number, and its
@@ -607,6 +811,59 @@ fn type_of_expr_bare(
                 .to_string(),
         ),
     }
+}
+
+/// Check the callee and the arguments of a `call through`.
+///
+/// There is no signature to check an argument list against — the call site *is*
+/// the signature — so the two questions are the only two that exist: is the
+/// thing being called an address, and does every argument have a shape C can be
+/// handed? Shared by the expression checker and the statement checker so the
+/// value form and the void form agree.
+pub fn check_call_through(
+    callee: &Expr,
+    args: &[Expr],
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<(), SemaError> {
+    let ct = type_of_expr_in(callee, vars, reg, components)?;
+    if ct != Ty::Ptr {
+        return err(format!(
+            "`call through` calls an address, and this one is {} — the callee must be a `ptr` \
+             (what `GetProcAddress`, `dlsym` or a vtable slot gives back)",
+            ct.as_str()
+        ));
+    }
+    for (i, a) in args.iter().enumerate() {
+        let t = type_of_expr_in(a, vars, reg, components)?;
+        // A c-record argument crosses as a pointer to its flat storage, the
+        // same reading a `dll` parameter typed with the record has. A heap
+        // record has no C layout at all, so it is refused rather than quietly
+        // handed over as the runtime object it is.
+        if let Ty::Record(rec) = t {
+            match reg.record(rec) {
+                Some(def) if def.is_c => continue,
+                Some(_) => {
+                    return err(format!(
+                        "`call through` argument {}: `{rec}` is a heap record, which has no C \
+                         layout — declare it `is c`, or pass a `ptr` to bytes you laid out",
+                        i + 1
+                    ))
+                }
+                None => return err(format!("`call through` argument {}: unknown record `{rec}`", i + 1)),
+            }
+        }
+        if !is_c_representable(t) {
+            return err(format!(
+                "`call through` argument {}: `{}` cannot cross the C boundary — a C \
+                 signature takes int, int64, double, bool, text, ptr or a c-record parameter",
+                i + 1,
+                t.as_str()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Whether a type can be passed to or returned from C by value: the scalar set

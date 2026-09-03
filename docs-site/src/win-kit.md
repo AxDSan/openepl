@@ -67,7 +67,7 @@ openepl build app.oir --os windows -o app.exe
 
 ## The two examples
 
-`examples/win/` holds five programs. None of them contains a `dll`, a `record`
+`examples/win/` holds six programs. None of them contains a `dll`, a `record`
 or a `const` line: if the kit were short of anything they need, they would not
 build. Two are worth reading first.
 
@@ -140,11 +140,13 @@ back with `ptr_read_int64` — four would overwrite the byte after it. Then
 state and the protection Windows reports for the page it just made, which is
 the first thing a wrong struct layout gets wrong.
 
-The other three: `registry.oir` creates a key under `HKEY_CURRENT_USER`, writes
+The other four: `registry.oir` creates a key under `HKEY_CURRENT_USER`, writes
 a `REG_DWORD` and a `REG_SZ`, reads both back and deletes the key again;
 `spawn.oir` starts a thread whose ThreadProc is an OpenEPL subroutine and a
 child process through the `STARTUPINFOA` / `PROCESS_INFORMATION` pair;
-`msgbox.oir` is the four-line one at the top of this page.
+`flags.oir` calls an address `GetProcAddress` handed back and reads the kit's
+constants a bit at a time; `msgbox.oir` is the four-line one at the top of this
+page.
 
 ## How the declarations are spelled
 
@@ -190,11 +192,11 @@ Japanese, will not survive the round trip. A UTF-16 text type is what would fix
 it, and the kit is written so the `...W` half can be added beside the `...A`
 half rather than instead of it.
 
-## Constants are decimal
+## Constants are still spelled in decimal
 
-The language has no hexadecimal literal, so every constant is written as the
-decimal number it is, with the hex a C header would show in the comment beside
-it:
+The kit was transcribed before the language had a hexadecimal literal, so every
+constant in the `.oed` files is written as the decimal number it is, with the
+hex a C header would show in the comment beside it:
 
 ```text
 const PAGE_READWRITE = 4                   # 0x04
@@ -202,17 +204,32 @@ const MEM_COMMIT = 4096                    # 0x00001000
 const WS_OVERLAPPEDWINDOW = 13565952       # 0x00CF0000
 ```
 
-There is also **no bitwise operator**. Where a C program writes `a | b` to
-combine flags, an OpenEPL program writes `a + b`, which is the same number as
-long as the bits are disjoint — and flag constants are disjoint by design.
-`PROCESS_VM_READ + PROCESS_QUERY_INFORMATION` is `16 + 1024`. Where a
-combination is common enough that adding it by hand invites a mistake, the kit
-declares the pair pre-combined: `MEM_COMMIT_RESERVE` is `MEM_COMMIT | MEM_RESERVE`.
+Those are the same numbers either way, so nothing is wrong — the spelling is
+simply older than the language. **A program that uses the kit is under no such
+constraint**: `0x00CF_0000` is a number like any other, and flags combine and
+are tested with the [bitwise
+operators](./language.md#bitwise-operators-and-hex-literals).
 
-Testing a flag is the other half of that gap: `if flags % 2 = 1` reads bit one,
-and there is no general "is this bit set". A bitwise family is the obvious next
-addition to the language, and it is the one gap in it the kit has to work
-around rather than write against.
+```text
+var style: int = WS_VISIBLE bor WS_POPUP        # combine
+if style band WS_BORDER <> 0                    # test one bit
+var low: int64 = wparam band 0xFFFF             # LOWORD
+```
+
+`examples/win/flags.oir` does that against the kit itself and checks every
+answer: `MEM_COMMIT bor MEM_RESERVE` is shown to be the same word as the
+pre-combined `MEM_COMMIT_RESERVE`, `VirtualAlloc` and `OpenProcess` are handed
+words built with `bor` rather than pre-combined ones, and
+`WS_OVERLAPPEDWINDOW` is asked which of its bits are set.
+
+The one place the old spelling shows through is a constant above `0x7FFF_FFFF`.
+Written as decimal `2147483648` it is a *number*, so it types `int64`;
+written as `0x8000_0000` it is a *bit pattern*, so it is an `int` on its own
+and an `int64` where one is wanted. The `HKEY_*` constants in `advapi32.oed`
+are the decimal kind, and `RegOpenKeyExA` takes their `ptr` through
+`ptr_from_int`, which wants an `int64` — so they work as written. Rewriting one
+to hex changes its bare type, which is a thing to do deliberately rather than
+by search and replace.
 
 ## What it does not reach
 
@@ -221,14 +238,12 @@ around rather than write against.
   deliberately absent rather than present and wrong. Lay those out by hand with
   `mem_alloc` and `ptr_write_*` at counted offsets.
 - **`...W` entry points**, for the reason above.
-- **A pointer to a function cannot be called.** `address of` makes one, and a
-  `dll` can be handed one, but there is no `call through` — so the `ptr`
-  `GetProcAddress` answers can be tested for null, passed on and stored, and
-  not invoked. To call an export, declare it as a `dll` and let the lazy
-  loader find it; `GetProcAddress` is for asking whether it is there.
-- **COM** follows from that: `IUnknown`, `QueryInterface` and every method
-  call is an indirect call through a function pointer read out of a vtable,
-  which is exactly what the previous bullet does not have.
+- **COM, as declarations.** The mechanism is there —
+  [`call through`](./interop.md#calling-a-function-pointer) calls the function
+  pointer a vtable slot holds, which is what every COM method call is — but
+  the kit binds nothing for it. `ole32` is absent, so `CoInitializeEx` and
+  `CoCreateInstance` are not declared, and `IUnknown`, the `HRESULT`
+  conventions and the `this` argument are written out by hand.
 - **A GUI-subsystem image.** A program written against `use win` alone builds
   for the console subsystem, so on a real Windows desktop it has a console
   window beside the one it made. `--target gui` is OpenEPL's own UI stack

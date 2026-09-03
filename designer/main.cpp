@@ -1032,6 +1032,11 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << openepl::ui::control_styles("#canvas");
     s << "#canvas{position:relative;overflow:hidden;border-bottom-left-radius:8px;"
          "border-bottom-right-radius:8px}";
+    // A faint centred wordmark on the design surface — a maker's mark, not
+    // chrome. Behind the form window and the overlay (z-index 0; formwin sits
+    // above), click-through, and low enough opacity to never fight the work.
+    s << "#canvaswm{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);"
+         "width:42%;max-width:520px;opacity:0.05;pointer-events:none;z-index:0}";
     // selection chrome
     // Above the components, or the handles are under them and only their
     // outer three pixels can be grabbed — and the pointer never rests on one
@@ -1277,6 +1282,9 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "<div id='codeview' style='display:none'>"
          "<div id='codehl'/><textarea id='fullcode' wrap='nowrap'/></div>"
          "<div id='canvasarea'>"
+         << (asset_path("openepl-wordmark.png").empty() ? std::string() :
+             "<img id='canvaswm' src='" + asset_path("openepl-wordmark.png") + "'/>")
+         << ""
          "<div id='formwin'>"
          // Minimize and maximize are drawn; close is the multiplication
          // cross the loaded face has. The Windows caption glyphs proper are

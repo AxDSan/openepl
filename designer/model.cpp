@@ -231,8 +231,12 @@ bool is_identifier(const std::string& id) {
     }
     // The words ir/src/lexer.rs turns into tokens rather than identifiers. A
     // component called `end` would parse as the end of its own form.
+    // `bnot` is here and the other bitwise words are not: the infix ones are
+    // soft keywords the lexer still reads as names, while a prefix operator
+    // cannot be, so `bnot` is a token wherever it appears.
     static const char* KEYWORDS[] = {"module", "sub",   "end",  "let",   "var",  "if",   "else",
                                      "while",  "for",   "break", "continue", "and", "or",  "not",
+                                     "bnot",
                                      "true",   "false", "call", "use",   "form", "on",   "return"};
     for (const char* k : KEYWORDS) {
         if (id == k) return false;

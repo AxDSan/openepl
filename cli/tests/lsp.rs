@@ -346,6 +346,32 @@ fn completion_offers_commands_and_locals() {
     c.shutdown();
 }
 
+/// The words 0.7.0 added are offered like any other keyword.
+///
+/// `through` and the infix bitwise operators are soft keywords — the lexer
+/// reserves nothing for them — so nothing else in the compiler would notice if
+/// completion forgot they existed. This is where that is noticed.
+#[test]
+fn completion_offers_the_indirect_call_and_bitwise_words() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_complete07.oir";
+    c.open(uri, "module m\nsub main\n  let total: int = 1\n  \nend\n");
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(62, "textDocument/completion", serde_json::json!({
+        "textDocument": { "uri": uri },
+        "position": { "line": 3, "character": 2 }
+    }));
+    let labels = labels(&r);
+    for word in ["through", "band", "bor", "bxor", "bnot", "shl", "shr", "ushr"] {
+        assert!(
+            labels.contains(&word.to_string()),
+            "completion should offer `{word}`: {labels:?}"
+        );
+    }
+    c.shutdown();
+}
+
 #[test]
 fn hover_shows_a_command_signature() {
     let mut c = Client::start();

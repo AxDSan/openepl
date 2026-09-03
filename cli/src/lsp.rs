@@ -799,6 +799,13 @@ const KEYWORDS: &[&str] = &[
     // Build targets. `target` is a soft keyword, so it is offered
     // here but not reserved by the lexer.
     "target", "console", "gui", "sharedlib", "staticlib",
+    // `through` makes a `call` an indirect one. It is a soft keyword — it means
+    // that only straight after `call` — so it is offered and reserves nothing.
+    "through",
+    // Bitwise operators. The infix ones are soft keywords — they mean the
+    // operator only in operator position — so they are offered but reserve
+    // nothing; `bnot` is reserved by the lexer, like `not`.
+    "band", "bor", "bxor", "bnot", "shl", "shr", "ushr",
 ];
 
 fn item(label: &str, kind: CompletionItemKind, detail: String) -> CompletionItem {

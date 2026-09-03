@@ -212,6 +212,180 @@ comes and the library or the symbol cannot be found, the program stops with a
 message naming both, so a foreign call that cannot be made is a visible failure
 rather than a silent zero.
 
+## Calling a function pointer
+
+A `dll` line names a symbol the linker resolves before the program ever runs.
+Some addresses are not known then. A plug-in is opened while the program is
+running and asked for its entry points by name; a COM object hands back a table
+of pointers and every method is one slot in it; a C library takes a callback and
+gives one back. In each case what the program is holding is a `ptr` — and
+`call through` is how it calls one:
+
+```text
+call through <ptr-expression>(args...) [: return-type] [convention]
+```
+
+The call site *is* the declaration. There is no name to look up and no `dll`
+line to check against, so the parentheses and the `: type` supply the C
+signature that a declaration would otherwise have carried: the argument types
+are whatever the argument expressions are, and `: type` is what C returns.
+Leave the `: type` off and it is a C `void` call, which is a statement:
+
+```text
+let sum: int = call through add(10, 20): int    # a value
+call through log_line(message)                  # an effect
+```
+
+Everything else is the `dll` path, unchanged. The types that may cross are the
+same six — `int`, `int64`, `double`, `bool`, `text`, `ptr` — plus a
+[c-record](#c-struct-records), which passes as a pointer to its flat storage
+exactly as a c-record `dll` parameter does. A `text` argument marshals to the
+`char *` behind it, a returned `char *` is copied into a managed text, and a
+returned C `int` typed `bool` normalises to `true`/`false`. A trailing
+`stdcall`, `cdecl` or `system` is accepted and means what it means on a `dll`
+line — see [Calling conventions](#calling-conventions).
+
+The callee must be a `ptr`. A number holding an address is not one: put it
+through `ptr_from_int` first, which is the same explicitness `ptr` asks for
+everywhere else.
+
+### A plug-in, loaded and called
+
+The POSIX loader is itself a C library, so it is reached with `dll` lines and
+nothing else is needed. Given a plug-in `libplug.so` built from
+
+```c
+int add(int a, int b) { return a + b; }
+const char *name(void) { return "plug"; }
+void bump(int *cell) { *cell += 1; }
+```
+
+a program opens it, asks for three addresses, and calls all three. Not one of
+them is declared anywhere:
+
+```openepl
+module plugin
+
+dll dlopen(path: text, mode: int): ptr from "libdl.so.2"
+dll dlsym(handle: ptr, symbol: text): ptr from "libdl.so.2"
+dll dlclose(handle: ptr): int from "libdl.so.2"
+
+const RTLD_NOW = 2
+
+sub main
+  let lib: ptr = dlopen("./libplug.so", RTLD_NOW)
+  if ptr_is_null(lib)
+    call print_text("no plug-in today")
+    return
+  end
+
+  let add_fn: ptr = dlsym(lib, "add")
+  call print_int(call through add_fn(5, 10): int)      # 15
+
+  let name_fn: ptr = dlsym(lib, "name")
+  call print_text(call through name_fn(): text)        # plug
+
+  # No return type, so it is a statement: the plug-in writes through the cell.
+  let cell: ptr = mem_alloc(4)
+  call ptr_write_int(cell, 0, 41)
+  call through (dlsym(lib, "bump"))(cell)
+  call print_int(ptr_read_int(cell, 0))                # 42
+  call mem_free(cell)
+
+  call print_int(dlclose(lib))
+end
+```
+
+On Windows the two loader calls come from the [`win` kit](./win-kit.md) instead,
+and nothing else about the program changes:
+
+```text
+module plugin
+use win
+
+sub main
+  let lib: ptr = LoadLibraryA("plug.dll")
+  let add_fn: ptr = GetProcAddress(lib, "add")
+  call print_int(call through add_fn(5, 10): int system)
+  if FreeLibrary(lib)
+    call print_text("unloaded")
+  end
+end
+```
+
+### Parentheses around the callee
+
+`call through (dlsym(lib, "bump"))(cell)` above has the callee in parentheses
+because a parenthesis straight after the callee is the argument list. A bare
+name — and a field or an array slot reached from one — needs none. Anything
+with a call in it does:
+
+```text
+call through fp(1, 2): int                        # a variable
+call through api.draw(1, 2): int                  # a c-record field
+call through vt.fn[3](obj): int                   # a slot of an inline ptr[4]
+call through (ptr_read_ptr(vtable, 24))(obj)      # any expression
+```
+
+A table of function pointers lives in a c-record's inline `ptr[N]`, as `vt.fn`
+above does — an OpenEPL list holds no `ptr`, so that and `ptr_read_ptr` at a
+counted offset are the two ways to index one.
+
+That last line is the whole of a COM method call. A COM object is a pointer to a
+pointer to a table of function pointers, so the method at slot 4 is
+`ptr_read_ptr` twice and a `call through` with the object as the first argument
+— the `this` C++ passes invisibly and OpenEPL passes by hand.
+
+### What is not checked
+
+An indirect call is checked for the two things that can be known: the callee is
+a `ptr`, and every argument has a shape C can be handed. Nothing checks the
+signature *against the function*, because at the point of the call there is no
+function to check against — only an address. Get the argument count, a width, or
+the return type wrong and the result is the same as getting a C prototype wrong:
+whatever the machine does. Write the site against the header the export came
+from.
+
+A widthless literal is the one to watch. An argument's type comes from the
+expression, so `0` is a 32-bit `int`; a C parameter that is 64 bits wants
+`int_to_int64(0)` — or a `ptr_null()` where the parameter is a pointer.
+
+### Flags, masks and hex
+
+A C header's constants are hexadecimal and its flags are combined with `|`.
+Both are written directly: `0x8000_0000` is a literal, and `band`, `bor`,
+`bxor`, `bnot`, `shl`, `shr` and `ushr` are the operators. A bit pattern takes
+the width of what it meets, so one constant serves an `int` mask and an
+`int64` parameter alike. See [Bitwise operators and hex
+literals](./language.md#bitwise-operators-and-hex-literals).
+
+```text
+const WS_VISIBLE = 0x1000_0000
+const WS_POPUP   = 0x8000_0000
+
+var style: int = WS_VISIBLE bor WS_POPUP
+if style band WS_VISIBLE <> 0
+  call print_text("visible")
+end
+var low: int64 = wparam band 0xFFFF         # LOWORD
+var high: int64 = wparam ushr 16 band 0xFFFF
+```
+
+The two belong together, because neither does much alone: a bit decides which
+address to call, and the flag word handed to the function at that address is
+built by combining constants. Two runnable programs put both to work and check
+themselves as they go.
+[`examples/dll/dispatch.oir`](https://github.com/axdsan/openepl/tree/main/examples/dll)
+opens a plug-in it never declares, fetches five same-shaped exports into a
+`ptr[5]`, lets a request word choose which of them to call, and holds C's `&`,
+`|`, `^`, `<<` and `>>` against OpenEPL's own operators.
+[`examples/win/flags.oir`](https://github.com/axdsan/openepl/tree/main/examples/win)
+asks `GetProcAddress` for `GetCurrentProcessId` and calls the address it gets,
+checking the answer against the same function reached as a declared import —
+one process has one id — and hands `VirtualAlloc` and `OpenProcess` the words
+`MEM_COMMIT bor MEM_RESERVE` and
+`PROCESS_QUERY_INFORMATION bor PROCESS_VM_READ`.
+
 ## C-struct records
 
 Most real C APIs do not take a handful of scalars — they take a *struct*. A

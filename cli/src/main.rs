@@ -646,6 +646,9 @@ fn literal_text(e: &openepl_ir::Expr) -> String {
     match e {
         Expr::TextLit(s) => s.clone(),
         Expr::IntLit(v) => v.to_string(),
+        // A property written as a bit pattern (`0xFF`) is shown as the number
+        // it is: the designer re-emits what it is shown, and it writes decimal.
+        Expr::BitsLit(v) => openepl_ir::sema::bits_value(*v).to_string(),
         Expr::DoubleLit(v) => v.to_string(),
         Expr::BoolLit(b) => b.to_string(),
         _ => String::new(),

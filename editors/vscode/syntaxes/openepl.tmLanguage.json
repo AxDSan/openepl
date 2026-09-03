@@ -16,6 +16,9 @@
       "include": "#buildtarget"
     },
     {
+      "include": "#indirect"
+    },
+    {
       "include": "#declaration"
     },
     {
@@ -35,6 +38,9 @@
     },
     {
       "include": "#call"
+    },
+    {
+      "include": "#bitwise"
     },
     {
       "include": "#operator"
@@ -57,8 +63,21 @@
       ]
     },
     "number": {
-      "match": "\\b\\d+(\\.\\d+)?\\b",
-      "name": "constant.numeric.openepl"
+      "comment": "Hex and binary bit patterns first, so `0xFF` is one number rather than `0` followed by a name. `_` groups digits.",
+      "patterns": [
+        {
+          "match": "\\b0[xX][0-9a-fA-F_]+\\b",
+          "name": "constant.numeric.hex.openepl"
+        },
+        {
+          "match": "\\b0[bB][01_]+\\b",
+          "name": "constant.numeric.binary.openepl"
+        },
+        {
+          "match": "\\b\\d+(\\.\\d+)?\\b",
+          "name": "constant.numeric.openepl"
+        }
+      ]
     },
     "declaration": {
       "patterns": [
@@ -119,6 +138,23 @@
       "comment": "A name after `.` is a component property or event.",
       "match": "(?<=\\.)([A-Za-z_][A-Za-z0-9_]*)",
       "name": "variable.other.property.openepl"
+    },
+    "indirect": {
+      "comment": "`call through fp(...)` calls a function pointer. `through` means that only straight after `call` — it is a soft keyword and a variable may still be named for it — so the pair is matched together rather than the word alone.",
+      "match": "\\b(call)\\s+(through)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.control.openepl"
+        },
+        "2": {
+          "name": "keyword.control.openepl"
+        }
+      }
+    },
+    "bitwise": {
+      "comment": "The bitwise operators are words. They are soft keywords in the language — a variable may be named for one — which a grammar this size cannot tell apart, so a name that collides is highlighted as the operator.",
+      "match": "\\b(band|bor|bxor|bnot|shl|shr|ushr)\\b",
+      "name": "keyword.operator.word.openepl"
     },
     "operator": {
       "match": "(<=|>=|<>|[-+*/=<>])",

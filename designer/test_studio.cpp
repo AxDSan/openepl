@@ -597,12 +597,17 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         std::string path;
         const std::string out = session(
             designer, openepl, form,
-            "select:ok_button;rename:greeting;rename:9abc;rename:end;rename:on_ok_click;rename:;"
+            "select:ok_button;rename:greeting;rename:9abc;rename:end;rename:bnot;"
+            "rename:on_ok_click;rename:;"
             "clickform;rename:greeting;save", &path);
         check("rename: a taken name is refused", has(out, "cannot rename ok_button: greeting is already taken"));
         check("rename: an invalid one is refused",
               has(out, "9abc is not a valid name") && has(out, "end is not a valid name") &&
                   has(out, "a name is required"));
+        // `bnot` is a reserved word rather than a soft one, so a component
+        // named for it would write a module the compiler cannot parse.
+        check("rename: a reserved bitwise word is refused",
+              has(out, "bnot is not a valid name"));
         check("rename: a subroutine's name is refused", has(out, "on_ok_click is a subroutine"));
         check("rename: the form cannot take a component's name",
               has(out, "cannot rename main_window: greeting is already taken"));

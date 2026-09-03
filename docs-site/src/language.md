@@ -194,6 +194,13 @@ sub main
 end
 ```
 
+`call` has one other form. `call through <pointer>(args): type` calls a
+function whose *address* a program is holding — what a plug-in loader or a COM
+vtable hands back — rather than one it can name; the call site carries the
+signature, because there is no declaration to carry it. It belongs with the
+rest of the foreign-function machinery, so it is described in [Calling a
+function pointer](./interop.md#calling-a-function-pointer).
+
 Commands and subroutines share one namespace, so a subroutine may not take a
 library command's name — that would silently change what every existing call
 in the file means, and the compiler says so instead.
@@ -295,6 +302,145 @@ let longest: int = max_int(length(first), length(second))
 ```
 
 See [Commands](./reference-commands.md) for the full list.
+
+## Bitwise operators and hex literals
+
+A flag word, a mask, a packed pair of 16-bit halves — these are values whose
+*bits* matter rather than their size. OpenEPL writes them the way their
+documentation does, and operates on them with words.
+
+### Writing a bit pattern
+
+A number may be written in hexadecimal with `0x` or in binary with `0b`, and
+`_` may be put anywhere in the digits to group them.
+
+```
+let mask: int = 0xFF          # 255
+let bits: int = 0b1010        # 10
+let magic: int = 0xDEAD_BEEF
+```
+
+**A hex or binary literal is a bit pattern, and how wide it is comes from
+where it lands.** On its own, a pattern of 32 bits or fewer is an `int`
+holding exactly those bits — so `0x8000_0000` is `-2147483648` and
+`0xFFFF_FFFF` is `-1`, which is what a mask written for a 32-bit word means.
+A pattern that needs more than 32 bits is an `int64` holding exactly those
+bits. Where an `int64` is wanted, the same pattern is those bits in 64,
+gaining zeros rather than a sign:
+
+```
+const HKEY_CURRENT_USER = 0x8000_0001
+
+let as_int: int = HKEY_CURRENT_USER        # -2147483647
+var as_wide: int64 = HKEY_CURRENT_USER     # 2147483649
+```
+
+Both readings are the same 32 bits; which one a program gets is decided by
+the type it is being read into, so a `DWORD` constant is right in an `int`
+mask and right again in an `int64` parameter without being written twice.
+
+How wide the pattern is comes from its *value*, not from how many digits were
+typed: leading zeros change nothing, so `0x0000_0000_DEAD_BEEF` is the same
+pattern as `0xDEAD_BEEF`. The way to the 64-bit reading is the destination —
+`var v: int64 = 0xDEAD_BEEF` is 3735928559.
+
+A leading `-` says the pattern was meant as a magnitude after all, so `-0x10`
+is simply `-16`. More than 64 bits, a digit the base does not have, or no
+digits at all is an error at the literal.
+
+Decimal is unchanged: `2147483648` is an `int64`, because it is a *number*
+and that number does not fit an `int`.
+
+### The operators
+
+| Written | Does | On |
+| --- | --- | --- |
+| `a band b` | bits set in both | `int`, `int64` |
+| `a bor b` | bits set in either | `int`, `int64` |
+| `a bxor b` | bits set in one but not both | `int`, `int64` |
+| `bnot a` | every bit flipped | `int`, `int64` |
+| `a shl n` | shift left by `n` | `int`, `int64` |
+| `a shr n` | shift right, keeping the sign | `int`, `int64` |
+| `a ushr n` | shift right, filling with zeros | `int`, `int64` |
+
+They are defined on `int` and `int64` and on nothing else. A `double`'s bits
+are an IEEE encoding, so `and`-ing two of them is never what was meant;
+`bool`, `text` and `ptr` have no bits a program addresses one at a time. Any
+of those is an error naming the operator and the side it was on.
+
+`bnot` is the bitwise partner of `not`: `not` answers a truth value, `bnot`
+flips bits.
+
+```
+let combined: int = WS_VISIBLE bor WS_POPUP     # flags together
+let cleared: int = flags band bnot WS_BORDER    # one flag taken away
+let low: int64 = wparam band 0xFFFF             # the low half of a WPARAM
+let high: int64 = wparam ushr 16 band 0xFFFF    # the high half
+```
+
+`shr` keeps the sign and `ushr` does not: `-16 shr 2` is `-4`, and
+`-16 ushr 2` is `1073741820`. A value used as a bit pattern rather than as a
+number wants `ushr`.
+
+### Precedence
+
+Tightest at the top. A bitwise operator binds **looser** than a comparison,
+which is what lets a flag test be written without parentheses — the one place
+this table deliberately differs from C's.
+
+| | |
+| --- | --- |
+| `xs[i]`, `r.field` | postfix |
+| `-a`, `bnot a` | unary |
+| `* / %` | |
+| `+ -` | |
+| `shl` `shr` `ushr` | |
+| `band` | |
+| `bxor` | |
+| `bor` | |
+| `= <> < <= > >=` | comparison, and not chainable |
+| `not` | |
+| `and` | |
+| `or` | loosest |
+
+```
+if style band WS_VISIBLE <> 0        # (style band WS_VISIBLE) <> 0
+let x: int = 1 shl 4 band 0xFF       # (1 shl 4) band 0xFF        -> 16
+let y: int = 1 shl 2 + 2             # 1 shl (2 + 2)              -> 16
+let z: int = 1 bor 6 band 4          # 1 bor (6 band 4)           -> 5
+```
+
+### The rules the checker holds you to
+
+**Both sides of `band`, `bor` and `bxor` must be the same width.** A literal
+takes the width of what it meets, so `wparam band 0xFFFF` works with an
+`int64` `wparam`; an `int` *variable* does not, because that would be the
+implicit conversion the language does not have. Write
+`a band int_to_int64(b)`, and the message says so.
+
+**A shift's count is a count**, not a second value: it may be an `int` or an
+`int64` whatever the value's type is, and the result is the value's type. A
+count written down must be within the value's width — `1 shl 32` on an `int`
+is refused at build time, because there is no answer to give. A count only
+known at run time is taken modulo that width.
+
+**The infix operator words are soft keywords.** `band`, `bor`, `bxor`, `shl`,
+`shr` and `ushr` mean the operator only where an operator can go — after a
+complete value, where a name could never have appeared. A variable, a
+parameter or a field named for one keeps working:
+
+```
+var band: int = 7
+call print_int(band + 1)      # 8 — `band` here is a name
+var shl: int = 7
+call print_int(shl shl 2)     # 28 — a name, the operator, a number
+```
+
+`bnot` is the exception: it is a **reserved word**, like `not`. A prefix
+operator cannot be soft — `bnot(x)` reads as the operator and as a call to
+something named `bnot` equally well, and `bnot - 1` as a complement and as a
+subtraction. Guessing there gives a wrong answer rather than an error, so the
+word is refused as a name at the line that writes it.
 
 ## Choosing
 
