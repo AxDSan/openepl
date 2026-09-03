@@ -110,6 +110,12 @@ pub enum Ty {
     Bool,
     /// `SDT_BIN` — a byte-set: raw bytes, the type a PNG lives in.
     Bytes,
+    /// `SDT_PTR` — a raw machine pointer: an opaque 64-bit address for C
+    /// interop. Held in the slot's pointer union like text, but with none of
+    /// text's meaning: no length, no ownership, no auto-conversion to or from
+    /// `int64`. Arithmetic on it is explicit (`ptr_offset`); `ptr_null()` is
+    /// the zero address.
+    Ptr,
     /// An array of `Elem`. The value in the slot is a pointer to a
     /// runtime-owned array object, exactly as text is a pointer.
     Array(Elem),
@@ -148,6 +154,7 @@ impl Ty {
             Ty::Text => "text",
             Ty::Bool => "bool",
             Ty::Bytes => "bytes",
+            Ty::Ptr => "ptr",
             Ty::Array(Elem::Int) => "int[]",
             Ty::Array(Elem::Int64) => "int64[]",
             Ty::Array(Elem::Double) => "double[]",
@@ -177,6 +184,7 @@ impl Ty {
             "text" => Ty::Text,
             "bool" => Ty::Bool,
             "bytes" => Ty::Bytes,
+            "ptr" => Ty::Ptr,
             _ => return None,
         })
     }
@@ -210,6 +218,7 @@ impl Ty {
             self,
             Ty::Text
                 | Ty::Bytes
+                | Ty::Ptr
                 | Ty::Array(_)
                 | Ty::AnyArray
                 | Ty::AnyElem
@@ -236,6 +245,7 @@ impl Ty {
             Ty::Text => 9,   // OE_SDT_TEXT
             Ty::Bool => 8,   // OE_SDT_BOOL
             Ty::Bytes => 10, // OE_SDT_BIN
+            Ty::Ptr => 14,   // OE_SDT_PTR
             Ty::Array(e) => ARRAY | e.ty().sdt_tag(),
             Ty::AnyArray => ARRAY | ALL,
             Ty::AnyElem => ALL,
@@ -273,6 +283,7 @@ impl Ty {
             9 => Ty::Text,
             8 => Ty::Bool,
             10 => Ty::Bytes,
+            14 => Ty::Ptr,
             ALL => Ty::AnyElem,
             _ => return None,
         })
@@ -409,6 +420,15 @@ pub enum Expr {
     /// type `int64` and make `let x: int = -2147483648` fail), and so that a
     /// form property, which must be a literal, can be negative.
     Neg(Box<Expr>),
+    /// `address of NAME` — the address of a subroutine as a `ptr`, so it can be
+    /// handed to a C API that calls back into it (a `CreateThread` ThreadProc,
+    /// an `EnumWindows` callback, a hook detour). The named sub must have a
+    /// C-representable signature; the checker resolves the name and proves that,
+    /// because only then is the emitted function pointer one C can actually call.
+    /// Holds only the name — there is nothing to take the address *of* but a
+    /// subroutine in this language, so the operand is a bare identifier, not an
+    /// arbitrary expression.
+    AddressOf(String),
 }
 
 /// A source position: a 1-based line and 1-based **byte** columns, `end_col`
@@ -640,6 +660,59 @@ pub enum Item {
     /// This is where state that must outlive a single event handler lives —
     /// without it, an app has nowhere to keep a counter but the UI itself.
     Var(GlobalVar),
+    /// A foreign function in a shared library: `dll MessageBoxA(...) from "user32"`.
+    ///
+    /// It is called exactly like a `Sub` — same call syntax, same arity/type
+    /// checking — but instead of a body it names a symbol in a `.dll`/`.so`/
+    /// `.dylib` that is resolved and bound at the first call. This is the one
+    /// door out to a C API the language does not wrap.
+    Dll(DllDecl),
+}
+
+/// A foreign function declared for calling: `dll NAME(params): ret from "lib" as "sym"`.
+///
+/// The declaration is the whole of it — there is no body, because the code
+/// lives in someone else's library. A `dll` shares the callable namespace with
+/// subroutines and commands (the validator rejects a collision), and its
+/// signature is checked at every call site the same way a sub's is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DllDecl {
+    /// The name a program calls it by.
+    pub name: String,
+    /// Declared parameters, in order. Only the C-representable types are
+    /// allowed here (`int`, `int64`, `double`, `bool`, `text`, `ptr`); the
+    /// parser rejects the rest, because there is no honest way to hand an
+    /// OpenEPL array or record to a C function by value in this stage.
+    pub params: Vec<(String, Ty)>,
+    /// Declared return type; `None` is a call-only foreign function (C `void`).
+    pub ret: Option<Ty>,
+    /// The `from "..."` library the symbol lives in, spelled exactly as written
+    /// — a bare name is decorated per platform at load time, a name with an
+    /// extension or a slash is used verbatim.
+    pub library: String,
+    /// The exported symbol name, from `as "..."`; `None` means the symbol has
+    /// the same name as the declaration, which is the common case.
+    pub symbol: Option<String>,
+    /// 1-based source line of the `dll` keyword; 0 when unknown.
+    pub line: usize,
+    /// Where the name is written, for a diagnostic about the declaration itself.
+    pub name_span: Span,
+}
+
+impl DllDecl {
+    /// The signature, in the same shape a sub or a command has — so the one
+    /// argument checker serves foreign functions too.
+    pub fn signature(&self) -> Signature {
+        Signature {
+            params: self.params.iter().map(|(_, t)| *t).collect(),
+            ret: self.ret,
+        }
+    }
+
+    /// The exported symbol to resolve: the `as` override, or the name itself.
+    pub fn symbol_name(&self) -> &str {
+        self.symbol.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// A record type: a name for a group of related values.
@@ -767,6 +840,14 @@ impl Module {
     pub fn subs(&self) -> impl Iterator<Item = &Sub> {
         self.items.iter().filter_map(|i| match i {
             Item::Sub(s) => Some(s),
+            _ => None,
+        })
+    }
+
+    /// Iterate the foreign-function declarations, in declaration order.
+    pub fn dlls(&self) -> impl Iterator<Item = &DllDecl> {
+        self.items.iter().filter_map(|i| match i {
+            Item::Dll(d) => Some(d),
             _ => None,
         })
     }

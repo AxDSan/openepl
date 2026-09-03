@@ -17,6 +17,7 @@
 - [Networking](./networking.md)
 - [Build targets](./build-targets.md)
 - [Kits](./kits.md)
+- [Interop](./interop.md)
 
 # Studio
 

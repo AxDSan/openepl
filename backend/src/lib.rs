@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use openepl_ir::sema::resolve_ret;
-use openepl_ir::registry::ComponentKind;
+use openepl_ir::registry::{ComponentKind, DllSig};
 use openepl_ir::{
     BinOp, CmpOp, Component, Elem, Expr, LogicalOp, Module, Registry, Signature, Ty,
 };
@@ -53,7 +53,10 @@ fn llvm_ty(t: Ty) -> &'static str {
         // A record and a dictionary are runtime-owned aggregates held by
         // pointer, exactly as an array is — which is why neither costs the
         // marshaling path anything.
-        Ty::Text | Ty::Bytes | Ty::Array(_) | Ty::Record(_) | Ty::Dict(_) => "ptr",
+        // A raw machine pointer is exactly the slot's pointer union member, so
+        // it lowers as `ptr` and marshals through the same ptrtoint/inttoptr
+        // catch-all as text and the aggregates.
+        Ty::Text | Ty::Bytes | Ty::Ptr | Ty::Array(_) | Ty::Record(_) | Ty::Dict(_) => "ptr",
         // Bool is int-sized, matching the ABI's BOOL: `icmp` yields i1, which we
         // widen immediately so slot marshaling has one less width to handle.
         Ty::Bool => "i32",
@@ -84,6 +87,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     // cannot change what any existing call means.
     let mut with_subs = reg.clone();
     with_subs.register_subs(m);
+    with_subs.register_dlls(m);
     with_subs.register_records(m);
     let reg = &with_subs;
 
@@ -117,6 +121,9 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         loops: Vec::new(),
         ret_ty: None,
         needs_notify: false,
+        dll_cached: BTreeSet::new(),
+        needs_dll_get: false,
+        needs_dll_text: false,
         exit_code: None,
     };
     for g in m.globals() {
@@ -244,6 +251,13 @@ fn user_symbol(name: &str) -> String {
     format!("oe_user_{name}")
 }
 
+/// The module-level global that caches a foreign function's resolved address.
+/// One per `dll` declaration, so the symbol is looked up once however many
+/// times it is called.
+fn dll_cache_symbol(name: &str) -> String {
+    format!("oe_dllp_{name}")
+}
+
 /// `i32 %p0, ptr %p1` — a parameter list for a `define`.
 fn param_decls(params: &[(String, Ty)], prefix: &str) -> String {
     params
@@ -329,6 +343,15 @@ struct Lowerer<'a> {
     /// Whether any lowered code aborts through `oe_notify`, which is declared
     /// only when it is actually called.
     needs_notify: bool,
+    /// Foreign functions called, keyed by their declaration name.  Each needs
+    /// one module-level `ptr` global to cache its resolved address across
+    /// calls, so the symbol is looked up once no matter how many call sites
+    /// there are. Deduped by name here; emitted in `finish_with`.
+    dll_cached: BTreeSet<String>,
+    /// Whether any `dll` call was lowered, which declares `oe_dll_get`.
+    needs_dll_get: bool,
+    /// Whether any `dll` returns text, which declares the copy helper.
+    needs_dll_text: bool,
     /// The register holding what the event loop returned, once one has been
     /// entered. `ECodeStart` gives it back as the program's exit status: a
     /// `quit(1)` — or a server that could not bind and stopped the loop —
@@ -1240,6 +1263,17 @@ impl Lowerer<'_> {
             };
             return self.eval_dict_lit(value, pairs);
         }
+        // The literal-to-`int64` widening the checker already agreed to (see
+        // `type_of_expr_hinted`): emit the constant as an i64 so an `int64`
+        // parameter or `let` receives it with no `int_to_int64` at the source.
+        if let Expr::IntLit(v) = e {
+            if hint == Some(Ty::Int64) {
+                return Ok(Val {
+                    ty: Ty::Int64,
+                    operand: v.to_string(),
+                });
+            }
+        }
         self.eval_inner(e)
     }
 
@@ -1624,6 +1658,22 @@ impl Lowerer<'_> {
                     operand: t,
                 })
             }
+            // `address of NAME` — the subroutine's own function symbol, as a
+            // `ptr`. Under opaque pointers a function is already a `ptr`-typed
+            // constant, so there is no bitcast to emit (the C mental model of
+            // "cast the function pointer to void*" is a no-op here); the bare
+            // `@oe_user_<name>` constant is a valid operand in every position a
+            // `Val` is spliced into. The checker has proven `NAME` is a sub with
+            // a C-representable signature, so the symbol both exists (all subs
+            // are emitted) and is callable across the C ABI. The reference is a
+            // relocation from this — reachable — function to the sub's own
+            // section, which is exactly what keeps `--gc-sections` from dropping
+            // a sub whose address is taken but which nothing calls directly, the
+            // same way an event handler's thunk keeps its handler alive.
+            Expr::AddressOf(name) => Ok(Val {
+                ty: Ty::Ptr,
+                operand: format!("@{}", user_symbol(name)),
+            }),
             Expr::Cmp(op, l, r) => {
                 let lv = self.eval(l)?;
                 let rv = self.eval(r)?;
@@ -1875,7 +1925,12 @@ impl Lowerer<'_> {
         }
         let mut ops = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            let v = self.eval(a)?;
+            // Hint each argument with the parameter's declared type, exactly as
+            // the command path does — otherwise an `int` literal passed to an
+            // `int64` parameter would type-check (the validator hints) and then
+            // fail here (this did not). A callback sub taking `int64`/`ptr`
+            // parameters is the first thing a later stage calls from user code.
+            let v = self.eval_hinted(a, Some(sig.params[i]))?;
             if v.ty != sig.params[i] {
                 return err(format!(
                     "subroutine `{name}` argument {} expects {}, got {}",
@@ -1904,6 +1959,123 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Lower a call to a foreign function: resolve its symbol through the
+    /// runtime loader (cached, so the resolution happens once) and make an
+    /// indirect call with the declared C signature.
+    ///
+    /// This is a plain C call, not the slot ABI — a `dll` names an ordinary C
+    /// export, and the whole point is to reach it exactly as C would. Each
+    /// argument is already the C representation of its type: an `int` is an
+    /// `i32`, a `text` is the `char*` backing it, a `ptr` is the pointer.
+    fn eval_dll_call(
+        &mut self,
+        name: &str,
+        dll: &DllSig,
+        args: &[Expr],
+    ) -> Result<Option<Val>, LowerError> {
+        let sig = &dll.sig;
+        if args.len() != sig.params.len() {
+            return err(format!(
+                "foreign function `{name}` expects {} argument(s), got {}",
+                sig.params.len(),
+                args.len()
+            ));
+        }
+        let mut ops: Vec<String> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let want = sig.params[i];
+            let v = self.eval_hinted(a, Some(want))?;
+            if v.ty != want {
+                return err(format!(
+                    "foreign function `{name}` argument {} expects {}, got {}",
+                    i + 1,
+                    want.as_str(),
+                    v.ty.as_str()
+                ));
+            }
+            // A `text` marshals as the `char*` backing it. That pointer is NULL
+            // for a runtime-produced empty text (an allocation that failed, a
+            // `last_error_text` with nothing to say), and a C function running
+            // `strlen` on NULL would fault — so a null text is handed a pointer
+            // to `""` instead. A literal `""` is already a real pointer, so the
+            // common case takes the fast side of the `select`.
+            let operand = if want == Ty::Text {
+                let empty = self.cstr("");
+                let isnull = self.fresh();
+                writeln!(self.body, "  {isnull} = icmp eq ptr {}, null", v.operand).unwrap();
+                let sel = self.fresh();
+                writeln!(
+                    self.body,
+                    "  {sel} = select i1 {isnull}, ptr {empty}, ptr {}",
+                    v.operand
+                )
+                .unwrap();
+                sel
+            } else {
+                v.operand.clone()
+            };
+            ops.push(format!("{} {}", llvm_ty(want), operand));
+        }
+        let arglist = ops.join(", ");
+
+        // Resolve once, cache in a per-declaration global: a call in a loop
+        // pays the load-and-lookup cost a single time. `oe_dll_get` reads the
+        // cache, resolves and stores it if empty, and returns the address —
+        // aborting through `oe_runtime_error` if the library or symbol is
+        // missing, so a bad call is a named failure, never a silent 0.
+        self.needs_dll_get = true;
+        self.dll_cached.insert(name.to_string());
+        let cache = dll_cache_symbol(name);
+        let lib = self.cstr(&dll.library);
+        let sym = self.cstr(&dll.symbol);
+        let fp = self.fresh();
+        writeln!(
+            self.body,
+            "  {fp} = call ptr @oe_dll_get(ptr @{cache}, ptr {lib}, ptr {sym})"
+        )
+        .unwrap();
+
+        match sig.ret {
+            None => {
+                writeln!(self.body, "  call void {fp}({arglist})").unwrap();
+                Ok(None)
+            }
+            Some(Ty::Text) => {
+                // The C side returns a `char*` it still owns; copy it into a
+                // runtime-owned text so the result lives and is freed like every
+                // other text, and a NULL return becomes `""`.
+                self.needs_dll_text = true;
+                let raw = self.fresh();
+                writeln!(self.body, "  {raw} = call ptr {fp}({arglist})").unwrap();
+                let out = self.fresh();
+                writeln!(self.body, "  {out} = call ptr @oe_dll_text(ptr {raw})").unwrap();
+                Ok(Some(Val {
+                    ty: Ty::Text,
+                    operand: out,
+                }))
+            }
+            Some(Ty::Bool) => {
+                // C truth is any non-zero int; normalise to 0/1 so a returned
+                // `bool` compares equal to `true` when it should.
+                let raw = self.fresh();
+                writeln!(self.body, "  {raw} = call i32 {fp}({arglist})").unwrap();
+                let nz = self.fresh();
+                writeln!(self.body, "  {nz} = icmp ne i32 {raw}, 0").unwrap();
+                let out = self.fresh();
+                writeln!(self.body, "  {out} = zext i1 {nz} to i32").unwrap();
+                Ok(Some(Val {
+                    ty: Ty::Bool,
+                    operand: out,
+                }))
+            }
+            Some(t) => {
+                let r = self.fresh();
+                writeln!(self.body, "  {r} = call {} {fp}({arglist})", llvm_ty(t)).unwrap();
+                Ok(Some(Val { ty: t, operand: r }))
+            }
+        }
+    }
+
     /// Lower a command call via the slot ABI; returns the result if non-void.
     fn eval_call(&mut self, cmd: &str, args: &[Expr]) -> Result<Option<Val>, LowerError> {
         // Commands win the name; the validator has already rejected any user
@@ -1911,6 +2083,9 @@ impl Lowerer<'_> {
         if self.reg.get(cmd).is_none() {
             if let Some(sig) = self.reg.sub(cmd).cloned() {
                 return self.eval_user_call(cmd, &sig, args);
+            }
+            if let Some(dll) = self.reg.dll(cmd).cloned() {
+                return self.eval_dll_call(cmd, &dll, args);
             }
         }
         let command = self.reg.get(cmd).ok_or_else(|| LowerError {
@@ -2097,6 +2272,15 @@ impl Lowerer<'_> {
             out.push('\n');
         }
 
+        // One address cache per foreign function called. `null` means "not yet
+        // resolved"; `oe_dll_get` fills it on the first call.
+        for name in &self.dll_cached {
+            writeln!(out, "@{} = internal global ptr null", dll_cache_symbol(name)).unwrap();
+        }
+        if !self.dll_cached.is_empty() {
+            out.push('\n');
+        }
+
         for (id, s) in self.strings.iter().enumerate() {
             let encoded = encode_llvm_string(s);
             let bytes = s.len() + 1;
@@ -2183,6 +2367,18 @@ impl Lowerer<'_> {
         // with a message. Declared only when something actually aborts.
         if self.needs_notify {
             writeln!(out, "declare ptr @oe_notify(i32, ptr, ptr)\n").unwrap();
+        }
+
+        // The foreign-function loader (runtime/oe_dll.c): resolve-and-cache a
+        // symbol, and copy a returned C string into a runtime-owned text.
+        if self.needs_dll_get {
+            writeln!(out, "declare ptr @oe_dll_get(ptr, ptr, ptr)").unwrap();
+        }
+        if self.needs_dll_text {
+            writeln!(out, "declare ptr @oe_dll_text(ptr)").unwrap();
+        }
+        if self.needs_dll_get || self.needs_dll_text {
+            out.push('\n');
         }
 
         out.push_str(functions);

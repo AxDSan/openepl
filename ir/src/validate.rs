@@ -115,6 +115,19 @@ pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Ve
             Span::line(line),
         );
     }
+    // Foreign functions are registered after subs so a `dll` that takes a sub's
+    // name is the one reported (the sub is already in), and before records so a
+    // record cannot silently shadow one either.
+    for name in with_subs.register_dlls(m) {
+        let line = m.dlls().find(|d| d.name == name).map_or(0, |d| d.line);
+        push(
+            format!(
+                "foreign function `{name}` has the same name as a library command, a \
+                 subroutine, or another `dll` — rename it"
+            ),
+            Span::line(line),
+        );
+    }
     for name in with_subs.register_records(m) {
         let line = m
             .records()
@@ -180,6 +193,27 @@ pub fn validate_with(m: &Module, reg: &Registry, hints: &Hints) -> Result<(), Ve
                 ),
                 Span::default(),
             );
+        }
+        // A `sharedlib` may name a loader hook: `dll_attach` runs when the OS
+        // maps the library (DllMain / an ELF constructor), `dll_detach` when it
+        // is unloaded. The loader calls them with no arguments and ignores any
+        // result, so the generated entry declares them `void(void)` — a hook
+        // with a parameter or a return would be a call through a mismatched
+        // signature, caught here instead.
+        if target == Target::SharedLib {
+            for hook in ["dll_attach", "dll_detach"] {
+                if let Some(s) = by_name.get(hook) {
+                    if !s.is_plain() {
+                        push(
+                            format!(
+                                "`{hook}` is a loader hook: it takes no parameters and returns \
+                                 nothing"
+                            ),
+                            s.name_span,
+                        );
+                    }
+                }
+            }
         }
     }
     if forms.len() > 1 {
@@ -900,7 +934,11 @@ fn name_the_fix(msg: String, reg: &Registry, hints: &Hints, vars: &HashMap<Strin
         if let Some(lib) = hints.elsewhere.get(name) {
             return format!("{msg} — it is in the `{lib}` library: add `use {lib}` to the module");
         }
-        let callables = reg.names().chain(reg.sub_names()).chain(reg.record_names());
+        let callables = reg
+            .names()
+            .chain(reg.sub_names())
+            .chain(reg.dll_names())
+            .chain(reg.record_names());
         return match closest(name, callables) {
             Some(c) => format!("{msg} — did you mean `{c}`?"),
             None => msg,
@@ -1348,6 +1386,47 @@ mod tests {
     fn rejects_void_in_expression() {
         let m = parse("module m\nsub main\n  let x: int = print_int(1)\nend\n").unwrap();
         assert!(validate(&m, &reg()).is_err());
+    }
+
+    /// `address of` a subroutine with a C-representable signature yields a `ptr`.
+    #[test]
+    fn accepts_address_of_a_c_representable_sub() {
+        let m = parse(
+            "module m\nsub cb(a: int, b: int): int\n  return a + b\nend\n\
+             sub main\n  var p: ptr = address of cb\n  call print_int(1)\nend\n",
+        )
+        .unwrap();
+        assert!(validate(&m, &reg()).is_ok(), "{:?}", validate(&m, &reg()));
+    }
+
+    /// A sub the C ABI cannot represent is rejected, and the diagnostic names
+    /// the sub and the offending type — you learn it before you run anything.
+    #[test]
+    fn rejects_address_of_a_non_c_representable_sub() {
+        let m = parse(
+            "module m\nsub cb(xs: int[])\n  call print_int(1)\nend\n\
+             sub main\n  var p: ptr = address of cb\n  call print_int(1)\nend\n",
+        )
+        .unwrap();
+        let e = validate(&m, &reg()).unwrap_err();
+        assert!(
+            e.iter().any(|e| e.msg.contains("`cb`") && e.msg.contains("int[]")),
+            "the error must name the sub and its bad type: {e:?}"
+        );
+    }
+
+    /// Taking the address of a name that is not a subroutine is rejected.
+    #[test]
+    fn rejects_address_of_a_non_sub() {
+        let m = parse(
+            "module m\nsub main\n  var p: ptr = address of print_int\n  call print_int(1)\nend\n",
+        )
+        .unwrap();
+        let e = validate(&m, &reg()).unwrap_err();
+        assert!(
+            e.iter().any(|e| e.msg.contains("print_int")),
+            "the error must name what `print_int` actually is: {e:?}"
+        );
     }
 
     #[test]

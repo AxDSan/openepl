@@ -73,6 +73,10 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `lowercase` | text | text |
 | `max_double` | double, double | double |
 | `max_int` | int, int | int |
+| `mem_alloc` | int64 | ptr |
+| `mem_copy` | ptr, ptr, int64 | — |
+| `mem_free` | ptr | — |
+| `mem_zero` | ptr, int64 | — |
 | `min_double` | double, double | double |
 | `min_int` | int, int | int |
 | `mod_int` | int, int | int |
@@ -83,6 +87,24 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `print_int64` | int64 | — |
 | `print_int` | int | — |
 | `print_text` | text | — |
+| `ptr_from_int` | int64 | ptr |
+| `ptr_is_null` | ptr | bool |
+| `ptr_null` | — | ptr |
+| `ptr_offset` | ptr, int64 | ptr |
+| `ptr_of_text` | text | ptr |
+| `ptr_read_byte` | ptr, int64 | int |
+| `ptr_read_double` | ptr, int64 | double |
+| `ptr_read_int64` | ptr, int64 | int64 |
+| `ptr_read_int` | ptr, int64 | int |
+| `ptr_read_ptr` | ptr, int64 | ptr |
+| `ptr_read_text` | ptr | text |
+| `ptr_to_int` | ptr | int64 |
+| `ptr_write_byte` | ptr, int64, int | — |
+| `ptr_write_double` | ptr, int64, double | — |
+| `ptr_write_int64` | ptr, int64, int64 | — |
+| `ptr_write_int` | ptr, int64, int | — |
+| `ptr_write_ptr` | ptr, int64, ptr | — |
+| `ptr_write_text` | ptr, int64, text | — |
 | `quit` | — | — |
 | `read_line` | — | text |
 | `remove` | array, int | — |

@@ -1,0 +1,34 @@
+# A shared library that hooks a function the moment it is loaded — no host code
+# has to ask it to. This is the whole native-interop story in one file: a `dll`
+# to call into C, `address of` to be called back by C, and `dll_attach` to run
+# under the OS loader (DllMain on Windows, an ELF constructor on Linux).
+#
+# It is built to `libhook.so` / `hook.dll`. The `hookrt` library beside it owns
+# a function dispatched through a slot; loading this library installs a detour
+# into that slot, so the host's very next call through it lands here instead.
+module hook
+target sharedlib
+
+# The detour runtime this library reaches into: the original behind a trampoline,
+# and the installer that redirects the slot. Bound at the first call, which is
+# inside `dll_attach`.
+dll hookrt_original(x: int): int from "hookrt"
+dll hookrt_install(detour: ptr) from "hookrt"
+
+# The detour: C's slot points here after the hook is installed, so a call the
+# host makes through `hookrt_call` arrives in this subroutine. It reaches the
+# original through the trampoline and adds one, so a hooked call is observably
+# different from an un-hooked one — proof that target, detour and trampoline all
+# round-trip.
+sub detour(x: int): int
+  return hookrt_original(x) + 1
+end
+
+# The loader hook. It runs when the OS maps this library — from DllMain's
+# DLL_PROCESS_ATTACH on Windows, from a constructor on Linux — before any host
+# code has a chance to call in. It does one small thing: hand C the address of
+# `detour` to install. Work heavier than this belongs on a thread spawned here,
+# because a loader hook runs under the OS loader lock.
+sub dll_attach
+  call hookrt_install(address of detour)
+end

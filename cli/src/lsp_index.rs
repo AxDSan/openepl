@@ -270,6 +270,24 @@ impl Index {
                         continue;
                     }
                 }
+                // `dll NAME(...) from "lib"` — a foreign function. It is shown
+                // in completion and hover exactly like a subroutine (its header
+                // carries the `from`, which reads as the signature it is), so it
+                // is indexed as a `Sub`. It has no body, so nothing after opens a
+                // scope; the rest of the line is consumed so the library string
+                // and the `from`/`as` words are not indexed as references.
+                Tok::Ident(w) if w == "dll" && scope.is_none() && form_depth == 0 => {
+                    if let Some((name, sp)) = ident_at(&toks, i + 1) {
+                        if let Some(h) = header_after(src, sp.line, sp.col, &name) {
+                            ix.sub_headers.insert(name.clone(), h);
+                        }
+                        ix.push(name, sp, true, SymKind::Sub, None);
+                        while i < toks.len() && !matches!(toks[i].tok, Tok::Newline | Tok::Eof) {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                }
                 Tok::Ident(name) => {
                     let sp = &toks[i];
                     // `type id` declares a component and opens a block of its
@@ -619,6 +637,32 @@ mod tests {
         // A subroutine with no parameters has no header to show, and an empty
         // one rendered as `main()` would claim a parameter list it does not have.
         assert!(!ix.sub_headers.contains_key("main"));
+    }
+
+    /// A `dll` is a callable name the editor completes and hovers exactly like a
+    /// subroutine: indexed as a `Sub`, with the whole header — the `from` and
+    /// all — kept as its signature.
+    #[test]
+    fn a_dll_is_indexed_like_a_subroutine() {
+        let src = "module m\n\
+                   dll MessageBoxA(hwnd: ptr, text: text): int from \"user32\"\n\
+                   sub main\n  let n: int = MessageBoxA(ptr_null(), \"hi\")\nend\n";
+        let ix = Index::build(src);
+        let def = ix
+            .occurrences
+            .iter()
+            .find(|o| o.name == "MessageBoxA" && o.is_definition)
+            .expect("the dll name is a definition");
+        assert_eq!(def.kind, SymKind::Sub, "a dll completes like a sub");
+        assert_eq!(
+            ix.sub_headers.get("MessageBoxA").map(String::as_str),
+            Some("(hwnd: ptr, text: text): int from \"user32\""),
+            "hover shows the whole declaration, `from` included"
+        );
+        // The call on the next line is a reference to the same name, so
+        // go-to-definition and rename reach both.
+        let refs = ix.references_to(def);
+        assert_eq!(refs.len(), 2, "the declaration plus one call");
     }
 
     /// A record declares a type name and nothing else. Its fields must not

@@ -162,6 +162,30 @@ simply missing.
 than run automatically, because a library should not run your code before
 the host is ready for it.
 
+### A loader hook
+
+A shared library can also run *without* a host asking — the moment the OS maps
+it into a process — by defining a specially-named subroutine:
+
+```
+sub dll_attach   # runs when the library is mapped into a process
+sub dll_detach   # runs when it is unmapped
+```
+
+Each takes no parameters and returns nothing. Define one in a `sharedlib` and
+the build wires it to the platform's loader entry: a real `DllMain`
+(`DLL_PROCESS_ATTACH` / `DLL_PROCESS_DETACH`) on Windows, an ELF
+constructor/destructor on Linux. `<module>_init` runs first, before
+`dll_attach`, so module variables are ready. A library that defines neither is
+unchanged — it gets no loader entry, and the host calls `<module>_init` itself.
+
+This is what a library loaded for effect needs — one injected into a process, or
+brought in with `LoadLibrary`/`dlopen` for what it does rather than what it
+exports. The hook runs under the OS loader (on Windows, holding the loader
+lock), so it should keep its own work short and hand anything heavy to a thread
+it spawns. [Interop](./interop.md) walks through a worked example: a library
+that installs a function-pointer hook the instant it loads.
+
 ### A consumer
 
 `openepl new shared-library` writes a `consumer.cpp` beside the source; this

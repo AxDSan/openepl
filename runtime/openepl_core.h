@@ -96,6 +96,16 @@ OE_CMD(oe_bin_from_text); OE_CMD(oe_bin_to_text);
 /* dictionaries */
 OE_CMD(oe_dict_count); OE_CMD(oe_dict_has); OE_CMD(oe_dict_lookup);
 OE_CMD(oe_dict_store); OE_CMD(oe_dict_erase); OE_CMD(oe_dict_keys);
+/* pointers and raw memory (oe_ptr.c) */
+OE_CMD(oe_ptr_null); OE_CMD(oe_ptr_is_null); OE_CMD(oe_ptr_offset);
+OE_CMD(oe_ptr_from_int); OE_CMD(oe_ptr_to_int);
+OE_CMD(oe_ptr_read_int); OE_CMD(oe_ptr_write_int);
+OE_CMD(oe_ptr_read_int64); OE_CMD(oe_ptr_write_int64);
+OE_CMD(oe_ptr_read_byte); OE_CMD(oe_ptr_write_byte);
+OE_CMD(oe_ptr_read_double); OE_CMD(oe_ptr_write_double);
+OE_CMD(oe_ptr_read_ptr); OE_CMD(oe_ptr_write_ptr);
+OE_CMD(oe_ptr_read_text); OE_CMD(oe_ptr_write_text); OE_CMD(oe_ptr_of_text);
+OE_CMD(oe_mem_alloc); OE_CMD(oe_mem_free); OE_CMD(oe_mem_zero); OE_CMD(oe_mem_copy);
 /* event loop */
 OE_CMD(oe_quit);
 
@@ -131,6 +141,13 @@ int32_t     oe_core_component_on(int64_t h, const char *event, OpenEPL_HandlerFn
  * are the few pieces that stay runtime-private. */
 char *oe_empty_text(void);              /* from oe_error.c  */
 int32_t oe_handle_kind_of(int32_t h);   /* from oe_handle.c */
+/* The foreign-function loader (oe_dll.c).  These are called only from emitted
+ * IR — a `dll` call — never by another command, but they are declared here so
+ * the runtime has one header. `oe_dll_get` resolves `sym` in `library`, caching
+ * the address in `*cache` so it is looked up once; `oe_dll_text` copies a C
+ * string a foreign call returned into a runtime-owned text. */
+void *oe_dll_get(void **cache, const char *library, const char *sym);
+char *oe_dll_text(const char *p);
 void oe_set_args(int argc, char **argv);/* from oe_args.c   */
 int   oe_arg_total(void);
 const char *oe_arg_at(int i);

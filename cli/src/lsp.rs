@@ -769,7 +769,7 @@ fn find_repo_root_from(start: &Path) -> Option<PathBuf> {
 const KEYWORDS: &[&str] = &[
     "module", "sub", "end", "let", "var", "call", "return", "if", "else", "while", "and", "or",
     "not",
-    "true", "false", "use", "form", "on", "int", "double", "bool", "text",
+    "true", "false", "use", "form", "on", "int", "int64", "double", "bool", "text", "bytes", "ptr",
     // Loops. `for`, `break` and `continue` are reserved; `to` and `step` are
     // soft keywords, offered here but usable as names elsewhere.
     "for", "break", "continue", "to", "step",

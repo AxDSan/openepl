@@ -84,6 +84,15 @@ pub fn type_of_expr_hinted(
                  as in `var ages: int{} = {}`",
             ),
         },
+        // An integer literal takes `int64` when that is what its destination
+        // declares, exactly as `[]` takes the list type of its destination.
+        // Every `int` literal already fits an `int64` (it is stored as one),
+        // and this is the ONLY implicit widening: it fires only for a literal,
+        // never a variable or a sub-expression, so `let n: int64 = m` still
+        // needs `int_to_int64(m)` and nothing about `int`'s strictness moves.
+        // Without it a `ptr` offset or `mem_alloc(64)` could not be written
+        // with the number in the source, since those parameters are `int64`.
+        Expr::IntLit(_) if hint == Some(Ty::Int64) => Ok(Ty::Int64),
         _ => type_of_expr_bare(expr, vars, reg, components),
     }
 }
@@ -410,7 +419,76 @@ fn type_of_expr_bare(
             }
             Ok(Ty::Bool)
         }
+        // `address of NAME` is the address of a subroutine, as a `ptr` C can
+        // call. The name must be a subroutine — nothing else has a stable,
+        // link-time address to take — and its signature must be C-representable,
+        // because the point is a pointer a C caller invokes with the C ABI.
+        Expr::AddressOf(name) => {
+            if vars.contains_key(name) {
+                return err(format!(
+                    "`address of {name}` takes the address of a subroutine, but `{name}` \
+                     is a variable — a variable has no callable address"
+                ));
+            }
+            if reg.get(name).is_some() {
+                return err(format!(
+                    "`address of {name}` takes the address of a subroutine, but `{name}` \
+                     is a built-in command"
+                ));
+            }
+            if reg.dll(name).is_some() {
+                return err(format!(
+                    "`address of {name}` takes the address of a subroutine, but `{name}` \
+                     is a foreign function — it is already a C function, so pass its name where \
+                     a C library gives you a pointer, or wrap it in a sub"
+                ));
+            }
+            let Some(sig) = reg.sub(name) else {
+                return err(format!(
+                    "`address of {name}`: there is no subroutine `{name}` to take the address of"
+                ));
+            };
+            // Every parameter and the return must be a C-representable scalar,
+            // in the same set a `dll` signature allows — a C caller passes and
+            // receives these by value, and there is no honest machine layout for
+            // an OpenEPL array, record or dictionary crossing that call.
+            let bad = sig
+                .params
+                .iter()
+                .enumerate()
+                .find(|(_, t)| !is_c_representable(**t));
+            if let Some((i, t)) = bad {
+                return err(format!(
+                    "`address of {name}`: parameter {} of `{name}` is {}, which cannot cross \
+                     the C boundary — a callback sub takes int, int64, double, bool, text or ptr",
+                    i + 1,
+                    t.as_str()
+                ));
+            }
+            if let Some(t) = sig.ret {
+                if !is_c_representable(t) {
+                    return err(format!(
+                        "`address of {name}`: `{name}` returns {}, which cannot cross the C \
+                         boundary — a callback sub returns int, int64, double, bool, text, ptr \
+                         or nothing",
+                        t.as_str()
+                    ));
+                }
+            }
+            Ok(Ty::Ptr)
+        }
     }
+}
+
+/// Whether a type can be passed to or returned from C by value: the scalar set
+/// a `dll` signature and a callback sub share. Kept here, beside the callback
+/// checker, so the two lists cannot drift — the parser's `ffi_type` enforces the
+/// same set on a `dll` declaration.
+fn is_c_representable(t: Ty) -> bool {
+    matches!(
+        t,
+        Ty::Int | Ty::Int64 | Ty::Double | Ty::Bool | Ty::Text | Ty::Ptr
+    )
 }
 
 /// Resolve a called name to what it is and what it takes.
@@ -422,7 +500,10 @@ pub fn callee(name: &str, reg: &Registry) -> Option<(&'static str, Signature)> {
     if let Some(c) = reg.get(name) {
         return Some(("command", c.sig.clone()));
     }
-    reg.sub(name).map(|s| ("subroutine", s.clone()))
+    if let Some(s) = reg.sub(name) {
+        return Some(("subroutine", s.clone()));
+    }
+    reg.dll(name).map(|d| ("foreign function", d.sig.clone()))
 }
 
 /// The declared type of one field of record type `rec`, or a diagnostic.

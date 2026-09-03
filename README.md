@@ -36,7 +36,7 @@ a visual designer over a component library, event-driven code, and a compiler
 that emits standalone native binaries.
 
 The language is English-first and deliberately small: one uniform call syntax,
-no pointers, no manual memory management, no ceremony. Assignment is a
+no pointers or manual memory management in everyday code, no ceremony. Assignment is a
 statement rather than an expression, so `if x = 5` cannot silently assign.
 It has `int`, `int64`, `double`, `bool` and `text`; arrays, `bytes`, records
 and dictionaries; subroutines with parameters and return values; and every
@@ -144,6 +144,12 @@ openepl build lib.oir --target sharedlib -o libgreet.so
 
 Libraries export their subroutines under their own names, so a C host — or
 anything that can call C — links against them directly.
+
+Native interop runs both ways: a program calls into native libraries and is
+called back by them — a `ptr` type, `dll` declarations, `address of` for C
+function pointers, and a `dll_attach` that gives a shared library a real
+`DllMain` (an ELF constructor on Linux) so it can hook a function the moment it
+loads. See the [interop guide](https://axdsan.github.io/openepl/interop.html).
 
 ## Editing
 

@@ -250,3 +250,31 @@ fn library_cross_builds_to_dll_and_archive() {
     let bytes = std::fs::read(&archive).unwrap();
     assert!(bytes.starts_with(b"!<arch>\n"), "the static library is not an ar archive");
 }
+
+/// The `ptr` type and the raw-memory commands must marshal identically on
+/// Windows: the slot layout is ABI, and a pointer travels in the slot's union
+/// exactly as it does on Linux. Building `examples/ptr.oir` for Windows and
+/// running it under wine proves the whole path — int64 offsets, the int<->ptr
+/// escape hatch, and pointer-width reads — behaves the same on LLP64.
+#[test]
+fn ptr_cross_builds_and_runs_under_wine() {
+    if !mingw_present() {
+        return;
+    }
+    let dir = scratch("ptr");
+    build_windows(&repo().join("examples/ptr.oir"), &dir.join("ptr.exe"), &[]);
+    let image = dir.join("ptr.exe");
+    assert!(image.is_file(), "expected {} to be written", image.display());
+    assert_pe32_plus(&image);
+
+    if let Some(lines) = wine_lines(&image, &dir) {
+        assert_eq!(
+            lines,
+            vec![
+                "42", "9000000000", "255", "3.5", "hello, C", "", "7", "7",
+                "same", "null-ok", "123", "OpenEPL",
+            ],
+            "unexpected ptr output under wine"
+        );
+    }
+}

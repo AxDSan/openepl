@@ -27,7 +27,7 @@
 
 use crate::lexer::{lex, Spanned, Tok};
 use crate::{
-    intern, BinOp, CmpOp, Component, Elem, Expr, Form, GlobalVar, Ident, Item, LogicalOp,
+    intern, BinOp, CmpOp, Component, DllDecl, Elem, Expr, Form, GlobalVar, Ident, Item, LogicalOp,
     Module, RecordDef, Span, Stmt, StmtKind, Sub, Target, Ty,
 };
 
@@ -194,6 +194,11 @@ impl Parser {
                 Tok::Ident(w) if w == "record" => {
                     items.push(Item::UserType(self.record_def()?))
                 }
+                // `dll` is a SOFT keyword, matched in this one position beside
+                // `sub`: `dll open ...` and `timer dll` are the same two tokens
+                // otherwise, and reserving `dll` would steal the word from every
+                // program that has a variable called that.
+                Tok::Ident(w) if w == "dll" => items.push(Item::Dll(self.dll_decl()?)),
                 // `type id` at module level is a NON-VISUAL component — a timer,
                 // a server. It reads exactly as it does inside a form, because
                 // the only thing it lacks is a rectangle to be drawn in; the
@@ -206,7 +211,7 @@ impl Parser {
                 Tok::Eof => break,
                 other => {
                     return self.err(format!(
-                        "expected `sub`, `form`, `var`, a component, or end of file, \
+                        "expected `sub`, `dll`, `form`, `var`, a component, or end of file, \
                          found {other:?}"
                     ))
                 }
@@ -304,6 +309,137 @@ impl Parser {
             name_span,
             body,
         })
+    }
+
+    /// ```text
+    /// dll := "dll" IDENT "(" ffiparams? ")" (":" ffitype)?
+    ///        "from" STRING ("as" STRING)? NEWLINE
+    /// ```
+    ///
+    /// A foreign function: the same header a `sub` has, but ending in `from` and
+    /// with no body. `from` and `as` are soft keywords — plain identifiers the
+    /// parser recognises only in this position, so neither is reserved anywhere
+    /// else. Only the C-representable types may appear in the signature; the
+    /// rest are refused here, where the message can name the offending type.
+    fn dll_decl(&mut self) -> Result<DllDecl, ParseError> {
+        let dll_line = self.line();
+        // `dll` reached this method as a soft keyword (an identifier), so it is
+        // consumed here rather than by `expect`.
+        self.bump();
+        let name_span = self.span_at(self.pos);
+        let name = self.ident("foreign function name")?;
+
+        // The parameter list is required: `()` is what keeps `dll foo` from
+        // reading as a two-identifier component declaration, so a bare
+        // `dll foo` is a mistake, and `expect` names the missing `(`. An empty
+        // list `()` is a niladic foreign function.
+        self.expect(&Tok::LParen, "`(` after foreign function name")?;
+        let mut params: Vec<(String, Ty)> = Vec::new();
+        if !matches!(self.peek(), Tok::RParen) {
+            loop {
+                let pname = self.ident("parameter name")?;
+                self.expect(&Tok::Colon, "`:` after parameter name")?;
+                let pty = self.ffi_type(&name)?;
+                if params.iter().any(|(n, _)| *n == pname) {
+                    return self.err(format!(
+                        "foreign function `{name}` declares parameter `{pname}` twice"
+                    ));
+                }
+                params.push((pname, pty));
+                match self.peek() {
+                    Tok::Comma => {
+                        self.bump();
+                    }
+                    Tok::RParen => break,
+                    other => {
+                        return self
+                            .err(format!("expected `,` or `)` in parameters, found {other:?}"))
+                    }
+                }
+            }
+        }
+        self.expect(&Tok::RParen, "`)` after parameters")?;
+
+        // `: type` — an optional return; its absence is a call-only (C `void`)
+        // foreign function.
+        let ret = if matches!(self.peek(), Tok::Colon) {
+            self.bump();
+            Some(self.ffi_type(&name)?)
+        } else {
+            None
+        };
+
+        // `from "lib"` — required, and the diagnostic says so rather than
+        // blaming the newline it would otherwise trip over.
+        match self.peek() {
+            Tok::Ident(w) if w == "from" => {
+                self.bump();
+            }
+            other => {
+                return self.err(format!(
+                    "foreign function `{name}` needs `from \"<library>\"`, found {other:?}"
+                ))
+            }
+        }
+        let library = match self.bump() {
+            Tok::Str(s) => s,
+            other => {
+                return self.err(format!(
+                    "expected a library name in quotes after `from`, found {other:?}"
+                ))
+            }
+        };
+        if library.is_empty() {
+            return self.err(format!("foreign function `{name}`: the `from` library is empty"));
+        }
+
+        // `as "symbol"` — an optional override for the exported name, for when
+        // the symbol a library exports is not a legal OpenEPL identifier or
+        // simply differs from the name a program wants to call it by.
+        let symbol = if matches!(self.peek(), Tok::Ident(w) if w == "as") {
+            self.bump();
+            match self.bump() {
+                Tok::Str(s) if !s.is_empty() => Some(s),
+                Tok::Str(_) => {
+                    return self.err(format!(
+                        "foreign function `{name}`: the `as` symbol name is empty"
+                    ))
+                }
+                other => {
+                    return self
+                        .err(format!("expected a symbol name in quotes after `as`, found {other:?}"))
+                }
+            }
+        } else {
+            None
+        };
+
+        self.expect(&Tok::Newline, "newline after foreign function declaration")?;
+        Ok(DllDecl {
+            name,
+            params,
+            ret,
+            library,
+            symbol,
+            line: dll_line,
+            name_span,
+        })
+    }
+
+    /// A type in a `dll` signature: the C-representable subset only. An array,
+    /// a dictionary, a byte-set or a record is refused here — a later stage may
+    /// pass one *by pointer*, but nothing in this stage marshals an aggregate
+    /// across the boundary by value.
+    fn ffi_type(&mut self, dll_name: &str) -> Result<Ty, ParseError> {
+        let t = self.type_keyword()?;
+        match t {
+            Ty::Int | Ty::Int64 | Ty::Double | Ty::Bool | Ty::Text | Ty::Ptr => Ok(t),
+            other => self.err(format!(
+                "foreign function `{dll_name}`: `{}` cannot cross the C boundary — a `dll` \
+                 signature takes int, int64, double, bool, text or ptr",
+                other.as_str()
+            )),
+        }
     }
 
     /// ```text
@@ -1007,6 +1143,17 @@ impl Parser {
             Tok::Float(v) => Ok(Expr::DoubleLit(v)),
             Tok::Str(s) => Ok(Expr::TextLit(s)),
             Tok::Ident(name) => {
+                // `address of NAME` — the address of a subroutine as a `ptr`.
+                // `address` is a *soft* keyword: it means this only when the
+                // next token is `of`, so a variable or field named `address`
+                // keeps working everywhere else. Two idents in a row was never
+                // valid, so `of` steals nothing either. The checker resolves
+                // NAME and proves its signature is C-representable.
+                if name == "address" && matches!(self.peek(), Tok::Ident(w) if w == "of") {
+                    self.bump(); // `of`
+                    let sub = self.ident("the name of a subroutine after `address of`")?;
+                    return Ok(Expr::AddressOf(sub));
+                }
                 // `point(x: 1, y: 2)` — a record. A named first argument is
                 // what separates it from a call, and two tokens of lookahead
                 // are enough to see one.
@@ -1142,6 +1289,31 @@ mod tests {
     #[test]
     fn rejects_a_duplicate_parameter() {
         assert!(parse("module m\nsub f(a: int, a: int)\nend\n").is_err());
+    }
+
+    #[test]
+    fn parses_address_of_a_sub() {
+        let m = parse(
+            "module m\nsub h(a: int): int\n  return a\nend\nsub main\n  var p: ptr = address of h\nend\n",
+        )
+        .unwrap();
+        let main = m.subs().find(|s| s.name == "main").unwrap();
+        let StmtKind::Let { value, ty, .. } = &main.body[0].kind else {
+            panic!("expected a let");
+        };
+        assert_eq!(*ty, Ty::Ptr);
+        assert_eq!(*value, Expr::AddressOf("h".to_string()));
+    }
+
+    /// `address` is only special before `of`: on its own it is an ordinary name,
+    /// so a variable called `address` still reads and writes.
+    #[test]
+    fn address_is_a_soft_keyword() {
+        let m = parse("module m\nsub main\n  var address: int = 1\n  address = address + 1\nend\n")
+            .unwrap();
+        let main = m.subs().next().unwrap();
+        assert!(matches!(main.body[0].kind, StmtKind::Let { .. }));
+        assert!(matches!(main.body[1].kind, StmtKind::Assign { .. }));
     }
 
     #[test]

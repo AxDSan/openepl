@@ -104,7 +104,7 @@
       "name": "keyword.control.openepl"
     },
     "type": {
-      "match": "\\b(int|int64|double|bool|text)\\b",
+      "match": "\\b(int|int64|double|bool|text|bytes|ptr)\\b",
       "name": "support.type.openepl"
     },
     "constant": {

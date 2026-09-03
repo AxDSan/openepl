@@ -42,6 +42,16 @@ enum {
     OE_SDT_BIN       = 10,  /* byte-set (Phase 3): ptr {int 1;int len;bytes} */
     OE_SDT_SUB_PTR   = 11,
     OE_SDT_STATMENT  = 12,
+    /* 13 is OE_SDT_RECORD (below).  14 is the raw machine pointer: an opaque
+     * 64-bit address for C interop — a buffer, a struct, a handle, an
+     * out-parameter.  Its own number rather than riding OE_SDT_INT64 because a
+     * library's declared signature is read back through these tags, so `ptr`
+     * and `int64` MUST be distinguishable at that boundary — otherwise a
+     * command declaring `ptr` and one declaring `int64` would round-trip to the
+     * same IR type and the type system's ban on implicit int<->ptr conversion
+     * could not be enforced.  It travels in the slot's pointer/int64 union like
+     * TEXT does, so marshaling costs nothing new. */
+    OE_SDT_PTR       = 14,
     OE_SDT_ALL       = 255  /* _SDT_ALL: any type (declarations only)   */
 };
 
@@ -390,12 +400,14 @@ static inline int32_t  oe_arg_int(OpenEPL_Slot *argv, int i)    { return argv[i]
 static inline int64_t  oe_arg_int64(OpenEPL_Slot *argv, int i)  { return argv[i].v.i64; }
 static inline double   oe_arg_double(OpenEPL_Slot *argv, int i) { return argv[i].v.d; }
 static inline char    *oe_arg_text(OpenEPL_Slot *argv, int i)   { return (char *)argv[i].v.ptr; }
+static inline void    *oe_arg_ptr(OpenEPL_Slot *argv, int i)    { return argv[i].v.ptr; }
 
 static inline void oe_ret_int(OpenEPL_Slot *r, int32_t x)   { r->tag = OE_SDT_INT;    r->v.i32 = x; }
 static inline void oe_ret_int64(OpenEPL_Slot *r, int64_t x) { r->tag = OE_SDT_INT64;  r->v.i64 = x; }
 static inline void oe_ret_double(OpenEPL_Slot *r, double x) { r->tag = OE_SDT_DOUBLE; r->v.d   = x; }
 static inline void oe_ret_text(OpenEPL_Slot *r, char *p)    { r->tag = OE_SDT_TEXT;   r->v.ptr = p; }
 static inline void oe_ret_bool(OpenEPL_Slot *r, int32_t x)  { r->tag = OE_SDT_BOOL;   r->v.i32 = x ? 1 : 0; }
+static inline void oe_ret_ptr(OpenEPL_Slot *r, void *p)     { r->tag = OE_SDT_PTR;    r->v.ptr = p; }
 static inline int32_t oe_arg_bool(OpenEPL_Slot *argv, int i) { return argv[i].v.i32 != 0; }
 
 #ifdef __cplusplus

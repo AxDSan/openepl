@@ -9,6 +9,19 @@ use std::collections::HashMap;
 
 use crate::{Module, RecordDef, Signature, Ty};
 
+/// A foreign function the module declared with `dll`.  Held beside subs and
+/// commands so a call resolves it the same way, but it carries the two extra
+/// facts the backend needs that a sub does not: which library the symbol lives
+/// in, and what that symbol is called there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DllSig {
+    pub sig: Signature,
+    /// The `from "..."` library, spelled exactly as written.
+    pub library: String,
+    /// The exported symbol to resolve (the `as` override, or the name itself).
+    pub symbol: String,
+}
+
 /// A component property, as declared in a library's `ComponentDesc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertyDesc {
@@ -77,6 +90,14 @@ pub struct Registry {
     /// collision instead of overwriting. Lookup order is commands first, then
     /// these, and `get` still means "library command" for every existing caller.
     subs: HashMap<String, Signature>,
+    /// Foreign functions declared in the module being compiled, by name.
+    ///
+    /// They share the one callable namespace with commands, subs and records —
+    /// `register_dlls` reports a collision rather than overwriting — but are
+    /// kept apart because the backend lowers a `dll` call differently: an
+    /// indirect call through a symbol resolved from a library at run time,
+    /// rather than a direct call to a name the linker already knows.
+    dlls: HashMap<String, DllSig>,
     /// Record types declared in the module being compiled, by name.
     ///
     /// They live here rather than in a parameter threaded through the checker
@@ -103,6 +124,7 @@ impl Registry {
             map: HashMap::new(),
             components: HashMap::new(),
             subs: HashMap::new(),
+            dlls: HashMap::new(),
             records: HashMap::new(),
             event_params: HashMap::new(),
         }
@@ -123,6 +145,49 @@ impl Registry {
         collisions
     }
 
+    /// Record every foreign-function declaration in `m` as callable, returning
+    /// the names that collide with a library command, a subroutine or another
+    /// `dll` (the caller reports them — the validator has the line numbers).
+    ///
+    /// A `dll` name is written in the same call position a command or a sub is,
+    /// so it shares the one flat callable namespace with them.
+    pub fn register_dlls(&mut self, m: &Module) -> Vec<String> {
+        let mut collisions = Vec::new();
+        for d in m.dlls() {
+            if self.map.contains_key(&d.name)
+                || self.subs.contains_key(&d.name)
+                || self.dlls.contains_key(&d.name)
+            {
+                collisions.push(d.name.clone());
+                continue;
+            }
+            self.dlls.insert(
+                d.name.clone(),
+                DllSig {
+                    sig: d.signature(),
+                    library: d.library.clone(),
+                    symbol: d.symbol_name().to_string(),
+                },
+            );
+        }
+        collisions
+    }
+
+    /// The declaration of `name`, if it names a foreign function.
+    pub fn dll(&self, name: &str) -> Option<&DllSig> {
+        self.dlls.get(name)
+    }
+
+    /// Whether `name` names a foreign function.
+    pub fn is_dll(&self, name: &str) -> bool {
+        self.dlls.contains_key(name)
+    }
+
+    /// Foreign-function names, for diagnostics.
+    pub fn dll_names(&self) -> impl Iterator<Item = &str> {
+        self.dlls.keys().map(|s| s.as_str())
+    }
+
     /// Record every record declaration in `m`, returning the names that collide
     /// with a library command or a subroutine (the caller reports them — the
     /// validator has the line numbers).
@@ -134,6 +199,7 @@ impl Registry {
         for rec in m.records() {
             if self.map.contains_key(&rec.name)
                 || self.subs.contains_key(&rec.name)
+                || self.dlls.contains_key(&rec.name)
                 || self.records.contains_key(&rec.name)
             {
                 collisions.push(rec.name.clone());
@@ -383,6 +449,37 @@ impl Registry {
             cmd("dict_set", "oe_dict_store", &[AnyDict, Text, AnyElem], None);
             cmd("dict_remove", "oe_dict_erase", &[AnyDict, Text], Some(Bool));
             cmd("dict_keys", "oe_dict_keys", &[AnyDict], Some(Array(crate::Elem::Text)));
+
+            // --- Pointers and raw memory -------------------------------------
+            // A `ptr` is an opaque 64-bit address; these are the escape hatch to
+            // C. Offsets and sizes are `int64` so a buffer may exceed 2 GiB and
+            // a 64-bit address round-trips whole. Reads and writes are raw: a
+            // bad address faults exactly as it would in C — there is no bounds
+            // check a C programmer would not have. `ptr_read_text` copies, so it
+            // is the one that can answer "" for a null pointer instead of
+            // faulting; every other read at null is undefined, as in C.
+            cmd("ptr_null", "oe_ptr_null", &[], Some(Ptr));
+            cmd("ptr_is_null", "oe_ptr_is_null", &[Ptr], Some(Bool));
+            cmd("ptr_offset", "oe_ptr_offset", &[Ptr, Int64], Some(Ptr));
+            cmd("ptr_from_int", "oe_ptr_from_int", &[Int64], Some(Ptr));
+            cmd("ptr_to_int", "oe_ptr_to_int", &[Ptr], Some(Int64));
+            cmd("ptr_read_int", "oe_ptr_read_int", &[Ptr, Int64], Some(Int));
+            cmd("ptr_write_int", "oe_ptr_write_int", &[Ptr, Int64, Int], None);
+            cmd("ptr_read_int64", "oe_ptr_read_int64", &[Ptr, Int64], Some(Int64));
+            cmd("ptr_write_int64", "oe_ptr_write_int64", &[Ptr, Int64, Int64], None);
+            cmd("ptr_read_byte", "oe_ptr_read_byte", &[Ptr, Int64], Some(Int));
+            cmd("ptr_write_byte", "oe_ptr_write_byte", &[Ptr, Int64, Int], None);
+            cmd("ptr_read_double", "oe_ptr_read_double", &[Ptr, Int64], Some(Double));
+            cmd("ptr_write_double", "oe_ptr_write_double", &[Ptr, Int64, Double], None);
+            cmd("ptr_read_ptr", "oe_ptr_read_ptr", &[Ptr, Int64], Some(Ptr));
+            cmd("ptr_write_ptr", "oe_ptr_write_ptr", &[Ptr, Int64, Ptr], None);
+            cmd("ptr_read_text", "oe_ptr_read_text", &[Ptr], Some(Text));
+            cmd("ptr_write_text", "oe_ptr_write_text", &[Ptr, Int64, Text], None);
+            cmd("ptr_of_text", "oe_ptr_of_text", &[Text], Some(Ptr));
+            cmd("mem_alloc", "oe_mem_alloc", &[Int64], Some(Ptr));
+            cmd("mem_free", "oe_mem_free", &[Ptr], None);
+            cmd("mem_zero", "oe_mem_zero", &[Ptr, Int64], None);
+            cmd("mem_copy", "oe_mem_copy", &[Ptr, Ptr, Int64], None);
 
             // --- Event loop --------------------------------------------------
             cmd("quit", "oe_quit", &[], None);

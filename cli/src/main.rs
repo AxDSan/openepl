@@ -636,13 +636,38 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
             return 2;
         }
     }
-    let (mut ll, plan, target, module) = match compile(&input, io.target, io.os) {
+    let (mut ll, mut plan, target, module) = match compile(&input, io.target, io.os) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
             return 1;
         }
     };
+
+    // A shared library that declares `dll_attach`/`dll_detach` gets a platform
+    // loader entry — `DllMain` on Windows, an ELF constructor on Linux. The
+    // shim lives in runtime/oe_dllmain.c, which compiles to nothing unless
+    // OE_DLLMAIN is defined, so turning it on for this one target leaves every
+    // other build (and the ordinary hook-less sharedlib) exactly as it was.
+    // The macros carry the two facts the C cannot know for itself: the module's
+    // `<module>_init` symbol, and which of the two hooks the module defined.
+    if target == Target::SharedLib {
+        let has_attach = module.subs().any(|s| s.name == "dll_attach");
+        let has_detach = module.subs().any(|s| s.name == "dll_detach");
+        if has_attach || has_detach {
+            plan.build.defines.push("OE_DLLMAIN".into());
+            plan.build
+                .defines
+                .push(format!("OE_MODULE_INIT={}_init", module.name));
+            if has_attach {
+                plan.build.defines.push("OE_HAS_ATTACH".into());
+            }
+            if has_detach {
+                plan.build.defines.push("OE_HAS_DETACH".into());
+            }
+        }
+    }
+
     let out_bin = match io.output {
         Some(p) => output_for_os(p, target, io.os),
         None => default_output(&input, io.project_output.as_deref(), target, io.os),
@@ -1091,6 +1116,14 @@ fn clang_link(
         }
     }
     libs.push("-lm".into()); // libm for the floating-point commands
+    // libdl for the foreign-function loader (runtime/oe_dll.c's dlopen/dlsym).
+    // Only on Linux, and only for a native build: glibc >= 2.34 folds these
+    // into libc so the flag is a harmless no-op there, but an older host still
+    // needs it — and macOS has no `libdl` to name (the calls live in libSystem)
+    // while the Windows loader is kernel32, linked by the mingw path instead.
+    if cfg!(target_os = "linux") {
+        libs.push("-ldl".into());
+    }
     if target == Target::SharedLib {
         libs.push("-shared".into());
     } else {

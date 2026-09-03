@@ -36,6 +36,16 @@ static const int32_t P_BII[]   = { OE_SDT_BIN, OE_SDT_INT, OE_SDT_INT };
 static const int32_t P_K[]     = { OE_SDT_ANY_DICT };
 static const int32_t P_KT[]    = { OE_SDT_ANY_DICT, OE_SDT_TEXT };
 static const int32_t P_KTE[]   = { OE_SDT_ANY_DICT, OE_SDT_TEXT, OE_SDT_ANY_ELEM };
+/* Pointers. Offsets and sizes are INT64 so a buffer may exceed 2 GiB and a
+ * 64-bit address round-trips whole. */
+static const int32_t P_P[]        = { OE_SDT_PTR };
+static const int32_t P_PI64[]     = { OE_SDT_PTR, OE_SDT_INT64 };
+static const int32_t P_PI64I[]    = { OE_SDT_PTR, OE_SDT_INT64, OE_SDT_INT };
+static const int32_t P_PI64I64[]  = { OE_SDT_PTR, OE_SDT_INT64, OE_SDT_INT64 };
+static const int32_t P_PI64D[]    = { OE_SDT_PTR, OE_SDT_INT64, OE_SDT_DOUBLE };
+static const int32_t P_PI64P[]    = { OE_SDT_PTR, OE_SDT_INT64, OE_SDT_PTR };
+static const int32_t P_PI64T[]    = { OE_SDT_PTR, OE_SDT_INT64, OE_SDT_TEXT };
+static const int32_t P_PPI64[]    = { OE_SDT_PTR, OE_SDT_PTR, OE_SDT_INT64 };
 
 #define CMD(name, sym, ret, argc, tags) \
     { name, #sym, ret, argc, tags }
@@ -125,6 +135,29 @@ static const OpenEPL_CommandDesc CORE_COMMANDS[] = {
     CMD("dict_set",    oe_dict_store,  OE_SDT_NULL,     3, P_KTE),
     CMD("dict_remove", oe_dict_erase,  OE_SDT_BOOL,     2, P_KT),
     CMD("dict_keys",   oe_dict_keys,   OE_SDT_ARRAY_OF(OE_SDT_TEXT), 1, P_K),
+    /* pointers and raw memory — the escape hatch to C. */
+    CMD("ptr_null",        oe_ptr_null,        OE_SDT_PTR,   0, NULL),
+    CMD("ptr_is_null",     oe_ptr_is_null,     OE_SDT_BOOL,  1, P_P),
+    CMD("ptr_offset",      oe_ptr_offset,      OE_SDT_PTR,   2, P_PI64),
+    CMD("ptr_from_int",    oe_ptr_from_int,    OE_SDT_PTR,   1, P_I64),
+    CMD("ptr_to_int",      oe_ptr_to_int,      OE_SDT_INT64, 1, P_P),
+    CMD("ptr_read_int",    oe_ptr_read_int,    OE_SDT_INT,   2, P_PI64),
+    CMD("ptr_write_int",   oe_ptr_write_int,   OE_SDT_NULL,  3, P_PI64I),
+    CMD("ptr_read_int64",  oe_ptr_read_int64,  OE_SDT_INT64, 2, P_PI64),
+    CMD("ptr_write_int64", oe_ptr_write_int64, OE_SDT_NULL,  3, P_PI64I64),
+    CMD("ptr_read_byte",   oe_ptr_read_byte,   OE_SDT_INT,   2, P_PI64),
+    CMD("ptr_write_byte",  oe_ptr_write_byte,  OE_SDT_NULL,  3, P_PI64I),
+    CMD("ptr_read_double", oe_ptr_read_double, OE_SDT_DOUBLE,2, P_PI64),
+    CMD("ptr_write_double",oe_ptr_write_double,OE_SDT_NULL,  3, P_PI64D),
+    CMD("ptr_read_ptr",    oe_ptr_read_ptr,    OE_SDT_PTR,   2, P_PI64),
+    CMD("ptr_write_ptr",   oe_ptr_write_ptr,   OE_SDT_NULL,  3, P_PI64P),
+    CMD("ptr_read_text",   oe_ptr_read_text,   OE_SDT_TEXT,  1, P_P),
+    CMD("ptr_write_text",  oe_ptr_write_text,  OE_SDT_NULL,  3, P_PI64T),
+    CMD("ptr_of_text",     oe_ptr_of_text,     OE_SDT_PTR,   1, P_T),
+    CMD("mem_alloc",       oe_mem_alloc,       OE_SDT_PTR,   1, P_I64),
+    CMD("mem_free",        oe_mem_free,        OE_SDT_NULL,  1, P_P),
+    CMD("mem_zero",        oe_mem_zero,        OE_SDT_NULL,  2, P_PI64),
+    CMD("mem_copy",        oe_mem_copy,        OE_SDT_NULL,  3, P_PPI64),
     /* event loop */
     CMD("quit",            oe_quit,          OE_SDT_NULL, 0, NULL),
 };

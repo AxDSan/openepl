@@ -37,6 +37,10 @@ pub fn c_type(t: Ty) -> Option<&'static str> {
         Ty::Double => Some("double"),
         Ty::Bool => Some("int32_t"),
         Ty::Text => Some("const char *"),
+        // A raw pointer is the one aggregate-shaped type C has an honest name
+        // for: it IS a `void *`, with no runtime-owned object behind it, so an
+        // exported sub taking or returning one gets a real prototype.
+        Ty::Ptr => Some("void *"),
         Ty::Bytes
         | Ty::Array(_)
         | Ty::Record(_)
