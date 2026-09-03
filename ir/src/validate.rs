@@ -205,6 +205,36 @@ fn validate_impl(
             }
         }
     }
+    // A c-record's field may nest another record by value — inline, with the
+    // nested struct's own alignment — but only an `is c` one: a plain record is
+    // a pointer to a heap object, and a struct cannot hold one by value and
+    // still be the block of bytes a C API is handed.
+    for rec in records.iter().filter(|r| r.is_c) {
+        for (fname, fty) in &rec.fields {
+            let nested = match fty {
+                Ty::Record(n) => Some(*n),
+                Ty::CArray(a) => match a.elem {
+                    Ty::Record(n) => Some(n),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(n) = nested else { continue };
+            match reg.record(n) {
+                Some(def) if def.is_c => {}
+                Some(_) => push(
+                    format!(
+                        "c-record `{}` field `{fname}`: `{n}` is a heap record — a c-record \
+                         nests another by value only if that one is `is c` too",
+                        rec.name
+                    ),
+                    Span::line(rec.line),
+                ),
+                // The unknown-type walk above has already said so.
+                None => {}
+            }
+        }
+    }
     check_record_cycles(&records, &mut push);
 
     // --- c-record placement ----------------------------------------------
@@ -898,6 +928,30 @@ fn validate_impl(
                         };
                         match field_type(rec, property, reg) {
                             Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
+                            // A nested c-record and an inline array are whole
+                            // blocks of storage, not values: there is nothing
+                            // to evaluate on the right that could fill one.
+                            // Assign their parts, or copy the bytes through
+                            // `address of`.
+                            Ok(Ty::Record(inner)) if reg.record(inner).map(|d| d.is_c).unwrap_or(false) => {
+                                push(format!(
+                                    "in `{}`: `{component}.{property}` is the nested \
+                                     c-record `{inner}` — assign its own fields \
+                                     (`{component}.{property}.field = ...`) or copy bytes \
+                                     through `address of {component}.{property}`",
+                                    sub.name
+                                ), stmt.span);
+                            }
+                            Ok(Ty::CArray(a)) => {
+                                push(format!(
+                                    "in `{}`: `{component}.{property}` is an inline array \
+                                     of {} element(s) — assign one at a time \
+                                     (`{component}.{property}[1] = ...`) or copy bytes \
+                                     through `address of {component}.{property}`",
+                                    sub.name,
+                                    a.count
+                                ), stmt.span);
+                            }
                             Ok(expected) => match type_of_expr_hinted(
                                 value, Some(expected), &vars, reg, &components,
                             ) {
@@ -936,6 +990,54 @@ fn validate_impl(
                             Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
                         },
                     },
+                    // `r.pt.x = v`, `r.rgb[3] = v` — a write through a path into
+                    // a c-record's flat storage. The place is typed with exactly
+                    // the rules a read of it uses; what is checked *here* is
+                    // that it really is a c-record path (the only storage the
+                    // backend can walk) and that what lands in it is one value,
+                    // not a whole nested block.
+                    StmtKind::SetPlace { place, value } => {
+                        let root = place_root(place);
+                        let rooted_in_c_record = root
+                            .and_then(|r| vars.get(r).copied())
+                            .and_then(|t| match t {
+                                Ty::Record(n) => reg.record(n),
+                                _ => None,
+                            })
+                            .map(|d| d.is_c)
+                            .unwrap_or(false);
+                        if !rooted_in_c_record {
+                            push(format!(
+                                "in `{}`: `{}` is not a c-record — a multi-step \
+                                 assignment target reaches into a c-record's own storage \
+                                 and nothing else",
+                                sub.name,
+                                root.unwrap_or("this")
+                            ), stmt.span);
+                        } else {
+                            match type_of_expr_in(place, &vars, reg, &components) {
+                                Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
+                                Ok(Ty::Record(_)) | Ok(Ty::CArray(_)) => push(format!(
+                                    "in `{}`: a whole nested c-record or inline array \
+                                     cannot be assigned — set its parts, or copy bytes \
+                                     through `address of`",
+                                    sub.name
+                                ), stmt.span),
+                                Ok(expected) => match type_of_expr_hinted(
+                                    value, Some(expected), &vars, reg, &components,
+                                ) {
+                                    Ok(got) if got == expected => {}
+                                    Ok(got) => push(format!(
+                                        "in `{}`: that field is {}, cannot store {}",
+                                        sub.name,
+                                        expected.as_str(),
+                                        got.as_str()
+                                    ), stmt.span),
+                                    Err(e) => report(&sub.name, stmt, e.to_string(), reg, hints, &vars, &mut push),
+                                },
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1183,6 +1285,12 @@ fn check_initializer(
         Expr::Var(name) if globals.contains_key(name) => Err(format!(
             "cannot read module variable `{name}` here; module variable initializers may use literals and command calls only"
         )),
+        // A constant is a literal with a name: it has no storage, no
+        // initialisation order, and folds where it is written — so it is
+        // allowed here for exactly the reason a bare number is. This is what
+        // lets a module variable be seeded from a kit's `const`
+        // (`var flags: int = MB_OK`).
+        Expr::Var(name) if reg.const_(name).is_some() => Ok(()),
         Expr::Var(name) => Err(format!("unknown variable `{name}`")),
         Expr::Bin(_, l, r) => {
             check_initializer(l, globals, reg)?;
@@ -1250,6 +1358,7 @@ fn find_c_record(ty: Ty, reg: &Registry) -> Option<&'static str> {
     let name = match ty {
         Ty::Record(n) => n,
         Ty::Array(Elem::Record(n)) | Ty::Dict(Elem::Record(n)) => n,
+        Ty::CArray(a) => return find_c_record(a.elem, reg),
         _ => return None,
     };
     match reg.record(name) {
@@ -1258,10 +1367,24 @@ fn find_c_record(ty: Ty, reg: &Registry) -> Option<&'static str> {
     }
 }
 
+/// The variable a place expression is rooted at: `r` in `r.pt.x` and in
+/// `r.rgb[3]`. `None` when the chain does not start at a plain name.
+fn place_root(place: &Expr) -> Option<&str> {
+    match place {
+        Expr::Var(n) => Some(n),
+        Expr::GetProperty { component, .. } => Some(component),
+        Expr::Field { base, .. } | Expr::Index { base, .. } => place_root(base),
+        _ => None,
+    }
+}
+
 fn undeclared_type(ty: Ty, reg: &Registry) -> Option<&'static str> {
     let name = match ty {
         Ty::Record(n) => n,
         Ty::Array(Elem::Record(n)) | Ty::Dict(Elem::Record(n)) => n,
+        // An inline array's element is a type like any other: `Point[4]` is
+        // unknown exactly when `Point` is.
+        Ty::CArray(a) => return undeclared_type(a.elem, reg),
         _ => return None,
     };
     if reg.record(name).is_some() {
@@ -1295,7 +1418,17 @@ fn check_record_cycles(records: &[&RecordDef], push: &mut impl FnMut(String, Spa
         while let Some(cur) = stack.pop() {
             let Some(def) = by_name.get(cur) else { continue };
             for (_, fty) in &def.fields {
-                let Ty::Record(next) = fty else { continue };
+                // An inline array of records nests by value just as a bare
+                // field does — `a: A[2]` inside `A` is as impossible as `a: A`.
+                let next: &'static str = match fty {
+                    Ty::Record(n) => n,
+                    Ty::CArray(a) => match a.elem {
+                        Ty::Record(n) => n,
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                let next = &next;
                 if *next == rec.name.as_str() {
                     cycles = true;
                     break;

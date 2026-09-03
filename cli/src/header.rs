@@ -41,10 +41,14 @@ pub fn c_type(t: Ty) -> Option<&'static str> {
         // for: it IS a `void *`, with no runtime-owned object behind it, so an
         // exported sub taking or returning one gets a real prototype.
         Ty::Ptr => Some("void *"),
-        // A `byte` is a c-record field width, never a standalone exported type
-        // — no sub signature carries one — so it has no C prototype spelling
-        // here, alongside the runtime-owned aggregates.
+        // `byte`, `int16` and `float` are c-record field widths, and an inline
+        // array is a c-record field shape: none is ever a standalone exported
+        // type — no sub signature carries one — so none has a C prototype
+        // spelling here, alongside the runtime-owned aggregates.
         Ty::Byte
+        | Ty::Int16
+        | Ty::Float
+        | Ty::CArray(_)
         | Ty::Bytes
         | Ty::Array(_)
         | Ty::Record(_)

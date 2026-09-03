@@ -18,6 +18,23 @@ has no AccessKit Windows adapter yet. Studio itself is Linux-only, nothing is
 built natively *on* Windows — the toolchain runs on Linux — and macOS and
 arm64 are not supported at all.
 
+**The `win` kit is declarations, and it is Windows-only.** `use win` brings in
+the Win32 API — user32, gdi32, kernel32 and advapi32 — and a program that uses
+it builds only with `--os windows`; on any other target it is refused by name.
+It is written and tested on Linux: the examples in `examples/win/` cross-build
+with mingw and run under wine, which is where a wrong struct offset or a
+misspelled export shows up. Under wine the display is off, so a window is
+created and its WNDPROC really is called back with `WM_PAINT` — that is
+checked — but there is no framebuffer to read: **the drawn window has not been
+looked at**, under wine or on a Windows machine. The kit binds the ANSI
+(`...A`) entry points only, so a string outside the process's code page does
+not survive; a program written against it alone builds for the **console**
+subsystem, because `--target gui` is the UI stack rather than a subsystem
+switch and refuses a module with no form — so a Win32 window made this way has
+a console window beside it; it has no COM, and a struct with a union, a
+bitfield or non-natural packing — `BITMAPFILEHEADER`, say — has no c-record
+and must be laid out by hand.
+
 ## Programs you build
 
 **A release build is hardened, not hidden.** `openepl build --release`
@@ -51,10 +68,19 @@ not breakpoints, stepping or variable inspection.
   no way to attach a subroutine to a type.
 - A dictionary's keys are text, and only text; asking with an `int` is a
   compile error.
-- No named constants: a module-level `let` does not parse, only `var`.
 - Local variables are visible for the whole subroutine, not just the block
   they were declared in. A `for` loop's variable follows the same rule, so two
   loops in one subroutine need two different variable names.
+- A `ptr` that holds a function's address cannot be called. `address of`
+  makes one and a `dll` can take one, but there is no indirect call, so the
+  pointer `GetProcAddress` answers can be stored and passed on and not
+  invoked — and COM, whose every method call goes through a vtable, is out of
+  reach for the same reason.
+- No bitwise operators and no bitwise commands: there is no `and`, `or`,
+  `xor`, `not` or shift on an integer. Combining flags works because flag bits
+  are disjoint, so `PROCESS_VM_READ + PROCESS_VM_WRITE` is the number C's `|`
+  gives — but testing one bit out of a word has no spelling beyond arithmetic
+  with `%` and `/`.
 - No mixing of numeric types in one expression: `d + 1` where `d` is a
   `double` is an error, not an implicit conversion. Write
   `d + int_to_double(1)`.

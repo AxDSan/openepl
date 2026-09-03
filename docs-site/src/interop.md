@@ -235,11 +235,27 @@ struct on the stack, and the two do not mix — a c-record is for crossing to C,
 a plain record for everything else.
 
 A c-record field is one of the C-representable scalars — `int`, `int64`,
-`double`, `bool`, `text` (a `char *`), `ptr` — or `byte`, a single `0`..`255`
-that a C `char`/`uint8_t` member needs and that means nothing outside a layout.
+`double`, `bool`, `text` (a `char *`), `ptr` — or one of the widths that mean
+something only in a layout, or another c-record, or a fixed array. The whole
+set, which is what a transcription of a C header is written against:
+
+| Field type | In C | Reads and writes as |
+|---|---|---|
+| `int` | `int32_t` | `int` |
+| `int64` | `int64_t` | `int64` |
+| `int16`, `word` | `uint16_t` (a Win32 `WORD`) | `int`, `0`..`65535` |
+| `byte` | `uint8_t` | `int`, `0`..`255` |
+| `double` | `double` | `double` |
+| `float` | `float` | `double` |
+| `bool` | `int32_t` (a Win32 `BOOL`) | `bool` |
+| `text` | `char *` | `text` |
+| `ptr` | `void *` | `ptr` |
+| another `is c` record | that struct, by value | its own fields |
+| `T[N]` | `T a[N]` | one element at a time |
+
 A `bool` occupies a C `int` (four bytes), matching how a C API declares a `BOOL`
-field. Nesting a c-record inside another, or a fixed array of them, is honest C
-but not laid out yet; a field like that is a build error that says so.
+field. `int16` and `word` are two spellings of one 16-bit field — write whichever
+reads better beside the header being transcribed.
 
 ### A struct across the boundary
 
@@ -350,6 +366,158 @@ text you own — a NULL field reads as the empty text — so the value outlives 
 struct. Writing one stores the borrowed pointer behind an OpenEPL text: it is
 valid only while that text is, the same bargain `ptr_of_text` makes, so keep the
 text alive as long as the struct is in use.
+
+### Narrow numbers: `int16`, `word` and `float`
+
+A C struct is full of members narrower than the language's own numbers. A Win32
+`WNDCLASSEXA` has two `WORD`s in the middle of it; a `STARTUPINFOA` has three.
+A c-record spells that width `int16`, or `word` where the header being
+transcribed says `WORD` — one type under two names, so a declaration can read
+like the C it came from.
+
+A `word` field is *read and written as an `int`*: reading widens **unsigned**,
+so `0xFFFF` in the struct is `65535` and not `-1`, and writing keeps the low 16
+bits. That is the same bargain `byte` makes, and it is the right one because the
+field this exists for is a `WORD`, not a `SHORT`.
+
+`float` is the same idea one type over. OpenEPL has a single floating type,
+`double`, so a `float` field is read and written as a `double` and the narrowing
+happens at the store: what sits in the struct is a real 4-byte IEEE `float`,
+which is what a C API that declares one reads back.
+
+```openepl
+module widths
+
+record WndClass is c
+  style: int
+  cls_extra: int16
+  wnd_extra: word
+  name: text
+end
+
+record Sample is c
+  gain: float
+end
+
+sub main
+  var wc: WndClass
+  wc.cls_extra = 65535
+  call print_int(wc.cls_extra)      # 65535 — widened unsigned
+  call print_int64(size of WndClass) # 16: style@0, the two WORDs@4 and @6, name@8
+
+  var s: Sample
+  s.gain = 1.5
+  call print_double(s.gain)         # 1.5, stored as a 4-byte float
+  call print_int64(size of Sample)  # 4
+end
+```
+
+### A record inside a record
+
+A C struct holds another *by value* all the time — a `MSG` ends with a `POINT`,
+a `PAINTSTRUCT` holds a `RECT`. A c-record field whose type is another `is c`
+record is exactly that: the nested struct is laid inline, at its own alignment,
+and it costs the outer struct its bytes and nothing else. There is no pointer,
+and no second object.
+
+Reach through it with another `.`, as deep as the nesting goes, and take
+`address of` it for the pointer to the nested struct alone:
+
+```openepl
+module nested
+
+record Point is c
+  x: int
+  y: int
+end
+
+record Msg is c
+  hwnd: ptr
+  message: int
+  wparam: int64
+  lparam: int64
+  time: int
+  pt: Point
+end
+
+dll GetMessageA(msg: Msg, window: ptr, first: int, last: int): int from "user32" system
+
+sub main
+  var msg: Msg
+  msg.pt.x = 11          # a nested field is written through the path
+  call print_int(msg.pt.x)
+
+  call print_int64(size of Msg)      # 48 — the same number `sizeof(MSG)` is
+
+  var here: ptr = address of msg.pt  # a pointer to the POINT alone
+  call print_int64(ptr_to_int(here) - ptr_to_int(address of msg))   # 36
+end
+```
+
+A nested field is also a value a `dll` can be handed: a parameter declared as
+the nested record takes the address of *that member*, not of the whole struct,
+so `call ClientToScreen(window, msg.pt)` reaches C exactly as `&msg.pt` would.
+
+The nested type must itself be `is c`. A plain record is a reference to a
+runtime-owned object, and a struct cannot hold one of those by value; a field
+like that is a build error that says so. A record that contains itself, directly
+or through an array of itself, is refused for the same reason it always was —
+it would have no size.
+
+Only the *parts* of a nested record are assignable: `msg.pt.x = 11` is a write,
+`msg.pt = somewhere` is not, because there is no value on the right that a whole
+block of struct could be filled from. Copy the bytes through `address of` and
+`mem_copy` when that is what you mean.
+
+### A fixed array inside a record
+
+`rgb: byte[32]` is C's `BYTE rgb[32]`: thirty-two bytes laid end to end inside
+the struct, not a pointer to a runtime array. The element type is any c-record
+field type — including another `is c` record — and the count is a literal,
+because `size of` and every offset after the field are compile-time numbers.
+
+Elements count **from 1**, like everything else in OpenEPL, so `r.rgb[1]` is the
+first byte and `r.rgb[32]` is the last. `address of r.rgb` is a pointer to the
+first element, which is where C's own `&r.rgb` points, so a `memset` or a
+`memcpy` reaches the member and nothing around it:
+
+```openepl
+module inline_array
+
+record Paint is c
+  erase: bool
+  rgb: byte[32]
+end
+
+sub main
+  var ps: Paint
+  ps.rgb[1] = 200
+  ps.rgb[32] = 7
+  call print_int(ps.rgb[1])         # 200 — a byte element reads back unsigned
+  call print_int64(size of Paint)   # 36: erase@0, rgb@4
+
+  call mem_zero(address of ps.rgb, 32)   # the member, and nothing around it
+  call print_int(ps.rgb[1])         # 0
+end
+```
+
+An index the compiler can see — a literal, or a `const` that stands for one — is
+checked when the program is built: `r.rgb[33]` on a `byte[32]` is a compile
+error naming the count, and so is `r.rgb[SLOT]` where `SLOT` is 33, because the
+count is part of the type and nothing has to run to know it is wrong.
+
+A **computed** index is a plain address calculation with **no bounds check** —
+the same bargain every other `ptr` operation makes. An index a loop drives past
+the end reads or writes the bytes beside the array, exactly as the equivalent C
+does.
+
+`address of` an array field is the first element. For a later one, offset that
+pointer by the element width — `ptr_offset(address of r.rgb, 5)` is `&r.rgb[6]`
+— which is the same arithmetic the C would do and keeps the one spelling of
+`address of` honest about what it names.
+
+The array as a whole is not a value: assign one element at a time, or move the
+bytes through `address of`.
 
 ## Callbacks: passing a sub to C
 
@@ -472,11 +640,11 @@ them, so a program says `use win` and has `MessageBoxA`, `RECT` and `MB_OK`
 without transcribing a single one.
 
 A kit is the directory [Kits](./kits.md) describes. A kit that ships
-declarations puts them in one file beside its `lib.json`, named for the kit:
-`<name>.oed`. The file is a run of declarations with no `module` header —
-`dll`, `record` and `const`, and nothing else. A `sub`, a `form`, a component
-or a module variable does not belong in one and is refused, because a
-declaration bundle *declares*; it does not define or build.
+declarations puts them in a `.oed` file beside its `lib.json` — a small kit in
+one named for the kit, `<name>.oed`. The file is a run of declarations with no
+`module` header — `dll`, `record` and `const`, and nothing else. A `sub`, a
+`form`, a component or a module variable does not belong in one and is refused,
+because a declaration bundle *declares*; it does not define or build.
 
 ```text
 # win.oed — the bundle `use win` brings in
@@ -511,11 +679,36 @@ sub main
 end
 ```
 
-A kit can ship declarations, C-implemented commands, or both: a `<name>.oed`
-beside a `<name>_libinfo.c` contributes to the one registry from both halves.
+A kit can ship declarations, C-implemented commands, or both: a `.oed` beside a
+`<name>_libinfo.c` contributes to the one registry from both halves.
 `openepl commands --use <name>` lists a kit's `dll:`, `crecord:` and `const:`
 lines beside its `command:` lines, so Studio's completion and the reference see
 them; `openepl kits` reports the bundle a kit carries.
+
+### A bundle across several files
+
+One file per kit stops reading well the moment a kit is large. A Win32 kit wraps
+half a dozen system libraries, and a thousand declarations in one `win.oed` is a
+file nobody can find anything in. So a kit may carry **as many `.oed` files as it
+likes**, and every one in the kit directory is merged into a single bundle:
+
+```text
+kits/win/
+  lib.json
+  user32.oed      # windows, messages, MessageBoxA
+  kernel32.oed    # handles, modules, GetLastError
+  gdi32.oed       # drawing
+```
+
+Order across files does not matter any more than order within one does: the
+merged bundle is registered whole before any cross-reference is checked, so a
+`dll` in `user32.oed` may take a `RECT` declared in `gdi32.oed`. What the files
+share is one namespace — `dll`, `record` and `const` names all land in the same
+registry — so declaring one name in two files is a kit-authoring error naming
+both, caught the moment the kit is used or listed.
+
+`use` is unchanged: a program says `use win` and gets everything from every
+file. So is `openepl kits`, which lists the whole merged bundle.
 
 ### Constants
 

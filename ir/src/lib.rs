@@ -44,6 +44,27 @@ pub fn intern(s: &str) -> &'static str {
     leaked
 }
 
+/// A fixed-count inline array in a C-struct record: `rgb: byte[32]`.
+///
+/// `elem` is a c-record field type — a scalar, or the name of another `is c`
+/// record — and `count` is at least 1. Held behind `Ty::CArray(&'static
+/// CArray)` so `Ty` stays `Copy`; the derives are structural, so two leaked
+/// `byte[32]`s compare and hash equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CArray {
+    pub elem: Ty,
+    pub count: u32,
+}
+
+/// Make the type `elem[count]`.
+///
+/// Leaks one small value per array field written in a program — a handful over
+/// a build — which is what buys `Ty: Copy`, the property every
+/// `vars.get(..).copied()` in the checker rests on.
+pub fn carray(elem: Ty, count: u32) -> Ty {
+    Ty::CArray(Box::leak(Box::new(CArray { elem, count })))
+}
+
 /// What an array holds.  A separate, deliberately small enum rather than a
 /// `Box<Ty>`: arrays of arrays are out of scope, and spelling that in the type
 /// itself means the checker never has to discover it — `Ty` also stays `Copy`,
@@ -124,6 +145,28 @@ pub enum Ty {
     /// (`Ty::surface` maps it) — the type never becomes a value's type, crosses
     /// a slot, or takes part in arithmetic under its own name.
     Byte,
+    /// A 16-bit value — a C-layout `record` field type only, the `WORD` /
+    /// `uint16_t` a Win32 struct is full of. Like `Byte` it has no life of its
+    /// own: it is spelled `int16` or `word` in a c-record field, it is *read
+    /// and written as `int`* (`Ty::surface` maps it), and reading one widens
+    /// unsigned — `0`..`65535`, the same bargain `byte` makes, because a
+    /// `WORD` field is unsigned far more often than it is a `SHORT`.
+    Int16,
+    /// A 32-bit IEEE float — a C-layout `record` field type only, spelled
+    /// `float`. OpenEPL has one floating type, `double`, so a `float` field is
+    /// *read and written as `double`* (`Ty::surface` maps it) and the narrowing
+    /// happens at the store: the value in the struct is a real 4-byte `float`,
+    /// which is what a C API that declares one expects.
+    Float,
+    /// A fixed-count inline array inside a C-layout `record`: `rgb: byte[32]`.
+    /// The field is `count` elements laid end to end in the struct's own
+    /// storage — not a pointer to a runtime array — which is what a C
+    /// `BYTE rgbReserved[32]` member is.
+    ///
+    /// Held behind a leaked `&'static` rather than a `Box` so `Ty` stays
+    /// `Copy`; equality and hashing go through the pointee, so two separately
+    /// leaked `byte[32]`s are the same type.
+    CArray(&'static CArray),
     /// An array of `Elem`. The value in the slot is a pointer to a
     /// runtime-owned array object, exactly as text is a pointer.
     Array(Elem),
@@ -164,6 +207,11 @@ impl Ty {
             Ty::Bytes => "bytes",
             Ty::Ptr => "ptr",
             Ty::Byte => "byte",
+            // `int16` rather than `word`: one spelling in a diagnostic, and
+            // `word` is the alias a Win32 transcription reaches for.
+            Ty::Int16 => "int16",
+            Ty::Float => "float",
+            Ty::CArray(a) => intern(&format!("{}[{}]", a.elem.as_str(), a.count)),
             Ty::Array(Elem::Int) => "int[]",
             Ty::Array(Elem::Int64) => "int64[]",
             Ty::Array(Elem::Double) => "double[]",
@@ -200,13 +248,15 @@ impl Ty {
 
     /// The type a value of this field type *appears as* in the language.
     ///
-    /// Every type is itself but `byte`, which is a c-record layout width with
-    /// no life of its own: a byte field reads and writes as an `int` in
-    /// `0`..`255`, exactly as `ptr_read_byte` does. Keeping this in one place is
-    /// what lets `Ty::Byte` stay walled inside a c-record's field table.
+    /// Every type is itself but the three c-record layout widths, which have no
+    /// life of their own: a `byte` and an `int16` read and write as an `int`
+    /// (`0`..`255` and `0`..`65535`, exactly as `ptr_read_byte` does for the
+    /// first), and a `float` as a `double`. Keeping this in one place is what
+    /// lets those three stay walled inside a c-record's field table.
     pub fn surface(self) -> Ty {
         match self {
-            Ty::Byte => Ty::Int,
+            Ty::Byte | Ty::Int16 => Ty::Int,
+            Ty::Float => Ty::Double,
             other => other,
         }
     }
@@ -218,6 +268,11 @@ impl Ty {
     pub fn c_size_align(self) -> Option<(i64, i64)> {
         Some(match self {
             Ty::Byte => (1, 1),
+            // A `WORD`/`uint16_t` member: two bytes, aligned to two.
+            Ty::Int16 => (2, 2),
+            // A C `float` is four bytes aligned to four, whatever OpenEPL
+            // reads it as.
+            Ty::Float => (4, 4),
             Ty::Int => (4, 4),
             // C's `int`-sized truth, so a c-record `bool` lines up with a `BOOL`
             // / `int` field a C API declares.
@@ -289,7 +344,13 @@ impl Ty {
             // A byte is a c-record layout type; it never crosses the slot ABI
             // (a byte field surfaces as `int`), so this arm exists only to keep
             // the match exhaustive and is never reached in marshaling.
-            Ty::Byte => 3, // reads as OE_SDT_INT
+            Ty::Byte | Ty::Int16 => 3, // read as OE_SDT_INT
+            Ty::Float => 6,            // reads as OE_SDT_DOUBLE
+            // An inline array is a c-record field type and nothing else: it
+            // never becomes a value that crosses the slot ABI (indexing one
+            // yields the element's surface type), so this arm only keeps the
+            // match exhaustive.
+            Ty::CArray(_) => 14, // an address, if it ever were one
             Ty::Array(e) => ARRAY | e.ty().sdt_tag(),
             Ty::AnyArray => ARRAY | ALL,
             Ty::AnyElem => ALL,
@@ -469,9 +530,16 @@ pub enum Expr {
     /// an `EnumWindows` callback, a hook detour). The named sub must have a
     /// C-representable signature; the checker resolves the name and proves that,
     /// because only then is the emitted function pointer one C can actually call.
-    /// Holds only the name — there is nothing to take the address *of* but a
-    /// subroutine in this language, so the operand is a bare identifier, not an
-    /// arbitrary expression.
+    /// Holds a name, not an arbitrary expression: the only things with an
+    /// address to take are a subroutine, a c-record local, and a place inside
+    /// one — all of which a path of identifiers names.
+    ///
+    /// The operand may also be a **path into a c-record local** —
+    /// `address of r.pt`, `address of r.rgb` — which is the address of that
+    /// field inside the struct's own storage (for an inline array, of its first
+    /// element). It is spelled here as the dotted path in one `String`, because
+    /// a subroutine name can never contain a `.`, so the two readings never
+    /// collide and every existing consumer of a bare name is unchanged.
     AddressOf(String),
     /// `size of TYPE` — the size in bytes of a type's C layout, an `int64`
     /// compile-time constant the backend folds to a number. For a c-record it
@@ -585,6 +653,17 @@ pub enum StmtKind {
         property: String,
         value: Expr,
     },
+    /// `r.pt.x = EXPR`, `r.rgb[3] = EXPR` — assign through a *path* into a
+    /// c-record's flat storage: a nested field, or one element of an inline
+    /// array, however deep.
+    ///
+    /// `place` is the same `Expr` the reader would evaluate (a `Field` /
+    /// `Index` chain rooted at a variable), so the checker types a write with
+    /// exactly the rules it types a read with — there is no second grammar for
+    /// the left-hand side. The single-step forms stay `SetProperty` and
+    /// `SetIndex`: those reach heap records, arrays and component properties as
+    /// well, and a path reaches only a c-record.
+    SetPlace { place: Expr, value: Expr },
     /// `if COND ... else if COND ... else ... end`.
     ///
     /// `arms` holds the `if`/`else if` conditions with their bodies, in order;
@@ -879,12 +958,24 @@ impl RecordDef {
     /// This is the single source of truth for `size of`, for a field GEP, and
     /// for the padding the tests check against clang — there is no second
     /// place layout could be computed and disagree.
-    pub fn c_layout(&self) -> Option<(Vec<i64>, i64)> {
+    pub fn c_layout(&self, reg: &Registry) -> Option<(Vec<i64>, i64, i64)> {
+        self.c_layout_at(reg, 0)
+    }
+
+    /// `c_layout` with the nesting depth it has already descended. A c-record
+    /// that contains itself is rejected by the validator, but the validator
+    /// only ever sees one module's records at a time — a kit bundle is checked
+    /// against "the registry so far" — so the layout walk carries its own
+    /// bound and answers `None` rather than overflowing the stack.
+    fn c_layout_at(&self, reg: &Registry, depth: u32) -> Option<(Vec<i64>, i64, i64)> {
+        if depth > 32 {
+            return None;
+        }
         let mut offsets = Vec::with_capacity(self.fields.len());
         let mut cursor: i64 = 0;
         let mut max_align: i64 = 1;
         for (_, fty) in &self.fields {
-            let (size, align) = fty.c_size_align()?;
+            let (size, align) = c_field_size_align_at(*fty, reg, depth + 1)?;
             // Round the cursor up to this field's alignment before placing it —
             // the padding a C compiler inserts is exactly this rounding.
             cursor = (cursor + align - 1) / align * align;
@@ -897,7 +988,37 @@ impl RecordDef {
         // Tail padding: the struct's size is a multiple of its widest member's
         // alignment, so `a[1]` begins as aligned as `a[0]` did.
         let size = (cursor + max_align - 1) / max_align * max_align;
-        Some((offsets, size))
+        Some((offsets, size, max_align))
+    }
+}
+
+/// The size and alignment of one c-record *field* type, resolving what
+/// `Ty::c_size_align` cannot on its own: a nested `is c` record (its own layout,
+/// laid inline) and a fixed array (`count` elements, the element's alignment).
+/// `None` when the type has no C layout at all, or when the nested record is
+/// unknown, is a heap record, or nests too deep — every one of which the
+/// validator reports with a real message first.
+pub fn c_field_size_align(ty: Ty, reg: &Registry) -> Option<(i64, i64)> {
+    c_field_size_align_at(ty, reg, 0)
+}
+
+fn c_field_size_align_at(ty: Ty, reg: &Registry, depth: u32) -> Option<(i64, i64)> {
+    match ty {
+        Ty::Record(name) => {
+            let def = reg.record(name)?;
+            if !def.is_c {
+                return None;
+            }
+            let (_, size, align) = def.c_layout_at(reg, depth)?;
+            Some((size, align))
+        }
+        // An inline array strides by its element's size and is aligned like one
+        // element — exactly C's `T a[N]`.
+        Ty::CArray(a) => {
+            let (esize, ealign) = c_field_size_align_at(a.elem, reg, depth)?;
+            Some((esize * a.count as i64, ealign))
+        }
+        other => other.c_size_align(),
     }
 }
 

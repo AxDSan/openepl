@@ -480,10 +480,15 @@ fn cmd_commands(repo_root: &Path, args: &[String]) -> i32 {
         if !rec.is_c {
             continue;
         }
+        // The DECLARED type, not the surface one: this line is a description of
+        // a memory layout, and a `word` field that printed as `int` would tell
+        // a reader transcribing a C header the wrong width. What the field
+        // reads and writes as is documented once, in the interop page, rather
+        // than guessed at from here.
         let fields = rec
             .fields
             .iter()
-            .map(|(n, t)| format!("{n}: {}", t.surface().as_str()))
+            .map(|(n, t)| format!("{n}: {}", t.as_str()))
             .collect::<Vec<_>>()
             .join(", ");
         println!("crecord: {name} {fields}");

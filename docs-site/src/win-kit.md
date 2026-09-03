@@ -1,0 +1,272 @@
+# The `win` kit
+
+`use win` is the Win32 API. One line at the top of a module, and a program has
+`CreateWindowExA`, `WNDCLASSEXA`, `WM_PAINT`, `ReadProcessMemory`,
+`RegOpenKeyExA` and 1,300 more names, without transcribing a single
+declaration.
+
+```text
+module hello
+use win
+
+sub main
+  call MessageBoxA(ptr_null(), "Built with OpenEPL.", "Hello", MB_OK)
+end
+```
+
+It is a [declaration kit](./interop.md#declaration-kits): a directory of `.oed`
+files holding `dll` lines, `is c` records and `const` numbers and nothing else.
+The kit does not ship code — there is nothing to link, nothing to install, and
+no wrapper between a program and the API. `CreateWindowExA` in an OpenEPL
+program is `CreateWindowExA` in `user32.dll`, called with the arguments the
+documentation lists, in the order it lists them.
+
+## What is in it
+
+Five files, split the way the API is:
+
+| File | Library | What it binds |
+| --- | --- | --- |
+| `user32.oed` | `user32.dll` | windows, messages, dialogs, input, hooks, menus, the clipboard |
+| `gdi32.oed` | `gdi32.dll` | device contexts, pens, brushes, fonts, bitmaps, regions, drawing |
+| `kernel32_proc.oed` | `kernel32.dll` | processes, threads, tool-help snapshots, synchronisation |
+| `kernel32_mem.oed` | `kernel32.dll` | virtual memory, heaps, modules, files, mappings |
+| `advapi32.oed` | `advapi32.dll` | the registry, access tokens, privileges |
+
+The split is for reading, not for using: every file in a kit directory is
+merged into one bundle, so `use win` is the whole of asking for all five. A
+name belongs to exactly one file — `RECT` is declared once, in `gdi32.oed`, and
+`user32.oed` uses it without redeclaring it.
+
+`openepl commands --use win` lists the lot, which is also where Studio's
+completion and the language server get it from:
+
+```sh
+openepl commands --use win | grep CreateWindow
+```
+
+## Platform gating
+
+The kit's `lib.json` says `"platforms": ["windows"]`, so a program that uses it
+builds for Windows and refuses anything else, by name, before the linker is
+reached:
+
+```text
+openepl: kit `win` supports windows — it cannot be built for linux.
+Build with `--os windows`.
+```
+
+Listing the kit still works everywhere. `openepl commands --use win` answers on
+Linux, so completion and the reference are available on a machine that cannot
+build for Windows — which, since the toolchain runs on Linux and cross-builds,
+is the machine most of this gets written on.
+
+```sh
+openepl build app.oir --os windows -o app.exe
+```
+
+## The two examples
+
+`examples/win/` holds five programs. None of them contains a `dll`, a `record`
+or a `const` line: if the kit were short of anything they need, they would not
+build. Two are worth reading first.
+
+### A window
+
+`examples/win/window.oir` is the program every Win32 book opens with — register
+a class, create a window, pump messages, handle them in a window procedure —
+and it is the one that proves the callback direction works.
+
+The WNDPROC is a subroutine, and the class carries its address:
+
+```text
+sub wndproc(hwnd: ptr, msg: int, wparam: int64, lparam: int64): int64 system
+  if msg = WM_PAINT
+    var ps: PAINTSTRUCT
+    let dc: ptr = BeginPaint(hwnd, ps)
+    call TextOutA(dc, 10, 10, "Built with OpenEPL.", 19)
+    call EndPaint(hwnd, ps)
+    return int_to_int64(0)
+  end
+  if msg = WM_DESTROY
+    call PostQuitMessage(0)
+    return int_to_int64(0)
+  end
+  return DefWindowProcA(hwnd, msg, wparam, lparam)
+end
+```
+
+`WPARAM`, `LPARAM` and `LRESULT` are pointer-width, so they are `int64`; the
+message is a `UINT`, so it is an `int`; the `HWND` is a `ptr`. `address of
+wndproc` is the function pointer the class stores, and Windows calls it — not
+OpenEPL.
+
+The class is a `WNDCLASSEXA`, a c-record that starts zeroed, which is exactly
+what the API wants of every field a program does not set:
+
+```text
+var wc: WNDCLASSEXA
+wc.cb_size = int64_to_int(size of WNDCLASSEXA)
+wc.style = CS_HREDRAW + CS_VREDRAW
+wc.wnd_proc = address of wndproc
+wc.instance = GetModuleHandleNull(ptr_null())
+wc.cursor = LoadCursorA(ptr_null(), ptr_from_int(int_to_int64(IDC_ARROW)))
+wc.background = ptr_from_int(int_to_int64(COLOR_WINDOW + 1))
+wc.class_name = "OpenEPLWindowClass"
+let atom: int = RegisterClassExA(wc)
+```
+
+The example ends by itself: it pumps with `PeekMessageA` rather than blocking
+in `GetMessageA`, destroys its own window after a fixed number of turns, and
+leaves through the `WM_QUIT` that `PostQuitMessage` posts — the real exit path,
+so a test can run it to completion.
+
+### Reading a process's memory
+
+`examples/win/meminfo.oir` is a console program, and it is the one that proves
+the process and memory halves are bound to the real thing. It opens itself with
+`OpenProcess`, allocates a page with `VirtualAlloc`, writes a known value into
+it, and then reads that value back *through kernel32* rather than off the
+pointer:
+
+```text
+let process: ptr = OpenProcess(PROCESS_VM_READ + PROCESS_QUERY_INFORMATION, false, GetCurrentProcessId())
+let read_ok: bool = ReadProcessMemory(process, page, into, 4, moved)
+```
+
+`lpNumberOfBytesRead` is a `SIZE_T *`, so `moved` is an eight-byte cell read
+back with `ptr_read_int64` — four would overwrite the byte after it. Then
+`VirtualQuery` fills a `MEMORY_BASIC_INFORMATION` and the program checks the
+state and the protection Windows reports for the page it just made, which is
+the first thing a wrong struct layout gets wrong.
+
+The other three: `registry.oir` creates a key under `HKEY_CURRENT_USER`, writes
+a `REG_DWORD` and a `REG_SZ`, reads both back and deletes the key again;
+`spawn.oir` starts a thread whose ThreadProc is an OpenEPL subroutine and a
+child process through the `STARTUPINFOA` / `PROCESS_INFORMATION` pair;
+`msgbox.oir` is the four-line one at the top of this page.
+
+## How the declarations are spelled
+
+A transcription has to decide how each Win32 type crosses, and the kit decides
+it the same way everywhere.
+
+| Win32 | In the kit | Why |
+| --- | --- | --- |
+| `HWND`, `HANDLE`, `HDC`, `HKEY`, `HMODULE`, any pointer | `ptr` | all pointer-width |
+| `DWORD`, `UINT`, `LONG`, `int`, `ATOM` | `int` | 32 bits |
+| `BOOL` | `bool` | a C `int`; any non-zero is true |
+| `WPARAM`, `LPARAM`, `LRESULT`, `SIZE_T`, `ULONG_PTR` | `int64` | pointer-width payloads |
+| `LPCSTR` the API always wants | `text` | crosses as the `char *` it is |
+| `LPCSTR`/`LPSTR` that is routinely `NULL`, or an out buffer | `ptr` | a `text` has no `NULL` |
+| a struct the callee fills | the c-record itself | the pointer is taken for you |
+| `WORD` inside a struct | `word` | a 16-bit field, read as an `int` `0`..`65535` |
+
+Two consequences worth knowing before writing against it.
+
+**There is no `NULL` for a `text`.** Where a Win32 function is normally called
+with a null string, the kit binds a `ptr`-taking sibling under a second name
+with `as` pointing at the same export — `GetModuleHandleNull(ptr_null())` is
+`GetModuleHandleA(NULL)`. Where both a string and `NULL` are ordinary, the
+parameter is a `ptr` and a program passes `ptr_of_text(...)`.
+
+**A struct parameter is the record, not its address.** `RegisterClassExA(wc)`
+hands C `&wc`: a `dll` parameter typed as a c-record passes the record's
+pointer automatically. Where the declaration says `ptr` instead — because
+`NULL` is a normal argument there — pass `address of` the record yourself.
+
+## `...A`, not `...W`
+
+Every entry point that takes or answers a string is bound under its ANSI name:
+`MessageBoxA`, `CreateWindowExA`, `RegQueryValueExA`. That is not a shortcut —
+it is the only spelling that works. An OpenEPL `text` is a NUL-terminated byte
+string, which is exactly the `char *` an `...A` entry point takes. The `...W`
+entries take UTF-16, and there is no `text` that is UTF-16, so binding them
+would hand Windows bytes it would read as the wrong encoding.
+
+The practical cost is characters outside the process's ANSI code page: a window
+title or a registry value in Japanese, on a machine whose code page is not
+Japanese, will not survive the round trip. A UTF-16 text type is what would fix
+it, and the kit is written so the `...W` half can be added beside the `...A`
+half rather than instead of it.
+
+## Constants are decimal
+
+The language has no hexadecimal literal, so every constant is written as the
+decimal number it is, with the hex a C header would show in the comment beside
+it:
+
+```text
+const PAGE_READWRITE = 4                   # 0x04
+const MEM_COMMIT = 4096                    # 0x00001000
+const WS_OVERLAPPEDWINDOW = 13565952       # 0x00CF0000
+```
+
+There is also **no bitwise operator**. Where a C program writes `a | b` to
+combine flags, an OpenEPL program writes `a + b`, which is the same number as
+long as the bits are disjoint — and flag constants are disjoint by design.
+`PROCESS_VM_READ + PROCESS_QUERY_INFORMATION` is `16 + 1024`. Where a
+combination is common enough that adding it by hand invites a mistake, the kit
+declares the pair pre-combined: `MEM_COMMIT_RESERVE` is `MEM_COMMIT | MEM_RESERVE`.
+
+Testing a flag is the other half of that gap: `if flags % 2 = 1` reads bit one,
+and there is no general "is this bit set". A bitwise family is the obvious next
+addition to the language, and it is the one gap in it the kit has to work
+around rather than write against.
+
+## What it does not reach
+
+- **A struct with a union or a bitfield** has no c-record. `BITMAPFILEHEADER`
+  is `#pragma pack(2)` — 14 bytes where natural alignment gives 16 — so it is
+  deliberately absent rather than present and wrong. Lay those out by hand with
+  `mem_alloc` and `ptr_write_*` at counted offsets.
+- **`...W` entry points**, for the reason above.
+- **A pointer to a function cannot be called.** `address of` makes one, and a
+  `dll` can be handed one, but there is no `call through` — so the `ptr`
+  `GetProcAddress` answers can be tested for null, passed on and stored, and
+  not invoked. To call an export, declare it as a `dll` and let the lazy
+  loader find it; `GetProcAddress` is for asking whether it is there.
+- **COM** follows from that: `IUnknown`, `QueryInterface` and every method
+  call is an indirect call through a function pointer read out of a vtable,
+  which is exactly what the previous bullet does not have.
+- **A GUI-subsystem image.** A program written against `use win` alone builds
+  for the console subsystem, so on a real Windows desktop it has a console
+  window beside the one it made. `--target gui` is OpenEPL's own UI stack
+  rather than a subsystem switch, and it refuses a module with no `form`, so
+  there is currently no way to ask for the GUI subsystem and nothing else.
+- **Structured exception handling**, `__try`/`__except`: there is no way to
+  install a handler frame from OpenEPL.
+- **Four libraries, and no more.** The kit is user32, gdi32, kernel32 and
+  advapi32. Not in it: `comctl32` (the common controls — list views, tree
+  views, `InitCommonControlsEx`), `comdlg32` (`GetOpenFileNameA` and the rest
+  of the common dialogs), `shell32` (`ShellExecuteA`, the known folders),
+  `psapi` (`EnumProcessModules`), `ws2_32` (sockets — OpenEPL's own `net` kit
+  is the portable answer), `winmm`, `ole32`, the CryptoAPI, and the service
+  control manager. Also absent from kernel32 itself: the console API
+  (`GetStdHandle`, `WriteConsoleA`, `AllocConsole`), the high-resolution
+  timers (`QueryPerformanceCounter`), and the debug loop
+  (`WaitForDebugEvent`, `GetThreadContext` — `CONTEXT` is 1,232 bytes of
+  unions and 16-byte alignment, and has no c-record).
+
+  A `dll` line written by hand still reaches every one of those: the kit is a
+  convenience, not a wall. `use win` plus a couple of local declarations is
+  the normal way to use a library the kit has not covered yet.
+
+## How it is tested
+
+Every declaration in the kit is checked against real Windows rather than
+against a header: the examples are cross-built with mingw and run under wine,
+where a wrong struct offset, a `DWORD` declared as an `int64`, or an entry point
+spelled the way the documentation prints it rather than the way the DLL exports
+it all fail immediately — none of which a build catches.
+
+wine runs with the display turned off, so nothing reaches the screen. A window
+is still created and its messages are still delivered — `window.oir`'s WNDPROC
+is called back with `WM_PAINT` and `WM_DESTROY` under test, and that is checked
+— but there is no framebuffer to read, so `TextOutA` is proved to have been
+called and to have returned, not to have drawn the right pixels. A drawn
+Windows window has not been looked at.
+
+```sh
+cargo test --release --test win_kit
+```

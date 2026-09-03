@@ -16,6 +16,7 @@
 //! host == target (x86_64-linux). Cross-compilation needs a sidecar manifest
 //! instead (Phase 4).
 
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
 #[cfg(unix)]
 use std::ffi::c_void;
@@ -246,7 +247,7 @@ fn load_with(
         if so_srcs.is_empty() && decls.is_none() {
             return Err(format!(
                 "library `{name}`: no `{name}_libinfo.c` metadata source and no \
-                 `{name}.oed` declaration bundle found in {}",
+                 `*.oed` declaration bundle found in {}",
                 dir.display()
             ));
         }
@@ -267,7 +268,7 @@ fn load_with(
                     .collect::<Vec<_>>()
                     .join("\n");
                 return Err(format!(
-                    "kit `{name}` declaration bundle `{name}.oed` is invalid:\n{joined}"
+                    "kit `{name}`: its declaration bundle (`*.oed`) is invalid:\n{joined}"
                 ));
             }
             for rec in decl_mod.records() {
@@ -335,56 +336,103 @@ fn load_with(
     })
 }
 
-/// Read a kit's declaration bundle, `<dir>/<name>.oed`, if it has one.
+/// Read a kit's declaration bundle — every `*.oed` in the kit directory,
+/// merged — if it has one.
 ///
 /// This is the ONE reader of an `.oed`: the loader merges what it returns into
 /// the registry, and `openepl kits` lists it — two readers of one file is the
-/// drift the CLI keeps a single parser for `.oir` to avoid. The file is a
-/// module body without the header: a run of `dll`, `record` and `const`
-/// declarations and nothing else. It is parsed by prepending a synthetic
-/// `module <name>` line and reusing the whole language parser, so a declaration
-/// in a kit reads exactly as one in a program; a `sub`, a `form`, a component,
-/// a module variable, a `target` or a `use` is refused, because a declaration
-/// bundle declares, it does not define or build.
+/// drift the CLI keeps a single parser for `.oir` to avoid. A file is a module
+/// body without the header: a run of `dll`, `record` and `const` declarations
+/// and nothing else. It is parsed by prepending a synthetic `module <name>`
+/// line and reusing the whole language parser, so a declaration in a kit reads
+/// exactly as one in a program; a `sub`, a `form`, a component, a module
+/// variable, a `target` or a `use` is refused, because a declaration bundle
+/// declares, it does not define or build.
+///
+/// A kit may spread its declarations over as many `.oed` files as it likes —
+/// `user32.oed`, `kernel32.oed`, `gdi32.oed` — and they are merged into one
+/// bundle. Order across files does not matter: the merged bundle is validated
+/// and registered as a unit, so a record declared in one file and used by a
+/// `dll` in another resolves exactly as it would within one file. Two files
+/// declaring the same name is a kit-authoring fault, reported with both.
 pub fn read_decls(dir: &Path, name: &str) -> Result<Option<Module>, String> {
-    let path = dir.join(format!("{name}.oed"));
-    if !path.is_file() {
+    let mut files: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("oed") && p.is_file() {
+                files.push(p);
+            }
+        }
+    }
+    if files.is_empty() {
         return Ok(None);
     }
-    let body =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    // The header is one prepended line, so a parse error's line number is one
-    // past the `.oed`'s own — subtract it back before reporting.
-    let src = format!("module {name}\n{body}");
-    let module = parse(&src).map_err(|e| {
-        format!(
-            "{}:{}: {}",
-            path.display(),
-            e.line.saturating_sub(1).max(1),
-            e.msg
-        )
-    })?;
-    if !module.uses.is_empty() {
-        return Err(format!(
-            "{}: a declaration bundle may not `use` another kit",
-            path.display()
-        ));
+    // Sorted so a kit reads the same way twice, and so a collision names the
+    // same two files whichever machine reports it.
+    files.sort();
+
+    let mut merged = Module {
+        name: name.to_string(),
+        target: None,
+        uses: Vec::new(),
+        items: Vec::new(),
+    };
+    // Every declared name, and the file that declared it. `dll`, `record` and
+    // `const` share one namespace here because the registry gives them one:
+    // two of them with one name is the same collision either way.
+    let mut declared: HashMap<String, String> = HashMap::new();
+
+    for path in &files {
+        let body = std::fs::read_to_string(path)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        // The header is one prepended line, so a parse error's line number is
+        // one past the `.oed`'s own — subtract it back before reporting.
+        let src = format!("module {name}\n{body}");
+        let module = parse(&src).map_err(|e| {
+            format!(
+                "{}:{}: {}",
+                path.display(),
+                e.line.saturating_sub(1).max(1),
+                e.msg
+            )
+        })?;
+        if !module.uses.is_empty() {
+            return Err(format!(
+                "{}: a declaration bundle may not `use` another kit",
+                path.display()
+            ));
+        }
+        let here = filename(path);
+        for item in module.items {
+            let declared_name = match &item {
+                Item::Dll(d) => d.name.clone(),
+                Item::UserType(r) => r.name.clone(),
+                Item::Const(c) => c.name.clone(),
+                Item::Sub(_) => return Err(bundle_holds_only(path, "a subroutine")),
+                Item::Form(_) => return Err(bundle_holds_only(path, "a form")),
+                Item::Component(_) => return Err(bundle_holds_only(path, "a component")),
+                Item::Var(_) => return Err(bundle_holds_only(path, "a module variable")),
+            };
+            if let Some(first) = declared.get(&declared_name) {
+                return Err(format!(
+                    "kit `{name}`: `{declared_name}` is declared in both {first} and {here} — \
+                     a kit's declarations share one namespace, so each name belongs to one file",
+                ));
+            }
+            declared.insert(declared_name, here.clone());
+            merged.items.push(item);
+        }
     }
-    for item in &module.items {
-        let what = match item {
-            Item::Dll(_) | Item::UserType(_) | Item::Const(_) => continue,
-            Item::Sub(_) => "a subroutine",
-            Item::Form(_) => "a form",
-            Item::Component(_) => "a component",
-            Item::Var(_) => "a module variable",
-        };
-        return Err(format!(
-            "{}: a declaration bundle holds only `dll`, `record` and `const` — {what} \
-             does not belong in one",
-            path.display()
-        ));
-    }
-    Ok(Some(module))
+    Ok(Some(merged))
+}
+
+fn bundle_holds_only(path: &Path, what: &str) -> String {
+    format!(
+        "{}: a declaration bundle holds only `dll`, `record` and `const` — {what} \
+         does not belong in one",
+        path.display()
+    )
 }
 
 fn filename(p: &Path) -> String {

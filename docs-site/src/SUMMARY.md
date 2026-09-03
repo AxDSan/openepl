@@ -18,6 +18,7 @@
 - [Build targets](./build-targets.md)
 - [Kits](./kits.md)
 - [Interop](./interop.md)
+- [The `win` kit](./win-kit.md)
 
 # Studio
 

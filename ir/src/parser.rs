@@ -27,7 +27,7 @@
 //! ```
 
 use crate::lexer::{lex, Spanned, Tok};
-use crate::{intern, BinOp, CallConv, CmpOp, Component, ConstDef, DllDecl, Elem, Expr, Form, GlobalVar, Ident, Item,
+use crate::{carray, intern, BinOp, CallConv, CmpOp, Component, ConstDef, DllDecl, Elem, Expr, Form, GlobalVar, Ident, Item,
     LogicalOp, Module, RecordDef, Span, Stmt, StmtKind, Sub, Target, Ty,};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -705,32 +705,102 @@ impl Parser {
     }
 
     /// A field type inside a `record NAME is c`: the C-representable scalar set
-    /// a `dll` allows, plus `byte` (a single `char`/`uint8_t` member) which is
-    /// meaningful only in a C layout. A nested c-record by value and a fixed
-    /// array are honest C, but this stage does not lay them out — the message
-    /// says so rather than letting `type_keyword` read the word as some other
-    /// record name and failing further along.
+    /// a `dll` allows, plus the widths that mean something only in a layout —
+    /// `byte` (a `char`/`uint8_t`), `int16` / `word` (a `WORD`/`uint16_t`) and
+    /// `float` (a 4-byte IEEE float) — plus another `is c` record nested by
+    /// value, plus a fixed inline array `T[N]` of any of those.
+    ///
+    /// The word is read here rather than through `type_keyword`, because
+    /// `type_keyword` reads `[` as the list suffix and would choke on the count
+    /// in `byte[16]`, and because `byte`, `int16`, `word` and `float` are
+    /// ordinary words everywhere else — they are recognised by spelling, in
+    /// this one position, so nothing about them leaks into the language at
+    /// large.
+    ///
+    /// Whether a nested record name exists and is `is c` is the validator's
+    /// question, exactly as for any other type: a record may be declared after
+    /// the one that nests it, and a one-pass parser has not read it yet.
     fn crecord_field_type(&mut self, rec: &str) -> Result<Ty, ParseError> {
-        // `byte` is not a `Ty::from_keyword` keyword — it stays an ordinary
-        // word elsewhere — so it is recognised here, by spelling, before the
-        // general type parse turns an unknown word into a record name.
-        if matches!(self.peek(), Tok::Ident(w) if w == "byte") {
-            self.bump();
-            return Ok(Ty::Byte);
+        let elem = match self.bump() {
+            Tok::Ident(w) => match w.as_str() {
+                "byte" => Ty::Byte,
+                // Two spellings of one width: `int16` says what it is, `word`
+                // is what a Win32 header calls it, and a transcription reads
+                // better for having the name it was transcribed from.
+                "int16" | "word" => Ty::Int16,
+                "float" => Ty::Float,
+                other => match Ty::from_keyword(other) {
+                    Some(t @ (Ty::Int | Ty::Int64 | Ty::Double | Ty::Bool | Ty::Text | Ty::Ptr)) => t,
+                    Some(t) => {
+                        return self.err(format!(
+                            "c-record `{rec}`: `{}` is not a C-layout field type — use int, \
+                             int64, int16 (word), double, float, bool, text, ptr, byte, \
+                             another `is c` record, or `T[N]`",
+                            t.as_str()
+                        ))
+                    }
+                    None => Ty::Record(intern(other)),
+                },
+            },
+            other => {
+                return self.err(format!(
+                    "c-record `{rec}`: expected a field type, found {other:?}"
+                ))
+            }
+        };
+        // A dictionary is a runtime-owned object with no by-value C shape, and
+        // it has no place in a layout — say so where the `{` is, rather than
+        // leaving the reader a complaint about a missing newline.
+        if matches!(self.peek(), Tok::LBrace) {
+            return self.err(format!(
+                "c-record `{rec}`: `{}{{}}` is not a C-layout field type — a dictionary is a \
+                 runtime-owned object; hold a `ptr` to bytes instead",
+                elem.as_str()
+            ));
         }
-        let t = self.type_keyword()?;
-        match t {
-            Ty::Int | Ty::Int64 | Ty::Double | Ty::Bool | Ty::Text | Ty::Ptr => Ok(t),
-            Ty::Record(_) => self.err(format!(
-                "c-record `{rec}`: a field that is another record or an array is not laid \
-                 out yet — a c-record field is int, int64, double, bool, text, ptr or byte"
-            )),
-            other => self.err(format!(
-                "c-record `{rec}`: `{}` is not a C-layout field type — use int, int64, \
-                 double, bool, text, ptr or byte",
-                other.as_str()
-            )),
+        // `[N]` — a fixed inline array. The count is part of the type, so it
+        // must be a literal here; `size of` and every offset are compile-time
+        // numbers and a count that was not would make neither.
+        if !matches!(self.peek(), Tok::LBracket) {
+            return Ok(elem);
         }
+        self.bump();
+        let count = match self.bump() {
+            Tok::Int(n) if n >= 1 => n,
+            // `T[]` is an OpenEPL list: a pointer to a runtime-owned array, and
+            // not a block of bytes a struct can hold.
+            Tok::RBracket => {
+                return self.err(format!(
+                    "c-record `{rec}`: `{}[]` is not a C-layout field type — a list is a \
+                     runtime-owned object; give a count for a fixed inline array \
+                     (`{}[4]`), or hold a `ptr` to bytes",
+                    elem.as_str(),
+                    elem.as_str()
+                ))
+            }
+            Tok::Int(n) => {
+                return self.err(format!(
+                    "c-record `{rec}`: an array field holds at least one element, not {n}"
+                ))
+            }
+            other => {
+                return self.err(format!(
+                    "c-record `{rec}`: an array field needs a literal count, as in \
+                     `rgb: byte[32]` — found {other:?}"
+                ))
+            }
+        };
+        self.expect(&Tok::RBracket, "`]` after an array field's count")?;
+        if matches!(self.peek(), Tok::LBracket) {
+            return self.err(format!(
+                "c-record `{rec}`: an array field is one dimension — `byte[4][4]` is not a \
+                 field type; nest a record that holds `byte[4]` instead"
+            ));
+        }
+        if count > u32::MAX as i64 {
+            return self.err(format!("c-record `{rec}`: array count {count} is too large"));
+        }
+        Ok(carray(elem, count as u32))
     }
 
     /// A component instance; `type_name` has already been consumed.
@@ -857,6 +927,15 @@ impl Parser {
                 self.bump();
                 let index = self.expr()?;
                 self.expect(&Tok::RBracket, "`]` after the index")?;
+                // `xs[i][j] = v` / `xs[i].f = v`: the target is a path, not one
+                // step, so hand the rest to the path form.
+                if matches!(self.peek(), Tok::Dot | Tok::LBracket) {
+                    let base = Expr::Index {
+                        base: Box::new(Expr::Var(name)),
+                        index: Box::new(index),
+                    };
+                    return self.stmt_set_place(base, start);
+                }
                 self.expect(&Tok::Eq, "`=` in an element assignment")?;
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "newline after assignment")?;
@@ -874,6 +953,17 @@ impl Parser {
             Tok::Dot => {
                 self.bump();
                 let property = self.ident("property name")?;
+                // `r.pt.x = v` / `r.rgb[3] = v`: everything past the first step
+                // is a path into a c-record, which `SetProperty` has no room
+                // for. One step stays exactly as it was — that is the form that
+                // also reaches a heap record and a component property.
+                if matches!(self.peek(), Tok::Dot | Tok::LBracket) {
+                    let base = Expr::GetProperty {
+                        component: name,
+                        property,
+                    };
+                    return self.stmt_set_place(base, start);
+                }
                 self.expect(&Tok::Eq, "`=` in property assignment")?;
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "newline after property assignment")?;
@@ -888,6 +978,42 @@ impl Parser {
                  found {other:?}"
             )),
         }
+    }
+
+    /// The rest of a multi-step assignment target: `.field` and `[index]`
+    /// steps, then `=` and the value. `base` is the first step, already read.
+    ///
+    /// The place is built as the very `Expr` a *read* of it would be, so the
+    /// checker and the backend have one shape to handle rather than a mirror
+    /// grammar for the left-hand side.
+    fn stmt_set_place(&mut self, base: Expr, start: usize) -> Result<Stmt, ParseError> {
+        let mut place = base;
+        loop {
+            match self.peek() {
+                Tok::Dot => {
+                    self.bump();
+                    let field = self.ident("a field name after `.`")?;
+                    place = Expr::Field {
+                        base: Box::new(place),
+                        name: field,
+                    };
+                }
+                Tok::LBracket => {
+                    self.bump();
+                    let index = self.expr()?;
+                    self.expect(&Tok::RBracket, "`]` after the index")?;
+                    place = Expr::Index {
+                        base: Box::new(place),
+                        index: Box::new(index),
+                    };
+                }
+                _ => break,
+            }
+        }
+        self.expect(&Tok::Eq, "`=` in an assignment")?;
+        let value = self.expr()?;
+        self.expect(&Tok::Newline, "newline after assignment")?;
+        Ok(self.finish(StmtKind::SetPlace { place, value }, start))
     }
 
     fn stmt_let(&mut self, mutable: bool) -> Result<Stmt, ParseError> {
@@ -1336,8 +1462,19 @@ impl Parser {
                 // NAME and proves its signature is C-representable.
                 if name == "address" && matches!(self.peek(), Tok::Ident(w) if w == "of") {
                     self.bump(); // `of`
-                    let sub = self.ident("the name of a subroutine after `address of`")?;
-                    return Ok(Expr::AddressOf(sub));
+                    let mut path =
+                        self.ident("the name of a subroutine or c-record after `address of`")?;
+                    // `address of r.pt` / `address of r.rgb`: a path into a
+                    // c-record's own storage. Carried as the dotted spelling in
+                    // one string — a subroutine name has no `.`, so the two
+                    // readings can never be confused, and the checker splits it.
+                    while matches!(self.peek(), Tok::Dot) {
+                        self.bump();
+                        let field = self.ident("a field name after `.` in `address of`")?;
+                        path.push('.');
+                        path.push_str(&field);
+                    }
+                    return Ok(Expr::AddressOf(path));
                 }
                 // `size of TYPE` — a compile-time byte count. `size` is a soft
                 // keyword the same way `address` is: it means this only before
@@ -1889,9 +2026,52 @@ mod tests {
         assert!(rec.is_c, "`is c` should mark the record C-layout");
         assert_eq!(rec.fields[0], ("a".to_string(), Ty::Byte));
         assert_eq!(rec.fields[1], ("b".to_string(), Ty::Int));
-        let (offsets, size) = rec.c_layout().expect("a C layout");
+        let (offsets, size, align) =
+            rec.c_layout(&crate::Registry::new()).expect("a C layout");
         assert_eq!(offsets, vec![0, 4], "b is aligned to offset 4");
         assert_eq!(size, 8, "the struct is padded to its widest member");
+        assert_eq!(align, 4, "the struct is as aligned as its widest member");
+    }
+
+    /// The field types a c-record adds for real C structs: the two extra
+    /// widths, a nested `is c` record by value, and a fixed inline array.
+    #[test]
+    fn parses_the_wider_c_record_field_types() {
+        let m = parse(
+            "module m\nrecord Point is c\n  x: int\n  y: int\nend\n\
+             record Wide is c\n  a: int16\n  b: word\n  c: float\n  pt: Point\n\
+             \u{20} rgb: byte[16]\nend\nsub main\nend\n",
+        )
+        .unwrap();
+        let wide = m.records().nth(1).expect("the second record");
+        assert_eq!(wide.fields[0].1, Ty::Int16, "`int16` is a 16-bit field");
+        assert_eq!(wide.fields[1].1, Ty::Int16, "`word` is the same width");
+        assert_eq!(wide.fields[2].1, Ty::Float);
+        assert_eq!(wide.fields[3].1, Ty::Record("Point"));
+        assert_eq!(wide.fields[4].1, crate::carray(Ty::Byte, 16));
+    }
+
+    /// A c-record laid out with a nested record and an inline array: the
+    /// offsets a C compiler would produce, from the one layout function.
+    #[test]
+    fn lays_out_a_nested_record_and_an_inline_array() {
+        let m = parse(
+            "module m\nrecord Point is c\n  x: int\n  y: int\nend\n\
+             record Blob is c\n  n: int\n  pt: Point\n  rgb: byte[6]\nend\n\
+             sub main\nend\n",
+        )
+        .unwrap();
+        let mut reg = crate::Registry::new();
+        for r in m.records() {
+            reg.insert_record(r.clone());
+        }
+        let blob = m.records().nth(1).unwrap();
+        let (offsets, size, align) = blob.c_layout(&reg).expect("a C layout");
+        // n@0, pt@4 (a Point is 4-aligned), rgb@12, then two bytes of tail
+        // padding to the struct's 4-byte alignment.
+        assert_eq!(offsets, vec![0, 4, 12]);
+        assert_eq!(size, 20);
+        assert_eq!(align, 4);
     }
 
     /// A plain `record` keeps `is_c` false, and `byte` there is a record name,

@@ -148,23 +148,19 @@ pub fn user_kits_dir() -> Option<PathBuf> {
 }
 
 /// A directory is a kit when it holds the metadata TU the compiler dlopens
-/// (`*_libinfo.c`) or a declaration bundle named for the directory
-/// (`<name>.oed`). That is the same test `use` and the loader apply, so nothing
-/// can be listed that cannot then be used, and a declaration-only kit — one
-/// that ships `dll`/`record`/`const` lines and no C — is a first-class kit.
+/// (`*_libinfo.c`) or any declaration bundle (`*.oed`). That is the same test
+/// `use` and the loader apply, so nothing can be listed that cannot then be
+/// used, and a declaration-only kit — one that ships `dll`/`record`/`const`
+/// lines and no C — is a first-class kit. A kit that splits its declarations
+/// over several `.oed` files counts on the first one found.
 fn is_kit_dir(dir: &Path) -> bool {
-    if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
-        if dir.join(format!("{name}.oed")).is_file() {
-            return true;
-        }
-    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
     entries.flatten().any(|e| {
         e.file_name()
             .to_str()
-            .is_some_and(|n| n.ends_with("_libinfo.c"))
+            .is_some_and(|n| n.ends_with(".oed") || n.ends_with("_libinfo.c"))
     })
 }
 

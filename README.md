@@ -151,6 +151,16 @@ function pointers, and a `dll_attach` that gives a shared library a real
 `DllMain` (an ELF constructor on Linux) so it can hook a function the moment it
 loads. See the [interop guide](https://axdsan.github.io/openepl/interop.html).
 
+The `win` kit is the largest thing that rides on this: `use win` is the Win32
+API — over four hundred entry points, the structs they take and the constants
+they are written in terms of, across user32, gdi32, kernel32 and advapi32 —
+with no wrapper and nothing to link. A program that
+registers a window class, pumps a message loop, reads its own memory through
+`ReadProcessMemory` or writes the registry does it with `use win` as its only
+foreign declaration. It is Windows-only, cross-built from Linux with
+`--os windows`, and tested by running under wine. See the
+[`win` kit guide](https://axdsan.github.io/openepl/win-kit.html).
+
 ## Editing
 
 Studio's editor gives you syntax highlighting and live diagnostics as you

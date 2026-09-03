@@ -127,9 +127,11 @@ fn c_record_rejections_are_build_errors() {
             "module m\nrecord R is c\n  bad: text[]\nend\nsub main\nend\n",
             "not a C-layout field type",
         ),
+        // A nested c-record IS laid out (see `cstruct2.rs`); a nested *heap*
+        // record is what a struct cannot hold by value.
         (
-            "module m\nrecord Inner is c\n  x: int\nend\nrecord R is c\n  n: Inner\nend\nsub main\nend\n",
-            "not laid out",
+            "module m\nrecord Inner\n  x: int\nend\nrecord R is c\n  n: Inner\nend\nsub main\nend\n",
+            "heap record",
         ),
     ];
     for (i, (src, needle)) in cases.iter().enumerate() {

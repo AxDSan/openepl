@@ -227,7 +227,11 @@ fn type_of_expr_bare(
         }
         Expr::Index { base, index } => {
             let bt = type_of_expr_bare(base, vars, reg, components)?;
-            let it = type_of_expr_bare(index, vars, reg, components)?;
+            // The index goes through the hinted path, not the bare one, so a
+            // `const` in index position folds to its literal the way it does in
+            // every other expression position — `r.rgb[SLOT]` is how a header's
+            // own name for a position gets used.
+            let it = type_of_expr_in(index, vars, reg, components)?;
             // A dictionary is subscripted by its key, and a key is text. This
             // is `dict_get` spelled the way a subscript reads; a key that is
             // not there answers the sentinel and sets the error slot, which
@@ -270,6 +274,22 @@ fn type_of_expr_bare(
                 // One byte reads as a number, because that is what a byte is
                 // once it is out of the byte-set.
                 Ty::Bytes => Ok(Ty::Int),
+                // One element of a c-record's inline array. The count is part
+                // of the type, so a literal index out of range is caught here
+                // and there is no run-time check to pay for; a computed index
+                // is a plain GEP, like every other `ptr` operation.
+                Ty::CArray(a) => {
+                    if let Some(v) = literal_index(index, vars, reg) {
+                        if v > a.count as i64 {
+                            return err(format!(
+                                "index {v} is past the end of `{}` — it holds {} element(s)",
+                                bt.as_str(),
+                                a.count
+                            ));
+                        }
+                    }
+                    Ok(a.elem.surface())
+                }
                 other => err(format!("{} is not something you can index", other.as_str())),
             }
         }
@@ -465,6 +485,34 @@ fn type_of_expr_bare(
         // link-time address to take — and its signature must be C-representable,
         // because the point is a pointer a C caller invokes with the C ABI.
         Expr::AddressOf(name) => {
+            // `address of r.pt`, `address of r.rgb` — a path into a c-record's
+            // flat storage. Typed by walking the very same rules a
+            // read of that place uses: build the reader's expression and ask
+            // for its type, so a misspelt field is the one message it always
+            // was. Anything the walk reaches inside a c-record has an address.
+            if let Some((root, rest)) = name.split_once('.') {
+                let Some(Ty::Record(rec)) = vars.get(root).copied() else {
+                    return err(format!(
+                        "`address of {name}`: `{root}` is not a c-record local — a path is \
+                         only meaningful inside one"
+                    ));
+                };
+                if !reg.record(rec).map(|d| d.is_c).unwrap_or(false) {
+                    return err(format!(
+                        "`address of {name}`: `{root}` is a heap record, whose fields have no \
+                         fixed address — declare `{rec}` `is c`"
+                    ));
+                }
+                let mut place = Expr::Var(root.to_string());
+                for step in rest.split('.') {
+                    place = Expr::Field {
+                        base: Box::new(place),
+                        name: step.to_string(),
+                    };
+                }
+                type_of_expr_bare(&place, vars, reg, components)?;
+                return Ok(Ty::Ptr);
+            }
             if let Some(vt) = vars.get(name).copied() {
                 // A c-record local has a real address — its flat storage — so
                 // `address of r` is the pointer a C API is handed. That is the
@@ -585,6 +633,23 @@ pub fn callee(name: &str, reg: &Registry) -> Option<(&'static str, Signature)> {
         return Some(("subroutine", s.clone()));
     }
     reg.dll(name).map(|d| ("foreign function", d.sig.clone()))
+}
+
+/// The value of an index the checker can see: a literal, or a `const` that
+/// stands for one. A constant is a literal with a name, so `r.rgb[LIMIT]` past
+/// the end of an inline array is as visible a mistake as `r.rgb[40]` is — and
+/// `FOO[SOME_CONST]` is how a C header gets transcribed.
+fn literal_index(index: &Expr, vars: &HashMap<String, Ty>, reg: &Registry) -> Option<i64> {
+    match index {
+        Expr::IntLit(v) => Some(*v),
+        // A local of the same name shadows the constant, exactly as it does
+        // everywhere else a bare name is read.
+        Expr::Var(n) if !vars.contains_key(n) => match reg.const_(n).map(|c| &c.value) {
+            Some(Expr::IntLit(v)) => Some(*v),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The declared type of one field of record type `rec`, or a diagnostic.

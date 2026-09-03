@@ -362,6 +362,13 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `random_seed` | int | — |
 | `random_seed_now` | — | int |
 
+## split_demo
+
+`use split_demo`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |
+
 ## system
 
 `use system`
@@ -464,3 +471,10 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | --- | --- | --- |
 | `units_c_to_f` | double | double |
 | `units_f_to_c` | double | double |
+
+## win
+
+`use win`
+
+| Command | Parameters | Returns |
+| --- | --- | --- |

@@ -107,8 +107,11 @@ openepl new units-starter converter
 ## Shipping declarations
 
 A kit can also carry a bundle of foreign *declarations* — `dll` calls, `is c`
-records and `const` values — in a file named for the kit, `<name>.oed`, beside
-`lib.json`. `use <name>` merges them into a program as if it had typed them, so
+records and `const` values — in one or more `.oed` files beside `lib.json`. A
+small kit keeps them in `<name>.oed`; a large one splits them by the library
+they wrap (`user32.oed`, `kernel32.oed`, `gdi32.oed`), and every `.oed` in the
+directory is merged into one bundle. `use <name>` merges them into a program as
+if it had typed them, so
 a kit like `win` can supply `MessageBoxA`, `RECT` and `MB_OK` with no
 hand-written `dll` line. A kit may ship declarations, C-implemented commands, or
 both; a kit that is *only* declarations needs no `*_libinfo.c` at all. The file

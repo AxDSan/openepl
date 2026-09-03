@@ -64,6 +64,18 @@ fn llvm_ty(t: Ty) -> &'static str {
         // becomes a `Val`'s type — a byte field reads as `int` — so this only
         // serves the field GEP's load/store.
         Ty::Byte => "i8",
+        // A `WORD` field is two bytes in the struct; like `byte` it never
+        // becomes a `Val`'s type (it reads as `int`), so this serves the field
+        // load/store alone.
+        Ty::Int16 => "i16",
+        // A C `float` is four bytes in the struct and a `double` everywhere
+        // else in the language; the conversion happens at the load and the
+        // store, so this is only ever the width in the struct.
+        Ty::Float => "float",
+        // An inline array field is addressed, never loaded whole: `r.rgb`
+        // evaluates to the address of its first element. This arm exists so
+        // the match is exhaustive.
+        Ty::CArray(_) => "ptr",
         // Signature-only types; `resolve_ret` replaces them with what the call
         // actually produced before any value carries one.
         Ty::AnyArray | Ty::AnyElem | Ty::AnyDict => "ptr",
@@ -726,7 +738,7 @@ impl Lowerer<'_> {
         let def = self.reg.record(rec).ok_or_else(|| LowerError {
             msg: format!("unknown record `{rec}`"),
         })?;
-        let (_, size) = def.c_layout().ok_or_else(|| LowerError {
+        let (_, size, _) = def.c_layout(self.reg).ok_or_else(|| LowerError {
             msg: format!("c-record `{rec}` has a field with no C layout"),
         })?;
         Ok(size)
@@ -742,7 +754,7 @@ impl Lowerer<'_> {
         let (pos, ty) = def.field(field).ok_or_else(|| LowerError {
             msg: format!("c-record `{rec}` has no field `{field}`"),
         })?;
-        let (offsets, _) = def.c_layout().ok_or_else(|| LowerError {
+        let (offsets, _, _) = def.c_layout(self.reg).ok_or_else(|| LowerError {
             msg: format!("c-record `{rec}` has a field with no C layout"),
         })?;
         Ok((offsets[pos - 1], ty))
@@ -1051,6 +1063,14 @@ impl Lowerer<'_> {
                 let dead = self.fresh_label("postret");
                 writeln!(self.body, "{dead}:").unwrap();
                 Ok(())
+            }
+            // `r.pt.x = v`, `r.rgb[3] = v` — a store through a path into a
+            // c-record's flat storage. The address comes from the same walker a
+            // read uses, so a write can never land at a different offset than
+            // the read of the same words would.
+            StmtKind::SetPlace { place, value } => {
+                let (p, fty) = self.c_place_ptr(place)?;
+                self.c_store(&p, fty, value, "that field")
             }
             StmtKind::SetProperty {
                 component,
@@ -1494,9 +1514,7 @@ impl Lowerer<'_> {
     }
 
     /// Read one field of a c-record from its flat storage: a GEP to the field's
-    /// byte offset, then a load of the field's real width. The result is the
-    /// field's *surface* type — a `byte` comes back as an `int` `0`..`255`, the
-    /// same convention `ptr_read_byte` uses.
+    /// byte offset, then a load of the field's real width.
     fn emit_c_field_read(
         &mut self,
         rec: &str,
@@ -1505,7 +1523,23 @@ impl Lowerer<'_> {
     ) -> Result<Val, LowerError> {
         let (offset, fty) = self.c_field(rec, field)?;
         let fp = self.c_field_ptr(base, offset);
-        let out = match fty {
+        Ok(self.c_load(&fp, fty))
+    }
+
+    /// Load one C-layout value at `fp`. The result is the field's *surface*
+    /// type — a `byte` and an `int16` come back as an `int`, a `float` as a
+    /// `double` — which is the type the language reads and writes it as.
+    ///
+    /// A nested c-record and an inline array are the exception: there is no
+    /// value to load, so the result IS the address, typed as the field. That
+    /// is the same rule a c-record `Var` already follows, which is what lets
+    /// `r.pt.x` and `r.rgb[3]` chain through this one function.
+    fn c_load(&mut self, fp: &str, fty: Ty) -> Val {
+        match fty {
+            Ty::Record(_) | Ty::CArray(_) => Val {
+                ty: fty,
+                operand: fp.to_string(),
+            },
             // A byte is one `i8` widened to the `int` it reads as, unsigned so
             // 200 is 200 and not -56.
             Ty::Byte => {
@@ -1513,7 +1547,25 @@ impl Lowerer<'_> {
                 writeln!(self.body, "  {raw} = load i8, ptr {fp}").unwrap();
                 let t = self.fresh();
                 writeln!(self.body, "  {t} = zext i8 {raw} to i32").unwrap();
-                return Ok(Val { ty: Ty::Int, operand: t });
+                Val { ty: Ty::Int, operand: t }
+            }
+            // Widened unsigned for the same reason: the field this exists for is
+            // a Win32 `WORD`, and 0xFFFF there means 65535, not -1.
+            Ty::Int16 => {
+                let raw = self.fresh();
+                writeln!(self.body, "  {raw} = load i16, ptr {fp}").unwrap();
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = zext i16 {raw} to i32").unwrap();
+                Val { ty: Ty::Int, operand: t }
+            }
+            // The struct holds a 4-byte float; the language has one floating
+            // type, so widen on the way out.
+            Ty::Float => {
+                let raw = self.fresh();
+                writeln!(self.body, "  {raw} = load float, ptr {fp}").unwrap();
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = fpext float {raw} to double").unwrap();
+                Val { ty: Ty::Double, operand: t }
             }
             // C truth is any non-zero int, and a C API fills a `BOOL` field with
             // whatever its flag arithmetic produced (`7`, `0x100`), not always
@@ -1526,7 +1578,7 @@ impl Lowerer<'_> {
                 writeln!(self.body, "  {nz} = icmp ne i32 {raw}, 0").unwrap();
                 let t = self.fresh();
                 writeln!(self.body, "  {t} = zext i1 {nz} to i32").unwrap();
-                return Ok(Val { ty: Ty::Bool, operand: t });
+                Val { ty: Ty::Bool, operand: t }
             }
             // A `char*` a C API wrote into the struct is borrowed and outlives
             // nothing in particular, so copy it into a managed text exactly as a
@@ -1538,15 +1590,14 @@ impl Lowerer<'_> {
                 writeln!(self.body, "  {raw} = load ptr, ptr {fp}").unwrap();
                 let t = self.fresh();
                 writeln!(self.body, "  {t} = call ptr @oe_dll_text(ptr {raw})").unwrap();
-                t
+                Val { ty: Ty::Text, operand: t }
             }
             _ => {
                 let t = self.fresh();
                 writeln!(self.body, "  {t} = load {}, ptr {fp}", llvm_ty(fty)).unwrap();
-                t
+                Val { ty: fty.surface(), operand: t }
             }
-        };
-        Ok(Val { ty: fty.surface(), operand: out })
+        }
     }
 
     /// Write one field of a c-record into its flat storage: evaluate the value
@@ -1560,16 +1611,34 @@ impl Lowerer<'_> {
         value: &openepl_ir::Expr,
     ) -> Result<(), LowerError> {
         let (offset, fty) = self.c_field(rec, field)?;
+        let fp = self.c_field_ptr(base, offset);
+        self.c_store(&fp, fty, value, &format!("c-record `{rec}` field `{field}`"))
+    }
+
+    /// Store one C-layout value at `fp`, narrowing to the field's real width.
+    /// `what` names the destination for the type error.
+    fn c_store(
+        &mut self,
+        fp: &str,
+        fty: Ty,
+        value: &openepl_ir::Expr,
+        what: &str,
+    ) -> Result<(), LowerError> {
+        if matches!(fty, Ty::Record(_) | Ty::CArray(_)) {
+            return err(format!(
+                "{what} is a whole nested struct or inline array — set its parts, or copy \
+                 bytes through `address of`"
+            ));
+        }
         let want = fty.surface();
         let v = self.eval_hinted(value, Some(want))?;
         if v.ty != want {
             return err(format!(
-                "c-record `{rec}` field `{field}` is {}, cannot store {}",
+                "{what} is {}, cannot store {}",
                 want.as_str(),
                 v.ty.as_str()
             ));
         }
-        let fp = self.c_field_ptr(base, offset);
         match fty {
             // The `int` value narrows to the one byte the field holds; the top
             // 24 bits are the author's to keep in range, as with `ptr_write_byte`.
@@ -1577,6 +1646,19 @@ impl Lowerer<'_> {
                 let b = self.fresh();
                 writeln!(self.body, "  {b} = trunc i32 {} to i8", v.operand).unwrap();
                 writeln!(self.body, "  store i8 {b}, ptr {fp}").unwrap();
+            }
+            // The low 16 bits, for the same reason.
+            Ty::Int16 => {
+                let b = self.fresh();
+                writeln!(self.body, "  {b} = trunc i32 {} to i16", v.operand).unwrap();
+                writeln!(self.body, "  store i16 {b}, ptr {fp}").unwrap();
+            }
+            // A `double` narrows to the 4-byte float the struct holds — the
+            // rounding C's own `float x = d;` does.
+            Ty::Float => {
+                let f = self.fresh();
+                writeln!(self.body, "  {f} = fptrunc double {} to float", v.operand).unwrap();
+                writeln!(self.body, "  store float {f}, ptr {fp}").unwrap();
             }
             // The stored `char*` is borrowed: it is valid while the text that
             // backs it is, exactly like `ptr_of_text`. A runtime-produced empty
@@ -1600,6 +1682,126 @@ impl Lowerer<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The address of a *place* inside a c-record's flat storage, and the place's
+    /// declared C field type: `r`, `r.pt`, `r.pt.x`, `r.rgb[3]`, however deep.
+    ///
+    /// One walker for every path in the language — the read of `r.pt.x`, the
+    /// write to it, `address of r.rgb`, and an element read — so a chained GEP
+    /// is computed in exactly one place and the three cannot disagree about an
+    /// offset.
+    fn c_place_ptr(&mut self, place: &Expr) -> Result<(String, Ty), LowerError> {
+        match place {
+            Expr::Var(name) => match self.vars.get(name).cloned() {
+                Some((slot, ty @ Ty::Record(rec)))
+                    if self.reg.record(rec).map(|d| d.is_c).unwrap_or(false) =>
+                {
+                    Ok((slot, ty))
+                }
+                _ => err(format!(
+                    "`{name}` is not a c-record local — a path reaches into a c-record's own \
+                     storage and nothing else"
+                )),
+            },
+            // `r.pt` on its own arrives as a property read; past the first step
+            // the parser builds `Field`. Both are one step into a record.
+            Expr::GetProperty { component, property } => {
+                let base = Expr::Var(component.clone());
+                self.c_place_step(&base, property)
+            }
+            Expr::Field { base, name } => self.c_place_step(base, name),
+            Expr::Index { base, index } => {
+                let (bp, bty) = self.c_place_ptr(base)?;
+                let Ty::CArray(a) = bty else {
+                    return err(format!(
+                        "`{}` is not an inline array — only an array field is indexed inside a \
+                         c-record",
+                        bty.as_str()
+                    ));
+                };
+                let (esize, _) = openepl_ir::c_field_size_align(a.elem, self.reg)
+                    .ok_or_else(|| LowerError {
+                        msg: format!("`{}` has no C layout", a.elem.as_str()),
+                    })?;
+                // Positions count from 1, so element `k` starts `(k-1)*esize`
+                // bytes in. A literal index folds to that constant; anything
+                // else is a runtime GEP with no bounds check, exactly as every
+                // other `ptr` operation is.
+                let p = match self.const_index(index) {
+                    Some(k) => self.c_field_ptr(&bp, (k - 1) * esize),
+                    None => {
+                        let iv = self.eval(index)?;
+                        if iv.ty != Ty::Int {
+                            return err(format!(
+                                "an index counts with `int` values, got {}",
+                                iv.ty.as_str()
+                            ));
+                        }
+                        let zero = self.fresh();
+                        writeln!(self.body, "  {zero} = sub i32 {}, 1", iv.operand).unwrap();
+                        let wide = self.fresh();
+                        writeln!(self.body, "  {wide} = sext i32 {zero} to i64").unwrap();
+                        let off = self.fresh();
+                        writeln!(self.body, "  {off} = mul i64 {wide}, {esize}").unwrap();
+                        let g = self.fresh();
+                        writeln!(
+                            self.body,
+                            "  {g} = getelementptr inbounds i8, ptr {bp}, i64 {off}"
+                        )
+                        .unwrap();
+                        g
+                    }
+                };
+                Ok((p, a.elem))
+            }
+            other => err(format!(
+                "{other:?} is not a place inside a c-record"
+            )),
+        }
+    }
+
+    /// The value of an index the compiler can see: a literal, or a `const` that
+    /// stands for one. Folding the constant here is what keeps `r.rgb[LIMIT]` a
+    /// plain constant offset rather than an address computed at run time.
+    fn const_index(&self, index: &Expr) -> Option<i64> {
+        match index {
+            Expr::IntLit(k) => Some(*k),
+            Expr::Var(n) if !self.vars.contains_key(n) => {
+                match self.reg.const_(n).map(|c| &c.value) {
+                    Some(Expr::IntLit(k)) => Some(*k),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a place expression bottoms out in a c-record local — the test
+    /// that decides whether `xs[i]` is a struct's inline array or a runtime
+    /// array. It answers from the variable table alone, so it never emits.
+    fn rooted_in_c_record(&self, place: &Expr) -> bool {
+        match place {
+            Expr::Var(name) | Expr::GetProperty { component: name, .. } => {
+                matches!(self.vars.get(name), Some((_, Ty::Record(rec)))
+                    if self.reg.record(rec).map(|d| d.is_c).unwrap_or(false))
+            }
+            Expr::Field { base, .. } | Expr::Index { base, .. } => self.rooted_in_c_record(base),
+            _ => false,
+        }
+    }
+
+    /// One `.field` step of a place walk.
+    fn c_place_step(&mut self, base: &Expr, field: &str) -> Result<(String, Ty), LowerError> {
+        let (bp, bty) = self.c_place_ptr(base)?;
+        let Ty::Record(rec) = bty else {
+            return err(format!(
+                "`.{field}` reads a field, and {} has none",
+                bty.as_str()
+            ));
+        };
+        let (offset, fty) = self.c_field(rec, field)?;
+        Ok((self.c_field_ptr(&bp, offset), fty))
     }
 
     /// The declared type of a variable, local first then module-level — the
@@ -1737,6 +1939,17 @@ impl Lowerer<'_> {
                         other.as_str()
                     )),
                 }
+            }
+            // One element of a c-record's inline array is an address inside the
+            // struct, not a runtime array lookup — route it through the one
+            // place walker so a read, a write and `address of` all compute the
+            // same offset.
+            Expr::Index { base, index } if self.rooted_in_c_record(base) => {
+                let (p, ty) = self.c_place_ptr(&Expr::Index {
+                    base: base.clone(),
+                    index: index.clone(),
+                })?;
+                Ok(self.c_load(&p, ty))
             }
             Expr::Index { base, index } => self.eval_index(base, index),
             Expr::IntLit(v) => {
@@ -1895,6 +2108,20 @@ impl Lowerer<'_> {
             // a sub whose address is taken but which nothing calls directly, the
             // same way an event handler's thunk keeps its handler alive.
             Expr::AddressOf(name) => {
+                // `address of r.pt` / `address of r.rgb` — the address of that
+                // field inside the struct's own storage (for an inline array,
+                // of its first element, which is where C's own `&r.rgb` points).
+                if let Some((root, rest)) = name.split_once('.') {
+                    let mut place = Expr::Var(root.to_string());
+                    for step in rest.split('.') {
+                        place = Expr::Field {
+                            base: Box::new(place),
+                            name: step.to_string(),
+                        };
+                    }
+                    let (p, _) = self.c_place_ptr(&place)?;
+                    return Ok(Val { ty: Ty::Ptr, operand: p });
+                }
                 // `address of r` for a c-record local is that local's own
                 // address — the pointer a C API is handed. A c-record `Var`
                 // already evaluates to its address, so this is the same operand,

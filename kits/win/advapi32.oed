@@ -1,0 +1,229 @@
+# advapi32 — the Windows registry and security-token surface of the `win` kit.
+# DLL: advapi32.dll. Subsystem: the registry (RegOpenKeyEx and friends) and the
+# access-token / privilege calls a program needs to adjust its own privileges —
+# the SeDebugPrivilege dance that lets one process read another's memory.
+#
+# Every line here is `--os windows` only; `use win` is gated on "windows" in the
+# kit's lib.json. A registry handle (HKEY) and a token handle (HANDLE) are
+# pointer-width, so they are `ptr`; the predefined HKEY roots are integer
+# constants, so a program bridges them with `ptr_from_int(HKEY_CURRENT_USER)`.
+# A LONG registry status and a BOOL are `int`. An out-parameter the API writes
+# through (PHKEY, LPDWORD, LPBYTE, an out string buffer) is a `ptr` the program
+# points at bytes it owns.
+#
+# Order does not matter: the bundle is registered whole before any `dll` here is
+# checked against the records below.
+
+# ---------------------------------------------------------------------------
+# Registry — open, create, read, write, enumerate, delete, close.
+# ---------------------------------------------------------------------------
+
+# hkey is an HKEY (a predefined root via ptr_from_int, or a subkey handle read
+# back from an out-param); out_key receives the opened HKEY (PHKEY).
+dll RegOpenKeyExA(hkey: ptr, subkey: text, options: int, sam: int, out_key: ptr): int from "advapi32" as "RegOpenKeyExA" system
+
+# lpclass and lpsec are optional (usually NULL) so they are `ptr`; disposition
+# receives REG_CREATED_NEW_KEY / REG_OPENED_EXISTING_KEY (an LPDWORD out-param).
+dll RegCreateKeyExA(hkey: ptr, subkey: text, reserved: int, lpclass: ptr, dwoptions: int, sam: int, lpsec: ptr, out_key: ptr, disposition: ptr): int from "advapi32" as "RegCreateKeyExA" system
+
+# lptype (out REG_* type), lpdata (out byte buffer, LPBYTE) and lpcbdata (in/out
+# byte count) are each a `ptr`; lpreserved is always NULL.
+dll RegQueryValueExA(hkey: ptr, value_name: text, lpreserved: ptr, lptype: ptr, lpdata: ptr, lpcbdata: ptr): int from "advapi32" as "RegQueryValueExA" system
+
+# dwtype is a REG_* value; lpdata points at the bytes to store; cbdata is their
+# length. RegSetValueExA takes the data as `const BYTE *`, hence `ptr`.
+dll RegSetValueExA(hkey: ptr, value_name: text, reserved: int, dwtype: int, lpdata: ptr, cbdata: int): int from "advapi32" as "RegSetValueExA" system
+
+dll RegDeleteValueA(hkey: ptr, value_name: text): int from "advapi32" as "RegDeleteValueA" system
+dll RegDeleteKeyA(hkey: ptr, subkey: text): int from "advapi32" as "RegDeleteKeyA" system
+
+# Enumerate subkeys and values by index. The name buffers are LPSTR the API
+# writes into, so they are `ptr`; the count cells are LPDWORD in/out `ptr`.
+# lpft is a PFILETIME (optional); FILETIME lives in the kernel32 file, so it is
+# taken here as a plain `ptr` the program points at 8 bytes or leaves NULL.
+dll RegEnumKeyExA(hkey: ptr, index: int, name: ptr, lpcch_name: ptr, lpreserved: ptr, lpclass: ptr, lpcch_class: ptr, lpft: ptr): int from "advapi32" as "RegEnumKeyExA" system
+dll RegEnumValueA(hkey: ptr, index: int, value_name: ptr, lpcch_name: ptr, lpreserved: ptr, lptype: ptr, lpdata: ptr, lpcbdata: ptr): int from "advapi32" as "RegEnumValueA" system
+
+# Whole-key metadata: subkey/value counts, longest-name lengths, last write.
+dll RegQueryInfoKeyA(hkey: ptr, lpclass: ptr, lpcch_class: ptr, lpreserved: ptr, sub_keys: ptr, max_subkey_len: ptr, max_class_len: ptr, values: ptr, max_value_name_len: ptr, max_value_len: ptr, security_desc: ptr, lpft: ptr): int from "advapi32" as "RegQueryInfoKeyA" system
+
+# The one-call read: open, query and type-check a value by path in a single go.
+# lpvalue names the value (a string); pvdata is the out byte buffer.
+dll RegGetValueA(hkey: ptr, subkey: text, lpvalue: text, flags: int, pdwtype: ptr, pvdata: ptr, pcbdata: ptr): int from "advapi32" as "RegGetValueA" system
+
+dll RegFlushKey(hkey: ptr): int from "advapi32" as "RegFlushKey" system
+dll RegCloseKey(hkey: ptr): int from "advapi32" as "RegCloseKey" system
+
+# ---------------------------------------------------------------------------
+# Access tokens and privileges — the SeDebugPrivilege path.
+# ---------------------------------------------------------------------------
+
+# process is a process HANDLE (GetCurrentProcess from kernel32); out_token
+# receives the token HANDLE (PHANDLE), so it is a `ptr` the program points at a
+# ptr-wide cell.
+dll OpenProcessToken(process: ptr, desired: int, out_token: ptr): bool from "advapi32" as "OpenProcessToken" system
+dll OpenThreadToken(thread: ptr, desired: int, open_as_self: bool, out_token: ptr): bool from "advapi32" as "OpenThreadToken" system
+
+# lpsys is the machine name, usually NULL, so `ptr`; name is the privilege
+# string (SE_DEBUG_NAME). lpluid is a c-record parameter: the call hands C the
+# address of the LUID the program declared, and the API fills it in.
+dll LookupPrivilegeValueA(lpsys: ptr, name: text, lpluid: LUID): bool from "advapi32" as "LookupPrivilegeValueA" system
+
+# The reverse — turn a LUID back into its privilege name. name is an out buffer.
+dll LookupPrivilegeNameA(lpsys: ptr, lpluid: LUID, name: ptr, lpcch_name: ptr): bool from "advapi32" as "LookupPrivilegeNameA" system
+
+# new_state is a TOKEN_PRIVILEGES c-record param, so the call passes its address;
+# prev_state (optional) and return_len (out) are plain `ptr`. buffer_len is the
+# byte size of the buffer prev_state points at.
+dll AdjustTokenPrivileges(token: ptr, disable_all: bool, new_state: TOKEN_PRIVILEGES, buffer_len: int, prev_state: ptr, return_len: ptr): bool from "advapi32" as "AdjustTokenPrivileges" system
+
+# info_class is a TOKEN_INFORMATION_CLASS value (TokenUser, TokenElevation, ...);
+# info is the out buffer, info_len its size, return_len the bytes written.
+dll GetTokenInformation(token: ptr, info_class: int, info: ptr, info_len: int, return_len: ptr): bool from "advapi32" as "GetTokenInformation" system
+dll SetTokenInformation(token: ptr, info_class: int, info: ptr, info_len: int): bool from "advapi32" as "SetTokenInformation" system
+
+# ---------------------------------------------------------------------------
+# Structs the calls above are written in terms of.
+# ---------------------------------------------------------------------------
+
+# LUID — a locally-unique 64-bit id, split the way the header splits it.
+# high_part is a signed LONG; there is no signed-16 in the field set, but a full
+# 32-bit `int` is exactly a LONG, so this matches C's `struct _LUID` bit for bit.
+record LUID is c
+  low_part: int
+  high_part: int
+end
+
+# LUID_AND_ATTRIBUTES — a privilege LUID with its SE_PRIVILEGE_* attribute word.
+record LUID_AND_ATTRIBUTES is c
+  luid: LUID
+  attributes: int
+end
+
+# TOKEN_PRIVILEGES — a count followed by that many LUID_AND_ATTRIBUTES. The C
+# type declares the array `[ANYSIZE_ARRAY]` (1) and a caller over-allocates for
+# more; this transcribes the single-entry form, which is exactly what adjusting
+# one privilege (SeDebugPrivilege) needs. For several at once, lay the bytes out
+# by hand and pass a `ptr`.
+record TOKEN_PRIVILEGES is c
+  privilege_count: int
+  privileges: LUID_AND_ATTRIBUTES[1]
+end
+
+# ---------------------------------------------------------------------------
+# Constants.
+# ---------------------------------------------------------------------------
+
+# Predefined registry roots. Each is 0x8000000N, past a signed 32-bit int, so it
+# types int64 and a program passes it through ptr_from_int(...) to the HKEY arg.
+const HKEY_CLASSES_ROOT = 2147483648
+const HKEY_CURRENT_USER = 2147483649
+const HKEY_LOCAL_MACHINE = 2147483650
+const HKEY_USERS = 2147483651
+const HKEY_PERFORMANCE_DATA = 2147483652
+const HKEY_CURRENT_CONFIG = 2147483653
+
+# Access rights for the `sam` parameter (a REGSAM).
+const KEY_QUERY_VALUE = 1
+const KEY_SET_VALUE = 2
+const KEY_CREATE_SUB_KEY = 4
+const KEY_ENUMERATE_SUB_KEYS = 8
+const KEY_NOTIFY = 16
+const KEY_CREATE_LINK = 32
+const KEY_WOW64_64KEY = 256
+const KEY_WOW64_32KEY = 512
+# KEY_READ = STANDARD_RIGHTS_READ | QUERY_VALUE | ENUMERATE_SUB_KEYS | NOTIFY,
+# with SYNCHRONIZE masked off — 0x20019.
+const KEY_READ = 131097
+const KEY_EXECUTE = 131097
+# KEY_WRITE = STANDARD_RIGHTS_WRITE | SET_VALUE | CREATE_SUB_KEY — 0x20006.
+const KEY_WRITE = 131078
+# KEY_ALL_ACCESS = STANDARD_RIGHTS_ALL | every specific right — 0xF003F.
+const KEY_ALL_ACCESS = 983103
+
+# Value types for RegSetValueEx / RegQueryValueEx (a REG_* type).
+const REG_NONE = 0
+const REG_SZ = 1
+const REG_EXPAND_SZ = 2
+const REG_BINARY = 3
+const REG_DWORD = 4
+const REG_DWORD_LITTLE_ENDIAN = 4
+const REG_DWORD_BIG_ENDIAN = 5
+const REG_LINK = 6
+const REG_MULTI_SZ = 7
+const REG_QWORD = 11
+const REG_QWORD_LITTLE_ENDIAN = 11
+
+# Options for RegCreateKeyEx (dwoptions) and its disposition out-value.
+const REG_OPTION_NON_VOLATILE = 0
+const REG_OPTION_VOLATILE = 1
+const REG_OPTION_CREATE_LINK = 2
+const REG_OPTION_BACKUP_RESTORE = 4
+const REG_CREATED_NEW_KEY = 1
+const REG_OPENED_EXISTING_KEY = 2
+
+# RRF_* type-restriction flags for RegGetValueA's `flags`.
+const RRF_RT_REG_NONE = 1
+const RRF_RT_REG_SZ = 2
+const RRF_RT_REG_EXPAND_SZ = 4
+const RRF_RT_REG_BINARY = 8
+const RRF_RT_REG_DWORD = 16
+const RRF_RT_REG_MULTI_SZ = 32
+const RRF_RT_REG_QWORD = 64
+const RRF_RT_DWORD = 24
+const RRF_RT_QWORD = 72
+const RRF_RT_ANY = 65535
+const RRF_NOEXPAND = 268435456
+const RRF_ZEROONFAILURE = 536870912
+
+# The registry status codes a caller checks against. ERROR_SUCCESS is the shared
+# Win32 zero; the generic system-error family belongs to kernel32, so only the
+# codes the registry calls actually return are named here.
+const ERROR_SUCCESS = 0
+const ERROR_FILE_NOT_FOUND = 2
+const ERROR_ACCESS_DENIED = 5
+const ERROR_MORE_DATA = 234
+const ERROR_NO_MORE_ITEMS = 259
+
+# Token access rights for OpenProcessToken's `desired`.
+const TOKEN_ASSIGN_PRIMARY = 1
+const TOKEN_DUPLICATE = 2
+const TOKEN_IMPERSONATE = 4
+const TOKEN_QUERY = 8
+const TOKEN_QUERY_SOURCE = 16
+const TOKEN_ADJUST_PRIVILEGES = 32
+const TOKEN_ADJUST_GROUPS = 64
+const TOKEN_ADJUST_DEFAULT = 128
+const TOKEN_ADJUST_SESSIONID = 256
+
+# SE_PRIVILEGE_* attribute bits for a LUID_AND_ATTRIBUTES.attributes field.
+# SE_PRIVILEGE_USED_FOR_ACCESS is 0x80000000, past signed 32-bit, so int64.
+const SE_PRIVILEGE_ENABLED_BY_DEFAULT = 1
+const SE_PRIVILEGE_ENABLED = 2
+const SE_PRIVILEGE_REMOVED = 4
+const SE_PRIVILEGE_USED_FOR_ACCESS = 2147483648
+
+# TOKEN_INFORMATION_CLASS selectors for GetTokenInformation. Named as the C
+# enumerators read (mixed case), distinct from the TOKEN_PRIVILEGES record above.
+const TokenUser = 1
+const TokenGroups = 2
+const TokenPrivileges = 3
+const TokenOwner = 4
+const TokenPrimaryGroup = 5
+const TokenDefaultDacl = 6
+const TokenSource = 7
+const TokenType = 8
+const TokenImpersonationLevel = 9
+const TokenStatistics = 10
+const TokenElevationType = 18
+const TokenElevation = 20
+
+# Privilege names — the `text` a program hands LookupPrivilegeValueA.
+const SE_DEBUG_NAME = "SeDebugPrivilege"
+const SE_SHUTDOWN_NAME = "SeShutdownPrivilege"
+const SE_BACKUP_NAME = "SeBackupPrivilege"
+const SE_RESTORE_NAME = "SeRestorePrivilege"
+const SE_TCB_NAME = "SeTcbPrivilege"
+const SE_SECURITY_NAME = "SeSecurityPrivilege"
+const SE_TAKE_OWNERSHIP_NAME = "SeTakeOwnershipPrivilege"
+const SE_INCREASE_QUOTA_NAME = "SeIncreaseQuotaPrivilege"
