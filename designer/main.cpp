@@ -135,6 +135,10 @@ struct Designer {
     /// positioned, so neither the control nor its container will scroll them.
     int code_scroll = 0;
     int code_content_h = 0;
+    /// The same, sideways. The textarea is `wrap='nowrap'`, so it scrolls a long
+    /// line horizontally on its own; the colour layer under it has to be moved
+    /// by the same amount or the two draw the same line at different x.
+    int code_scroll_x = 0;
     /// Set when a line is appended to the console, so the frame loop can scroll
     /// it to the bottom. Doing it inside log() would force a full layout per
     /// line, and a build emits many lines per frame.
@@ -919,7 +923,16 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << "';font-size:13px;line-height:" << CODE_LINE_H << "px;padding:" << CODE_PAD_Y << "px "
       << CODE_PAD_X << "px;padding-top:0px;white-space:pre;color:" << TEXT << "}";
     // Relative, so a diagnostic's underline can be placed within its row.
-    s << "#codehl div{white-space:pre;height:" << CODE_LINE_H << "px;position:relative}";
+    //
+    // `nowrap` and `overflow:hidden`, not `pre` alone: the textarea above is
+    // `wrap='nowrap'` and scrolls a long line sideways, so a layer that wrapped
+    // one instead put its tail on a second visual row and shoved every line
+    // below it down a row. The two layers then drew different text at the same
+    // y — the code looked garbled, and in a narrow pane it slid out of the
+    // clipped box altogether and the editor went white. Indentation survives
+    // `nowrap` because `escape_code` has already turned each space into U+00A0.
+    s << "#codehl div{white-space:nowrap;overflow:hidden;height:" << CODE_LINE_H
+      << "px;position:relative}";
     // Absolutely-positioned children ignore an ancestor's overflow in RmlUi
     // unless told to respect it. Without this the editor keeps painting once
     // scrolled — straight over the menu bar and toolbar.
@@ -930,8 +943,13 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // column is a multiple of one glyph's width and the bar lands under
     // exactly the name the server meant.
     s << "#codehl div.badline{background-color:#fff6f6}";
-    s << "#codehl div div.dline{position:absolute;height:2px;background-color:" << DANGER << "}";
-    s << "#codehl div div.dline.warn{background-color:#bf8700}";
+    // The row's content, shifted left when the line is scrolled sideways. The
+    // row clips it, so the layer stays inside the view whatever the offset.
+    // Positioned, so a diagnostic's bar measures its column from the same
+    // origin as the glyphs it underlines.
+    s << "#codehl .sh{position:relative;display:inline-block;white-space:nowrap}";
+    s << "#codehl .dline{position:absolute;height:2px;background-color:" << DANGER << "}";
+    s << "#codehl .dline.warn{background-color:#bf8700}";
     s << "#problems{height:22px;overflow-y:auto;padding:6px 12px}";
     s << ".problem{font-size:12px;color:" << TEXT << ";padding:2px 0}";
     s << ".problem .pline{color:" << DANGER << ";margin-right:8px}";
@@ -2205,18 +2223,32 @@ void refresh_highlight() {
                  std::to_string(d.range.end_line) + ":" + std::to_string(d.range.end_character) +
                  (d.severity == 1 ? "e;" : "w;");
     }
+    // Sideways offset, read from the control every time. The control scrolls
+    // itself when the caret walks past the right edge and tells nobody, so this
+    // is the only moment it can be noticed — and it belongs in the cache key
+    // below, or a line scrolled sideways with no text change never repaints.
+    //
+    // The layer itself is never moved to follow it. Moving it is what the
+    // vertical case deliberately avoids: RmlUi does not clip a positioned
+    // element against an ancestor's overflow, so a layer shifted out of the
+    // view goes on painting over the toolbox and the menu bar. Each row clips
+    // its own content instead — see the shift span below.
+    g.code_scroll_x = (int)ed->GetScrollLeft();
+
     static std::string painted;
     static size_t painted_first = (size_t)-1;
     static size_t painted_rows = 0;
     static std::string painted_marks;
+    static int painted_x = -1;
     if (text == painted && first_line == painted_first && rows == painted_rows &&
-        marks == painted_marks) {
+        marks == painted_marks && g.code_scroll_x == painted_x) {
         return;
     }
     painted = text;
     painted_first = first_line;
     painted_rows = rows;
     painted_marks = marks;
+    painted_x = g.code_scroll_x;
 
     const int cw = code_char_width();
     std::string html;
@@ -2238,9 +2270,18 @@ void refresh_highlight() {
                     std::to_string((to - from) * cw) + "px'/>";
         }
         // An empty div collapses, which would shift every following line up.
-        html += std::string(bad ? "<div class='badline'>" : "<div>") +
+        //
+        // The row's content sits in a span the row clips, so a line scrolled
+        // sideways is windowed without the layer leaving its box. Highlighting
+        // still runs over the whole line — slicing the text first would cut a
+        // string or a word in half and paint the remainder as the wrong thing.
+        const std::string shift =
+            g.code_scroll_x > 0
+                ? "<span class='sh' style='left:" + std::to_string(-g.code_scroll_x) + "px'>"
+                : "<span class='sh'>";
+        html += std::string(bad ? "<div class='badline'>" : "<div>") + shift +
                 (lines[i].empty() ? std::string("&nbsp;") : highlight_line(lines[i])) + bars +
-                "</div>";
+                "</span></div>";
     }
     layer->SetInnerRML(html);
 }
@@ -2371,6 +2412,13 @@ void sync_highlight_scroll() {
     const int actual = (int)ed->GetScrollTop();
     g.code_scroll = actual - (actual % theme::CODE_LINE_H);
     ed->SetScrollTop((float)g.code_scroll);
+
+    // Sideways the control leads and the layer follows: the caret is the
+    // control's, so it decides when a long line has to slide, and the colour
+    // layer is moved to match. Reading it back rather than setting it is the
+    // whole difference — the control scrolls itself as the caret moves, and
+    // nothing here is told when that happens.
+    g.code_scroll_x = (int)ed->GetScrollLeft();
     refresh_highlight();
 }
 
@@ -3097,7 +3145,7 @@ bool editor_position_at(int mx, int my, int& line, int& col) {
     const auto size = ed->GetBox().GetSize(Rml::BoxArea::Border);
     if (mx < at.x || my < at.y || mx >= at.x + size.x || my >= at.y + size.y) return false;
     line = ((int)(my - at.y) + g.code_scroll) / theme::CODE_LINE_H;
-    col = ((int)(mx - at.x) - theme::CODE_PAD_X) / code_char_width();
+    col = ((int)(mx - at.x) - theme::CODE_PAD_X + g.code_scroll_x) / code_char_width();
     if (col < 0) col = 0;
     return true;
 }
@@ -3597,7 +3645,7 @@ void render_completion() {
     const auto at = ed->GetAbsoluteOffset(Rml::BoxArea::Border);
     const int rows = (int)std::min(n, WINDOW);
     const int h = rows * ROW_H + 10;
-    int x = (int)at.x + theme::CODE_PAD_X + g.complete_start * code_char_width();
+    int x = (int)at.x + theme::CODE_PAD_X + g.complete_start * code_char_width() - g.code_scroll_x;
     int y = (int)at.y + (g.complete_line + 1) * theme::CODE_LINE_H - g.code_scroll;
     if (x > g.win_w - 300) x = std::max(8, g.win_w - 300);
     // Above the line when there is no room below it; never off the window.
