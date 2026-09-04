@@ -3801,6 +3801,185 @@ void accept_completion() {
     close_completion();
 }
 
+/* --- indentation ------------------------------------------------------------ */
+
+/// One level. Two spaces: it is what every example, template and generated
+/// sample in the tree is written with, and an editor that disagreed with the
+/// files it opens would re-indent them a line at a time.
+constexpr int INDENT = 2;
+
+/// Put `text` in the editor with the caret at character offset `caret`.
+///
+/// `SetValue` raises no change event, so everything a keystroke's change
+/// handler would have done has to be done by hand — the same tail
+/// `accept_completion` runs, and the only supported way to rewrite the buffer
+/// without the colour layer, the dirty flag and the server falling behind it.
+void set_editor_text(const std::string& text, size_t caret_byte) {
+    auto* ta = dynamic_cast<Rml::ElementFormControlTextArea*>(by_id("fullcode"));
+    if (!ta) return;
+    const int caret =
+        Rml::StringUtilities::ConvertByteOffsetToCharacterOffset(text, (int)caret_byte);
+    ta->SetValue(text);
+    ta->Focus();
+    ta->SetSelectionRange(caret, caret);
+    g.code_dirty = true;
+    g.dirty = true;
+    refresh_highlight();
+    g.lsp.did_change(text);
+    g.symbols_stale = true;
+}
+
+/// The leading spaces of `line`, as a string.
+std::string leading_space(const std::string& line) {
+    size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) i++;
+    return line.substr(0, i);
+}
+
+/// `line` without leading or trailing blanks.
+std::string trimmed(const std::string& line) {
+    size_t a = 0, b = line.size();
+    while (a < b && std::isspace((unsigned char)line[a])) a++;
+    while (b > a && std::isspace((unsigned char)line[b - 1])) b--;
+    return line.substr(a, b - a);
+}
+
+/// The first word of `line`.
+std::string first_word(const std::string& line) {
+    const std::string t = trimmed(line);
+    const size_t sp = t.find_first_of(" \t(");
+    return sp == std::string::npos ? t : t.substr(0, sp);
+}
+
+/// Whether a new line after `line` should be indented one level further.
+///
+/// A few words and a shape, not a parser: the editor has no business deciding
+/// what the language means, and a guess that is occasionally one level out is
+/// corrected with Tab. What it must never do is indent after an ordinary
+/// statement, which is why the one-line forms are excluded by hand.
+bool opens_block(const std::string& line) {
+    const std::string t = trimmed(line);
+    if (t.empty() || t[0] == '#') return false;
+    const std::string w = first_word(t);
+
+    // A trailing `end` closes whatever the line opened, all on one line.
+    if (t.size() >= 3 && t.compare(t.size() - 3, 3, "end") == 0) return false;
+
+    // `if C then A else B` is the ternary and `STMT if COND` the one-line
+    // guard; neither opens anything. A block `if` has no `then` on its line.
+    if (w == "if") return t.find(" then ") == std::string::npos;
+    if (w == "for" || w == "while" || w == "repeat" || w == "match" || w == "when" ||
+        w == "else" || w == "otherwise" || w == "sub" || w == "form" || w == "record" ||
+        w == "enum" || w == "try") {
+        return true;
+    }
+    // A one-line guard puts the keyword in the middle: `call f() if ready`.
+    if (t.find(" if ") != std::string::npos) return false;
+
+    // A component block inside a form is `<type> <name>` and nothing else —
+    // no `=`, no call. `use ui` and `module m` share that shape and open
+    // nothing, so they are named rather than guessed at.
+    if (w == "use" || w == "module" || w == "const" || w == "var" || w == "let" ||
+        w == "call" || w == "return" || w == "defer" || w == "assert" || w == "check" ||
+        w == "dll" || w == "on" || w == "end") {
+        return false;
+    }
+    if (t.find('=') != std::string::npos || t.find('(') != std::string::npos) return false;
+    // Exactly two words.
+    const size_t sp = t.find(' ');
+    if (sp == std::string::npos) return false;
+    return t.find(' ', sp + 1) == std::string::npos && !t.substr(sp + 1).empty();
+}
+
+/// Enter, with the indentation the new line should start on.
+///
+/// This inserts the newline itself rather than letting the control do it: the
+/// platform sends a Return keydown *and* a '\n' textinput, and doing half the
+/// work in each is how a line ends up with two newlines or none.
+void newline_with_indent() {
+    auto* ta = dynamic_cast<Rml::ElementFormControlTextArea*>(by_id("fullcode"));
+    int line = 0, col = 0;
+    if (!ta || !caret_position(line, col)) return;
+    std::string text = ta->GetValue();
+    const std::string cur = line_text(text, line);
+    std::string indent = leading_space(cur);
+    if (opens_block(cur)) indent += std::string(INDENT, ' ');
+
+    // Only what is to the left of the caret decides the indent; splitting a
+    // line in the middle keeps the tail, it does not re-indent it.
+    const size_t at = byte_offset(text, line, col);
+    const std::string insert = "\n" + indent;
+    text.insert(at, insert);
+    set_editor_text(text, at + insert.size());
+}
+
+/// Tab and Shift+Tab. With a selection spanning lines, every line in it moves;
+/// otherwise Tab pads to the next stop and Shift+Tab takes one level off the
+/// front of the line, wherever the caret happens to be sitting on it.
+void indent_selection(bool out) {
+    auto* ta = dynamic_cast<Rml::ElementFormControlTextArea*>(by_id("fullcode"));
+    if (!ta) return;
+    std::string text = ta->GetValue();
+    int start = 0, end = 0;
+    Rml::String selected;
+    ta->GetSelection(&start, &end, &selected);
+    const size_t from_b =
+        (size_t)Rml::StringUtilities::ConvertCharacterOffsetToByteOffset(text, start);
+    const size_t to_b = (size_t)Rml::StringUtilities::ConvertCharacterOffsetToByteOffset(text, end);
+
+    int line = 0, col = 0;
+    if (!caret_position(line, col)) return;
+
+    // The single-caret case: pad to the next stop, or pull one level off.
+    if (from_b == to_b && !out) {
+        const size_t at = byte_offset(text, line, col);
+        const int pad = INDENT - (col % INDENT);
+        text.insert(at, std::string((size_t)(pad ? pad : INDENT), ' '));
+        set_editor_text(text, at + (size_t)(pad ? pad : INDENT));
+        return;
+    }
+
+    // Which lines the selection touches. A selection ending exactly at a line
+    // start does not include that line — the user selected up to it, not it.
+    int first = 0, last = 0, c = 0;
+    {
+        std::string t2 = text;
+        int l = 0;
+        size_t i = 0;
+        for (; i < t2.size() && i < from_b; i++) if (t2[i] == '\n') l++;
+        first = l;
+        for (; i < t2.size() && i < to_b; i++) if (t2[i] == '\n') l++;
+        last = l;
+        if (to_b > from_b && to_b <= t2.size() && to_b > 0 && t2[to_b - 1] == '\n' && last > first) {
+            last--;
+        }
+        (void)c;
+    }
+    if (from_b == to_b) first = last = line;
+
+    size_t moved_first = 0;
+    for (int l = first; l <= last; l++) {
+        const size_t ls = byte_offset(text, l, 0);
+        if (ls > text.size()) break;
+        if (out) {
+            size_t n = 0;
+            while (n < (size_t)INDENT && ls + n < text.size() && text[ls + n] == ' ') n++;
+            text.erase(ls, n);
+        } else {
+            text.insert(ls, std::string(INDENT, ' '));
+        }
+        if (l == first) moved_first = ls;
+    }
+    (void)moved_first;
+    // The caret stays on its line, shifted by what that line gained or lost.
+    const size_t ls = byte_offset(text, line, 0);
+    const std::string now = line_text(text, line);
+    size_t want = (size_t)col + (size_t)(out ? -INDENT : INDENT);
+    if ((int)want < 0 || out) want = (size_t)std::max(0, col - INDENT);
+    if (want > now.size()) want = now.size();
+    set_editor_text(text, ls + want);
+}
+
 /* --- the handler gesture ---------------------------------------------------- */
 
 /// Parameter names from types, the way the language server and the checker
@@ -4681,7 +4860,28 @@ struct KeyGate : Rml::EventListener {
             ev.StopImmediatePropagation();
             return;
         }
-        if (!g.complete_open) return;
+        // Tab and Return with no popup open: the editor's own, not the
+        // control's. RmlUi's textarea does not indent — Tab moves the focus
+        // out of the editor entirely — and its Return starts the new line at
+        // column one whatever the line above was indented to.
+        //
+        // The keydown is stopped and the '\n' the platform sends after a
+        // Return is swallowed, because the text was already inserted here;
+        // letting the control add its own would give the line two newlines.
+        if (!g.complete_open) {
+            if (key == Rml::Input::KI_TAB && !ctrl) {
+                indent_selection(shift);
+                ev.StopImmediatePropagation();
+                return;
+            }
+            if ((key == Rml::Input::KI_RETURN || key == Rml::Input::KI_NUMPADENTER) && !ctrl) {
+                newline_with_indent();
+                g.swallow_text = "\n";
+                ev.StopImmediatePropagation();
+                return;
+            }
+            return;
+        }
         switch (key) {
         case Rml::Input::KI_UP:   move_completion(-1); break;
         case Rml::Input::KI_DOWN: move_completion(1); break;

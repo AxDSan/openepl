@@ -391,6 +391,38 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("completion: Escape closes it", has(out, "open=0 offered=0"));
         check("completion: neither key typed anything", has(out, "buf 40:   call end"));
     }
+    // Indentation. With no popup open, Tab belongs to the editor: RmlUi's
+    // textarea would move the focus out of it instead, and Return would start
+    // the new line at column one however far the line above was indented.
+    {
+        // Line 38 is `sub on_ok_click`; the caret at its end.
+        const std::string out =
+            session(designer, openepl, form,
+                    "view:code;goto:38,16;key:enter;bufline:39;key:tab;bufline:39;"
+                    "key:shift-tab;bufline:39");
+        check("indent: Tab stays in the editor rather than moving the focus",
+              has(out, "key: tab focus=fullcode"));
+        check("indent: Return opens the block one level in", has(out, "buf 39:   \n"));
+        check("indent: Tab adds a level", has(out, "buf 39:     \n"));
+        check("indent: Shift+Tab takes it off again",
+              out.find("buf 39:   \n", out.find("buf 39:     \n")) != std::string::npos);
+    }
+    // Return after an ordinary statement keeps that statement's indentation
+    // rather than adding to it — the block rule must not fire on every line.
+    {
+        // Line 39 is `  call print_text("button clicked!")`, 36 characters, so
+        // column 37 is past its end.
+        const std::string out =
+            session(designer, openepl, form, "view:code;goto:39,37;key:enter;bufline:40");
+        check("indent: Return copies an ordinary line's indentation",
+              has(out, "buf 40:   \n"));
+        // Split mid-line and the tail moves down to that same indent; the
+        // block rule must not fire on a statement.
+        const std::string mid =
+            session(designer, openepl, form, "view:code;goto:39,20;key:enter;bufline:40");
+        check("indent: a mid-line split indents the tail, it does not open a block",
+              has(mid, "buf 40:   button clicked!\")\n"));
+    }
     // The RAD loop from the keyboard: `on ` offers the events, the handler
     // position offers a subroutine that does not exist yet, and accepting it
     // writes the subroutine with the event's parameters.
