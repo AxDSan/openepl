@@ -142,6 +142,33 @@ inline std::string base_styles() {
     s += "#tag{font-size:13px;color:";
     s += TEXT_MUTED;
     s += ";margin-top:6px}";
+    // RmlUi ships no default scrollbar size, and an unstyled slider is laid
+    // out over the whole of the element that owns it — where it swallows every
+    // click that should have reached the content underneath. The IDE's
+    // stylesheet has said so since the code editor could not be focused; the
+    // welcome screen and the path browser load their own documents and never
+    // got the same rules, so the browser listed files that could not be
+    // opened. Sizing them is not cosmetic.
+    s += "scrollbarvertical{width:10px;background-color:";
+    s += CANVAS;
+    s += "}";
+    s += "scrollbarhorizontal{height:10px;background-color:";
+    s += CANVAS;
+    s += "}";
+    s += "scrollbarvertical slidertrack,scrollbarhorizontal slidertrack{background-color:";
+    s += CANVAS;
+    s += "}";
+    s += "scrollbarvertical sliderbar{width:10px;min-height:24px;border-radius:5px;"
+         "background-color:#c9d1d9}";
+    s += "scrollbarhorizontal sliderbar{height:10px;min-width:24px;border-radius:5px;"
+         "background-color:#c9d1d9}";
+    s += "scrollbarvertical sliderbar:hover,scrollbarhorizontal sliderbar:hover{"
+         "background-color:";
+    s += TEXT_MUTED;
+    s += "}";
+    // No stepper arrows: undersized ones are the other way a scrollbar becomes
+    // a click trap.
+    s += "sliderarrowdec,sliderarrowinc{width:0px;height:0px}";
     return s;
 }
 

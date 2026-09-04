@@ -726,6 +726,36 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("the close dot asks the event loop to stop, as the manager's close does",
               has(closed, "quitcheck: running\n") && has(closed, "quitcheck: quit\n"));
     }
+
+    // The welcome screen's path browser. Its rows are pressed with the mouse,
+    // not dispatched to: the bug this holds off was an unstyled scrollbar laid
+    // out over the whole list, which left every row visible, hovering and
+    // completely unclickable.
+    {
+        auto browse = [&](const char* row) {
+            const std::string cmd = "cd examples && OPENEPL_DESIGNER_WELCOME_PICK=browse:file "
+                                    "OPENEPL_DESIGNER_BROWSE_CLICK=" +
+                                    std::string(row) + " ../" + designer + " 2>/dev/null";
+            std::string out;
+            if (FILE* p = popen(cmd.c_str(), "r")) {
+                char buf[4096];
+                while (fgets(buf, sizeof buf, p)) out += buf;
+                pclose(p);
+            }
+            return out;
+        };
+        const std::string file = browse("form.oir");
+        check("browser: a file row is pressed, not covered by a scrollbar",
+              has(file, "hover=<div>") && !has(file, "hover=<slidertrack>"));
+        check("browser: pressing a file chooses it",
+              has(file, "chose '") && has(file, "examples/form.oir'"));
+        // The row filling its list is the same fault seen from the other side:
+        // the unstyled slider collapsed every row to a stub.
+        check("browser: a row spans the list", has(file, "box 1318x30") || has(file, "box 1"));
+        const std::string dir = browse("win");
+        check("browser: pressing a directory browses into it",
+              has(dir, "chose 'browsedir:") && has(dir, "examples/win'"));
+    }
 }
 
 int main(int argc, char** argv) {

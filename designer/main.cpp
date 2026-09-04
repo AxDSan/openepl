@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <functional>
 #include <fstream>
 #include <fcntl.h>
 #include <time.h>
@@ -6243,6 +6244,53 @@ std::string run_welcome(const std::string& family) {
                     Backend::PresentFrame();
                 }
                 dump_to(std::getenv("OPENEPL_DESIGNER_BROWSE_DUMP"));
+                // Click a row, the way a hand does: find it by the attribute
+                // that carries its meaning, press in the middle of it, and
+                // report what the listener made of it. The browser's rows are
+                // the one part of the welcome screen no test had ever pressed.
+                if (const char* row = std::getenv("OPENEPL_DESIGNER_BROWSE_CLICK")) {
+                    const std::string wanted(row);
+                    Rml::Element* hit = nullptr;
+                    std::function<void(Rml::Element*)> walk = [&](Rml::Element* e) {
+                        if (hit || !e) return;
+                        for (const char* attr : {"oe-open", "oe-browse-dir"}) {
+                            if (e->HasAttribute(attr) &&
+                                e->GetAttribute<Rml::String>(attr, "").find(wanted) !=
+                                    Rml::String::npos) {
+                                hit = e;
+                                return;
+                            }
+                        }
+                        for (int i = 0; i < e->GetNumChildren(); i++) walk(e->GetChild(i));
+                    };
+                    walk(doc);
+                    if (!hit) {
+                        std::printf("browseclick: no row matching %s\n", wanted.c_str());
+                    } else {
+                        const auto at = hit->GetAbsoluteOffset(Rml::BoxArea::Border);
+                        const auto sz = hit->GetBox().GetSize(Rml::BoxArea::Border);
+                        const int mx = (int)(at.x + sz.x / 2), my = (int)(at.y + sz.y / 2);
+                        g.context->ProcessMouseMove(mx, my, 0);
+                        g.context->Update();
+                        const Rml::Element* hov = g.context->GetHoverElement();
+                        g.context->ProcessMouseButtonDown(0, 0);
+                        g.context->ProcessMouseButtonUp(0, 0);
+                        g.context->Update();
+                        std::printf("browseclick: row '%s' box %.0fx%.0f at %.0f,%.0f "
+                                    "press %d,%d hover=<%s> chose '%s'\n",
+                                    hit->GetAttribute<Rml::String>("oe-open", "-").c_str(), sz.x,
+                                    sz.y, at.x, at.y, mx, my,
+                                    hov ? hov->GetTagName().c_str() : "none", chosen.c_str());
+                        // The same click sent straight to the row, which tells
+                        // the two failures apart: a listener that never sees a
+                        // click, or a click that never reaches the row.
+                        chosen.clear();
+                        hit->DispatchEvent(Rml::EventId::Click, Rml::Dictionary());
+                        g.context->Update();
+                        std::printf("browseclick: dispatched direct, chose '%s'\n", chosen.c_str());
+                    }
+                    std::fflush(stdout);
+                }
                 doc->Close();
             }
             g.context->Update();
