@@ -35,11 +35,13 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `abs_int` | int | int |
 | `append` | array, element | array |
 | `ask` | text | text |
+| `assert_failed` | text | — |
 | `bytes_at` | bytes, int | int |
 | `bytes_count` | bytes | int |
 | `bytes_from_text` | text | bytes |
 | `bytes_new` | int | bytes |
 | `bytes_set` | bytes, int, int | — |
+| `bytes_slice` | bytes, int, int | bytes |
 | `ceil` | double | double |
 | `concat` | text, text | text |
 | `contains` | array, element | bool |
@@ -113,6 +115,7 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `reverse` | text | text |
 | `round` | double | double |
 | `sin` | double | double |
+| `slice` | array, int, int | array |
 | `sort` | array | — |
 | `split` | text, text | text[] |
 | `sqrt` | double | double |

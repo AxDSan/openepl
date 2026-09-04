@@ -64,14 +64,35 @@ not breakpoints, stepping or variable inspection.
 
 ## The language
 
-- No user-defined types beyond `record`: there is no enum, no interface and
-  no way to attach a subroutine to a type.
+- No user-defined types beyond `record`: an `enum` names a run of `int`s
+  rather than making a type of its own — a parameter typed by one takes any
+  `int` — and there is no interface and no way to attach a subroutine to a
+  type.
+- `match` compares, it does not destructure: a `when` names values to test the
+  subject against with `=`, and there is no binding a name out of the value and
+  no matching on a record's shape.
+- An optional is a **local's** type, and only a local's. A `T?` is a value with
+  a hidden truth beside it saying whether the value is there, and a parameter,
+  a return type, a list element and a record field each have room for one thing
+  rather than two — so `sub f(v: text?)` is refused where it is written. Unwrap
+  at the edge and pass a `T`; a subroutine that may have no answer still
+  returns the answer plus the sentinel it documents.
+- `check` hands its caller the sentinel a failing command of that type already
+  returns — `0`, `""`, `false`, `ptr_null()`, or nothing at all. A subroutine
+  returning a list, a dictionary or a record has no such sentinel, so `check`
+  is refused there and the `if last_error_code() <> 0` is written out. For a
+  related reason `defer` takes one simple statement and not a block: "the end
+  of the block" is the whole of what it means.
 - A dictionary's keys are text, and only text; asking with an `int` is a
   compile error.
 - Local variables are visible for the whole subroutine, not just the block
   they were declared in. A `for` loop's variable — and a `for each`'s element,
   value and index bindings — follow the same rule, so two loops in one
-  subroutine need different binding names.
+  subroutine need different binding names. There are two ways out: a
+  `repeat N times` has no counter to name, and a list built by a loop —
+  `[n * 2 for each n in xs]` — binds a name that does not outlive its brackets,
+  so two of those may each bind `n`. Neither may shadow a local already in
+  scope.
 - An indirect call — `call through fp(a, b): int` — is checked for the two
   things that can be known: the callee is a `ptr`, and every argument has a
   shape C can be handed. Nothing checks the signature *against the function*,
@@ -91,6 +112,14 @@ not breakpoints, stepping or variable inspection.
   properties can be set again from code, but the form's own cannot — the form
   is not a component — so a window title cannot be computed or translated at
   start-up.
+- A library command takes its arguments in order. A `sub` and a `dll` declare
+  parameter names, so `connect(host: "example.com")` reaches them; a command's
+  library metadata carries types only, and a named argument to one is refused
+  rather than matched by guesswork.
+- A c-record has no value form: it accepts a record literal where it is
+  declared (`var r: rect = rect{left: 10}`, which is the zeroed declaration
+  plus those field writes) and nowhere else, and it has no `{...base}` update,
+  because there is nothing to copy from.
 - A support library cannot take or return a record or a dictionary. The ABI
   has a tag for each, and core's `dict_*` commands use it, but the layouts are
   the runtime's own; a library sees `int`, `int64`, `double`, `bool`, `text`,

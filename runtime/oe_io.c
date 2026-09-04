@@ -1,5 +1,6 @@
 /* Core commands: console output (slot ABI). */
 #include <stdio.h>
+#include <stdlib.h>
 #include "openepl_core.h"
 
 void oe_print_int(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
@@ -77,4 +78,24 @@ void oe_ask(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
      * question appears after the answer is typed. */
     fflush(stdout);
     oe_ret_text(ret, read_line_into_text());
+}
+
+/* --- assert ------------------------------------------------------------ */
+
+/* assert_failed(text message) : what an `assert` whose condition was false
+ * runs.  It prints and stops, and it stops with a *failing* exit status,
+ * because an assertion that fired is a broken program and a script that runs
+ * one has to be able to tell.
+ *
+ * On stderr rather than stdout: a program whose output is being piped
+ * somewhere should not have that output silently gain a diagnostic line.  The
+ * flush is because stdout may hold buffered output the message is about — the
+ * exit below would discard the ordering otherwise. */
+void oe_assert_failed(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
+    (void)ret; (void)argc;
+    const char *m = oe_arg_text(argv, 0);
+    fflush(stdout);
+    fprintf(stderr, "%s\n", m ? m : "assertion failed");
+    fflush(stderr);
+    exit(1);
 }

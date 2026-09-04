@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use openepl_backend::lower_module;
 use openepl_ir::registry::Registry;
 use openepl_ir::validate::{validate_with, Hints};
-use openepl_ir::{parse, Module, Target};
+use openepl_ir::{parse_with, Module, ParseOptions, Target};
 
 fn main() {
     // Die quietly when a reader goes away, the way every other command-line
@@ -344,7 +344,7 @@ fn cmd_emit(rest: &[String]) -> i32 {
             return 2;
         }
     };
-    match compile_with(&io.input, io.target, io.os, false) {
+    match compile_with(&io.input, io.target, io.os, false, io.release) {
         Ok((ll, _plan, _t, _m)) => {
             print!("{ll}");
             0
@@ -699,7 +699,7 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
             return 2;
         }
     }
-    let (mut ll, mut plan, target, module) = match compile(&input, io.target, io.os) {
+    let (mut ll, mut plan, target, module) = match compile(&input, io.target, io.os, io.release) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("openepl: {e}");
@@ -803,8 +803,9 @@ fn compile(
     input: &Path,
     target_override: Option<Target>,
     os: Os,
+    release: bool,
 ) -> Result<(String, libload::LibPlan, Target, Module), String> {
-    compile_with(input, target_override, os, true)
+    compile_with(input, target_override, os, true, release)
 }
 
 /// `require_impl` is false when the caller only wants the IR: emitting it
@@ -816,10 +817,15 @@ fn compile_with(
     target_override: Option<Target>,
     os: Os,
     require_impl: bool,
+    release: bool,
 ) -> Result<(String, libload::LibPlan, Target, Module), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
-    let mut module = parse(&src).map_err(|e| e.to_string())?;
+    // The module that is *checked* always carries its asserts, whatever the
+    // build: a release build has to refuse every mistake a debug build refuses,
+    // and an assert whose condition is nonsense is one of them. Only what is
+    // *lowered* differs — see the second parse below.
+    let mut module = parse_with(&src, ParseOptions::default()).map_err(|e| e.to_string())?;
     // An explicit --target wins over the module's declaration: the same source
     // should be buildable as a program or a library without editing it.
     if let Some(t) = target_override {
@@ -873,6 +879,21 @@ fn compile_with(
             errs.len(),
             input.display()
         ));
+    }
+    // `--release` is the one build flag the *language* sees: it drops each
+    // `assert` where it is written, so a release binary carries no check, no
+    // branch and no message. The dropping is done by parsing the source a
+    // second time — parsing is text, and paying for it twice is far cheaper
+    // than a release build that could compile something the debug build
+    // rejected. Every other reader of a file — `inspect`, the language server,
+    // the designer — never gets here: they read the program as written.
+    if release {
+        let mut stripped =
+            parse_with(&src, ParseOptions { asserts: false }).map_err(|e| e.to_string())?;
+        if let Some(t) = target_override {
+            stripped.target = Some(t);
+        }
+        module = stripped;
     }
     let ll = lower_module(&module, &plan.registry).map_err(|e| e.to_string())?;
     Ok((ll, plan, target, module))

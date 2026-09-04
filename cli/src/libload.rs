@@ -583,7 +583,7 @@ unsafe fn register_commands(
             })?);
         }
 
-        if !registry.insert(cmd_name.clone(), Signature { params, ret }, symbol) {
+        if !registry.insert(cmd_name.clone(), Signature::simple(params, ret), symbol) {
             return Err(format!(
                 "command `{cmd_name}` (from `{lib}`) collides with an already-registered command"
             ));

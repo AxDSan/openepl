@@ -73,7 +73,7 @@ impl ComponentDesc {
 }
 
 /// One registered command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Command {
     pub sig: Signature,
     /// The runtime function symbol the backend emits a call to (see `runtime/`).
@@ -429,10 +429,7 @@ impl Registry {
                 |name: &'static str, symbol: &'static str, params: &[Ty], ret: Option<Ty>| {
                     r.insert(
                         name,
-                        Signature {
-                            params: params.to_vec(),
-                            ret,
-                        },
+                        Signature::simple(params.to_vec(), ret),
                         symbol,
                     );
                 };
@@ -445,6 +442,8 @@ impl Registry {
             cmd("read_line", "oe_read_line", &[], Some(Text));
             cmd("input_ended", "oe_input_ended", &[], Some(Bool));
             cmd("ask", "oe_ask", &[Text], Some(Text));
+            // What a failed `assert` runs: print the message and stop, failing.
+            cmd("assert_failed", "oe_assert_failed", &[Text], None);
 
             // --- Errors ------------------------------------------------------
             cmd("last_error_code", "oe_last_error_code", &[], Some(Int));
@@ -529,6 +528,11 @@ impl Registry {
                 &[Text, Text],
                 Some(Array(crate::Elem::Text)),
             );
+            // `slice(xs, start, count)` is what `xs[a..b]` becomes. It is a
+            // command in its own right so the shorthand adds no semantics the
+            // language did not already have, and so a computed run can be taken
+            // without one.
+            cmd("slice", "oe_ary_slice", &[AnyArray, Int, Int], Some(AnyArray));
 
             // --- Byte-sets ---------------------------------------------------
             cmd("bytes_new", "oe_bin_make", &[Int], Some(Bytes));
@@ -537,6 +541,7 @@ impl Registry {
             cmd("bytes_set", "oe_bin_put", &[Bytes, Int, Int], None);
             cmd("bytes_from_text", "oe_bin_from_text", &[Text], Some(Bytes));
             cmd("text_from_bytes", "oe_bin_to_text", &[Bytes], Some(Text));
+            cmd("bytes_slice", "oe_bin_slice", &[Bytes, Int, Int], Some(Bytes));
 
             // --- Dictionaries ------------------------------------------------
             // Declared over `AnyDict`/`AnyElem` for the reason the array

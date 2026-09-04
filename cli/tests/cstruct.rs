@@ -111,8 +111,11 @@ fn c_record_rejections_are_build_errors() {
     let dir = scratch("reject");
     // Each snippet must FAIL to build, with a message that names the rule.
     let cases: &[(&str, &str)] = &[
+        // A c-record local takes a record literal of its own type (0.9.0: it
+        // becomes the zeroed declaration plus the field writes) and nothing
+        // else — there is still no value to give it.
         (
-            "module m\nrecord R is c\n  x: int\nend\nsub main\n  var r: R = R(x: 1)\nend\n",
+            "module m\nrecord R is c\n  x: int\nend\nsub main\n  var r: R = 1\nend\n",
             "no initializer",
         ),
         (

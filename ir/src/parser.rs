@@ -6,9 +6,13 @@
 //! item    := sub
 //! sub     := "sub" IDENT params? (":" type)? conv? NEWLINE stmt* "end" NEWLINE
 //! conv    := "stdcall" | "cdecl" | "system"
-//! params  := "(" (IDENT ":" type ("," IDENT ":" type)*)? ")"
+//! params  := "(" (param ("," param)*)? ")"
+//! param   := IDENT ":" type ("=" expr)?   -- a default; only the trailing
+//!   -- parameters may have one, and a `dll` may have none.
 //! stmt    := let | assign | call | indirect | return | for | break | continue
-//!          | incdec
+//!          | incdec | check
+//! check   := "check" call NEWLINE   -- and `let x: T = check EXPR`; both expand
+//!   -- to the statement plus `if last_error_code() <> 0 <return> end`.
 //!   -- a simple statement (call, assign, return, incdec) may carry a one-line
 //!   -- suffix `STMT "if" expr NEWLINE`, sugar for `if expr NEWLINE STMT ... end`.
 //! assign  := lvalue asgop expr NEWLINE
@@ -17,15 +21,24 @@
 //! incdec  := ("increment" | "decrement") lvalue NEWLINE  -- `lvalue = lvalue ± 1`
 //! lvalue  := IDENT ("[" expr "]" | "." IDENT)*
 //! return  := "return" expr? NEWLINE
-//! let     := "let" IDENT ":" type "=" expr NEWLINE
-//! call    := "call" IDENT "(" (expr ("," expr)*)? ")" NEWLINE
+//! let     := ("let" | "var") IDENT (":" type)? ("=" expr)? NEWLINE
+//!   -- the type may be left out when the value has one; the value may be left
+//!   -- out only for a c-record `var`, which starts zeroed.
+//! call    := "call" IDENT "(" args? ")" NEWLINE
+//! args    := arg ("," arg)* ","?
+//! arg     := (IDENT ":")? expr   -- a named argument goes to the parameter of
+//!   -- that name; the named ones come after the positional ones.
 //! indirect:= "call" "through" target "(" (expr ("," expr)*)? ")"
 //!            (":" type)? conv? NEWLINE
 //! target  := "(" expr ")" | IDENT ("." IDENT)? ("[" expr "]" | "." IDENT)*
 //! record  := "record" IDENT NEWLINE (IDENT ":" type NEWLINE)+ "end" NEWLINE
 //! type    := ("int" | "int64" | "double" | "text" | "bool" | "bytes" | IDENT)
 //!            ("[" "]" | "{" "}")?
-//! expr    := or   -- see the precedence table below
+//! expr    := ifexpr | or ("otherwise" or)?
+//!   -- `otherwise` yields its right side when the left one's call failed;
+//!   -- one per expression.
+//! ifexpr  := "if" or "then" expr "else" expr   -- the conditional VALUE; a
+//!   -- statement beginning with `if` is always the block form.
 //! or      := and ("or" and)*
 //! and     := not_ ("and" not_)*
 //! not_    := "not" not_ | cmp
@@ -39,7 +52,8 @@
 //! sum     := term (("+" | "-") term)*
 //! term    := factor (("*" | "/" | "%") factor)*
 //! factor  := ("-" | "bnot")? postfix
-//! postfix := primary ("[" expr "]" | "." IDENT)*
+//! postfix := primary ("[" expr "]" | "." IDENT | "." IDENT "(" args? ")")*
+//!   -- `x.f(a)` is `f(x, a)`; a `.` with no `(` stays a property/field read.
 //! primary := INT | BITS | FLOAT | STRING | list | dict | new | call | IDENT
 //!          | "(" expr ")" | indirect-expr
 //! indirect-expr := the `indirect` statement's shape without the NEWLINE, used
@@ -47,8 +61,14 @@
 //! list    := "[" (expr ("," expr)*)? "]"
 //! dict    := "{" (expr ":" expr ("," expr ":" expr)*)? "}"
 //! new     := IDENT "(" IDENT ":" expr ("," IDENT ":" expr)* ")"
-//! call    := IDENT "(" (expr ("," expr)*)? ")"
+//!          | IDENT "{" ("..."? ".." expr ",")? (IDENT ":" expr ("," IDENT ":" expr)*)? "}"
+//!   -- the brace form is the same record; with a leading `...base` (`..base`
+//!   -- is the same spelling) every field it does not name is copied from
+//!   -- `base`, which has to be a place.
+//! call    := IDENT "(" args? ")"
 //! ```
+
+use std::collections::HashMap;
 
 use crate::lexer::{lex, Spanned, Tok};
 use crate::sema::{bits_bare_type, bits_value};
@@ -69,16 +89,122 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 pub fn parse(src: &str) -> Result<Module, ParseError> {
+    parse_with(src, ParseOptions::default())
+}
+
+/// What a parse may leave out.
+///
+/// The one knob is `asserts`, and it exists because `assert` is the single
+/// construct whose *presence* is a build choice rather than a language one: a
+/// release build compiles the checks out entirely, and "entirely" has to mean
+/// no statement, not a branch on `false` that a later pass is trusted to
+/// remove. Everything else about the parse is identical either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOptions {
+    /// Whether `assert` produces a statement. `false` drops each one where it
+    /// is written — the condition is still parsed, so a release build refuses
+    /// a malformed `assert` exactly as a debug build does.
+    pub asserts: bool,
+}
+
+impl Default for ParseOptions {
+    /// Asserts on: every reader but a release build wants them, and the ones
+    /// that only *look* at a file — the language server, `inspect`, the
+    /// designer — must see the whole program.
+    fn default() -> ParseOptions {
+        ParseOptions { asserts: true }
+    }
+}
+
+pub fn parse_with(src: &str, opts: ParseOptions) -> Result<Module, ParseError> {
     let toks = lex(src).map_err(|e| ParseError {
         line: e.line,
         msg: e.msg,
     })?;
-    Parser { toks, pos: 0 }.module()
+    let enums = scan_enums(&toks);
+    Parser {
+        toks,
+        pos: 0,
+        pending: Vec::new(),
+        cur_ret: None,
+        in_sub: false,
+        enums,
+        hidden: 0,
+        opts,
+        lines: src.lines().map(|l| l.to_string()).collect(),
+    }
+    .module()
+}
+
+/// The enum names and members declared anywhere in the file, read off the token
+/// stream before the parse proper.
+///
+/// A pre-pass rather than a fact learnt as items are read, because `Colour.red`
+/// may be written in a subroutine above the `enum` that declares it — records
+/// may be declared after their use and an enum has no reason to be stricter.
+/// The shape demanded is exactly `enum NAME NEWLINE`, at the start of a line,
+/// so a variable called `enum` inside a body is not mistaken for a declaration.
+fn scan_enums(toks: &[Spanned]) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    for i in 0..toks.len() {
+        if !matches!(&toks[i].tok, Tok::Ident(w) if w == "enum") {
+            continue;
+        }
+        if i > 0 && !matches!(toks[i - 1].tok, Tok::Newline) {
+            continue;
+        }
+        let Some(Tok::Ident(name)) = toks.get(i + 1).map(|t| &t.tok) else {
+            continue;
+        };
+        if !matches!(toks.get(i + 2).map(|t| &t.tok), Some(Tok::Newline)) {
+            continue;
+        }
+        let mut members = Vec::new();
+        let mut j = i + 3;
+        while let Some(t) = toks.get(j) {
+            match &t.tok {
+                Tok::Ident(m) => members.push(m.clone()),
+                Tok::Comma | Tok::Newline => {}
+                _ => break,
+            }
+            j += 1;
+        }
+        out.insert(name.clone(), members);
+    }
+    out
 }
 
 struct Parser {
     toks: Vec<Spanned>,
     pos: usize,
+    /// Statements a desugar produced *after* the one being returned.
+    ///
+    /// A statement parser returns exactly one `Stmt`, and `check EXPR` needs
+    /// two — the call, then the guard that returns when it failed. Rather than
+    /// give every statement a vector it does not need, the extra ones are left
+    /// here and the two statement loops (`sub` and `block`) drain them straight
+    /// after the statement they belong to, which puts them in source order.
+    pending: Vec<Stmt>,
+    /// The return type of the subroutine being parsed, so `check` knows what
+    /// value its early `return` must carry. `None` inside a sub that returns
+    /// nothing, and meaningless unless `in_sub`.
+    cur_ret: Option<Ty>,
+    /// Whether a subroutine body is being parsed at all — `check` outside one
+    /// has no `return` to reach.
+    in_sub: bool,
+    /// Every `enum` in the file and its members, read before the parse — see
+    /// `scan_enums`. It is what lets `Colour.red` fold to the constant it names
+    /// and what lets `Colour` be written as a parameter type.
+    enums: HashMap<String, Vec<String>>,
+    /// How many hidden names have been minted, so two `repeat` loops in one
+    /// subroutine do not both declare the same counter. The names carry a `$`,
+    /// which no identifier can, so they cannot collide with a written one.
+    hidden: usize,
+    opts: ParseOptions,
+    /// The source, by line, for the message an `assert` with none of its own
+    /// carries: the condition as the author wrote it, sliced out by the
+    /// columns the tokens already record.
+    lines: Vec<String>,
 }
 
 /// A parsed assignment target. It holds enough to build both the expression a
@@ -219,13 +345,28 @@ fn unescape_braces(s: &str) -> String {
 /// every token must belong to the single expression: a leftover `:` is a format
 /// spec (reserved, not yet supported) and anything else is a syntax error,
 /// both said against the hole so they cannot mis-parse.
-fn parse_hole(text: &str, line: usize) -> Result<Expr, ParseError> {
+fn parse_hole(text: &str, line: usize, enums: &HashMap<String, Vec<String>>) -> Result<Expr, ParseError> {
     let shown = text.trim();
     let toks = lex(text).map_err(|e| ParseError {
         line,
         msg: format!("in the interpolation hole `{{{shown}}}`: {}", e.msg),
     })?;
-    let mut sub = Parser { toks, pos: 0 };
+    // A hole is one expression and nothing else: no statement can appear in it,
+    // so the statement-desugar state stays empty and `check` (which needs a
+    // subroutine to return from) is refused there.
+    let mut sub = Parser {
+        toks,
+        pos: 0,
+        pending: Vec::new(),
+        cur_ret: None,
+        in_sub: false,
+        // The enums the file declares, so `"{Colour.red}"` names the same
+        // constant inside a hole that it names outside one.
+        enums: enums.clone(),
+        hidden: 0,
+        opts: ParseOptions::default(),
+        lines: Vec::new(),
+    };
     let e = sub.expr().map_err(|err| ParseError {
         line,
         msg: format!("in the interpolation hole `{{{shown}}}`: {}", err.msg),
@@ -248,7 +389,7 @@ fn parse_hole(text: &str, line: usize) -> Result<Expr, ParseError> {
 /// Split a decoded literal into its interpolation pieces: literal chunks as
 /// `TextLit`, holes as `ToText`. Always yields at least one piece (the empty
 /// string is one empty `TextLit`), so the fold that follows never sees nothing.
-fn split_interp(s: &str, line: usize) -> Result<Vec<Expr>, ParseError> {
+fn split_interp(s: &str, line: usize, enums: &HashMap<String, Vec<String>>) -> Result<Vec<Expr>, ParseError> {
     let b = s.as_bytes();
     let n = b.len();
     let mut pieces: Vec<Expr> = Vec::new();
@@ -306,7 +447,7 @@ fn split_interp(s: &str, line: usize) -> Result<Vec<Expr>, ParseError> {
                             .into(),
                     });
                 }
-                let expr = parse_hole(hole, line)?;
+                let expr = parse_hole(hole, line, enums)?;
                 pieces.push(Expr::ToText {
                     value: Box::new(expr),
                     hole: hole.trim().to_string(),
@@ -335,8 +476,8 @@ fn split_interp(s: &str, line: usize) -> Result<Vec<Expr>, ParseError> {
 /// (only `{{`/`}}` unescaped); a string with holes becomes the left-folded
 /// concat chain — `concat(concat(chunk0, ToText(h1)), chunk2)` — that a hand
 /// written program would spell with `concat` and `int_to_text`.
-fn interpolate(s: &str, line: usize) -> Result<Expr, ParseError> {
-    let pieces = split_interp(s, line)?;
+fn interpolate(s: &str, line: usize, enums: &HashMap<String, Vec<String>>) -> Result<Expr, ParseError> {
+    let pieces = split_interp(s, line, enums)?;
     let mut it = pieces.into_iter();
     let mut acc = it.next().expect("split_interp yields at least one piece");
     for p in it {
@@ -497,6 +638,20 @@ impl Parser {
                 Tok::Ident(w) if w == "const" => {
                     items.push(Item::Const(self.const_def()?))
                 }
+                // `enum Colour` — a set of named ints. A SOFT keyword like the
+                // rest out here, and claimed only in the shape a declaration
+                // has: the word, a name, and the end of the line. A component
+                // called `enum something` is two identifiers on a line too, so
+                // the newline is what separates them.
+                Tok::Ident(w)
+                    if w == "enum"
+                        && matches!(self.peek_at(1), Tok::Ident(_))
+                        && matches!(self.peek_at(2), Tok::Newline) =>
+                {
+                    for c in self.enum_def()? {
+                        items.push(Item::Const(c));
+                    }
+                }
                 // `type id` at module level is a NON-VISUAL component — a timer,
                 // a server. It reads exactly as it does inside a form, because
                 // the only thing it lacks is a rectangle to be drawn in; the
@@ -532,7 +687,10 @@ impl Parser {
         let name = self.ident("subroutine name")?;
 
         // `sub name(a: int, b: text)`; `sub name()` is the same as `sub name`.
+        // A trailing parameter may carry `= EXPR`, the value a call that leaves
+        // it out gets.
         let mut params: Vec<(String, Ty)> = Vec::new();
+        let mut defaults: Vec<Option<Expr>> = Vec::new();
         if matches!(self.peek(), Tok::LParen) {
             self.bump();
             if !matches!(self.peek(), Tok::RParen) {
@@ -545,6 +703,26 @@ impl Parser {
                             "subroutine `{name}` declares parameter `{pname}` twice"
                         ));
                     }
+                    let default = if matches!(self.peek(), Tok::Eq) {
+                        self.bump();
+                        Some(self.expr()?)
+                    } else {
+                        None
+                    };
+                    // Only the tail may be optional: with a gap, `f(1, 2)` would
+                    // fill different slots depending on where the reader started
+                    // counting, and there is no spelling that says which.
+                    if default.is_none() {
+                        if let Some(i) = defaults.iter().position(|d| d.is_some()) {
+                            return self.err(format!(
+                                "subroutine `{name}`: parameter `{pname}` has no default but \
+                                 `{}` before it does — a default is only allowed on the last \
+                                 parameters",
+                                params[i].0
+                            ));
+                        }
+                    }
+                    defaults.push(default);
                     params.push((pname, pty));
                     match self.peek() {
                         Tok::Comma => {
@@ -580,6 +758,11 @@ impl Parser {
         let conv = self.call_conv_opt(&format!("subroutine `{name}`"))?;
         self.expect(&Tok::Newline, "newline after subroutine name")?;
 
+        // What `check` inside this body returns when the call it guards failed.
+        // Subs do not nest, so one slot is enough; it is restored to nothing on
+        // the way out so a `check` at module level is still refused.
+        self.cur_ret = ret;
+        self.in_sub = true;
         let mut body = Vec::new();
         loop {
             self.skip_newlines();
@@ -588,22 +771,19 @@ impl Parser {
                     self.bump();
                     break;
                 }
-                Tok::Let => body.push(self.stmt_let(false)?),
-                Tok::Var => body.push(self.stmt_let(true)?),
-                Tok::Call => body.push(self.stmt_call()?),
-                Tok::If => body.push(self.stmt_if()?),
-                Tok::While => body.push(self.stmt_while()?),
-                Tok::For => body.push(self.stmt_for()?),
-                Tok::Break => body.push(self.stmt_jump(true)?),
-                Tok::Continue => body.push(self.stmt_jump(false)?),
-                Tok::Return => body.push(self.stmt_return()?),
-                // Either `name = expr` or `component.property = expr`; one
-                // token of lookahead past the identifier tells them apart.
-                Tok::Ident(_) => body.push(self.stmt_ident()?),
                 Tok::Eof => return self.err("unexpected end of file inside `sub` (missing `end`)"),
-                other => return self.err(format!("expected statement or `end`, found {other:?}")),
+                _ => {
+                    if let Some(st) = self.statement()? {
+                        body.push(st);
+                    }
+                }
             }
+            // A desugar that produced a follow-on statement (a `check` guard)
+            // left it here; it belongs directly after the statement it guards.
+            body.extend(self.pending.drain(..));
         }
+        self.in_sub = false;
+        self.cur_ret = None;
         // Trailing newline after `end` is optional (EOF is fine).
         if matches!(self.peek(), Tok::Newline) {
             self.bump();
@@ -611,6 +791,7 @@ impl Parser {
         Ok(Sub {
             name,
             params,
+            defaults,
             ret,
             conv,
             line: sub_line,
@@ -651,6 +832,17 @@ impl Parser {
                 if params.iter().any(|(n, _)| *n == pname) {
                     return self.err(format!(
                         "foreign function `{name}` declares parameter `{pname}` twice"
+                    ));
+                }
+                // A default belongs to whoever wrote the body, and a `dll` has
+                // none: the C function on the other side decides what its
+                // arguments mean, and OpenEPL inventing a value for one it was
+                // not given would be a guess with someone else's memory.
+                if matches!(self.peek(), Tok::Eq) {
+                    return self.err(format!(
+                        "foreign function `{name}`: parameter `{pname}` cannot have a default \
+                         — a `dll` names a C function, which has no say in what a missing \
+                         argument means; write a `sub` that wraps it"
                     ));
                 }
                 params.push((pname, pty));
@@ -694,7 +886,9 @@ impl Parser {
             }
         }
         let library = match self.bump() {
-            Tok::Str(s) => s,
+            // A raw literal too: `from r"C:\\tools\\my.dll"` is the spelling a
+            // Windows path wants, and a library name has no holes to lose.
+            Tok::Str(s) | Tok::RawStr(s) => s,
             other => {
                 return self.err(format!(
                     "expected a library name in quotes after `from`, found {other:?}"
@@ -711,8 +905,8 @@ impl Parser {
         let symbol = if matches!(self.peek(), Tok::Ident(w) if w == "as") {
             self.bump();
             match self.bump() {
-                Tok::Str(s) if !s.is_empty() => Some(s),
-                Tok::Str(_) => {
+                Tok::Str(s) | Tok::RawStr(s) if !s.is_empty() => Some(s),
+                Tok::Str(_) | Tok::RawStr(_) => {
                     return self.err(format!(
                         "foreign function `{name}`: the `as` symbol name is empty"
                     ))
@@ -877,6 +1071,78 @@ impl Parser {
     }
 
     /// ```text
+    /// ```text
+    /// enum := "enum" IDENT NEWLINE (IDENT ("," IDENT)*  NEWLINE)+ "end" NEWLINE
+    /// ```
+    ///
+    /// A set of named whole numbers, and nothing more: each member becomes a
+    /// `const` named `Enum.member`, numbered from **1** in declaration order —
+    /// the same place every position in OpenEPL counts from, so the first
+    /// member of an enum and the first element of an array agree.
+    ///
+    /// The dotted name is why the members do not crowd the module's namespace:
+    /// no identifier can contain a `.`, so `Colour.red` can only ever be
+    /// reached by writing the enum's name, and two enums may both have a
+    /// `red`. `Colour.red` folds to its constant in `postfix_with`, and
+    /// `Colour` written as a type is `int` — an enum is a *name* for ints, not
+    /// a type of its own.
+    fn enum_def(&mut self) -> Result<Vec<ConstDef>, ParseError> {
+        let line = self.line();
+        self.bump(); // `enum`, a soft keyword consumed here
+        let name = self.ident("enum name")?;
+        self.expect(&Tok::Newline, "newline after the enum name")?;
+        let mut out: Vec<ConstDef> = Vec::new();
+        loop {
+            self.skip_newlines();
+            if matches!(self.peek(), Tok::End) {
+                self.bump();
+                break;
+            }
+            if matches!(self.peek(), Tok::Eof) {
+                return self.err(format!("unexpected end of file inside `enum {name}` (missing `end`)"));
+            }
+            let member_span = self.span_at(self.pos);
+            let member = self.ident("a member name")?;
+            if out.iter().any(|c| c.name == format!("{name}.{member}")) {
+                return self.err(format!("enum `{name}` declares `{member}` twice"));
+            }
+            // Numbered from 1, in declaration order.
+            let value = i64::try_from(out.len() + 1).expect("an enum this long cannot be written");
+            out.push(ConstDef {
+                name: format!("{name}.{member}"),
+                value: Expr::IntLit(value),
+                ty: Ty::Int,
+                line: member_span.line,
+                name_span: member_span,
+            });
+            match self.peek() {
+                // `red, green, blue` on one line, or one per line: a comma
+                // between members is a separator either way.
+                Tok::Comma => {
+                    self.bump();
+                }
+                Tok::Newline | Tok::End => {}
+                other => {
+                    return self.err(format!(
+                        "expected `,`, a newline or `end` after enum member `{member}`, \
+                         found {other:?}"
+                    ))
+                }
+            }
+        }
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        if out.is_empty() {
+            return Err(ParseError {
+                line,
+                msg: format!("enum `{name}` has no members"),
+            });
+        }
+        Ok(out)
+    }
+
+    /// ```text
     /// const := "const" IDENT "=" literal NEWLINE
     /// literal := "-"? (INT | FLOAT | STRING | "true" | "false")
     /// ```
@@ -930,7 +1196,7 @@ impl Parser {
                 (Expr::IntLit(n), if i32::try_from(n).is_ok() { Ty::Int } else { Ty::Int64 })
             }
             Tok::Float(v) => (Expr::DoubleLit(if negate { -v } else { v }), Ty::Double),
-            Tok::Str(_) | Tok::True | Tok::False if negate => {
+            Tok::Str(_) | Tok::RawStr(_) | Tok::True | Tok::False if negate => {
                 return self.err(format!(
                     "constant `{name}`: `-` may only precede a number"
                 ))
@@ -945,6 +1211,9 @@ impl Parser {
                 ))
             }
             Tok::Str(s) => (Expr::TextLit(unescape_braces(&s)), Ty::Text),
+            // A raw literal has no holes to refuse and no braces to unescape —
+            // its bytes are the constant.
+            Tok::RawStr(s) => (Expr::TextLit(s), Ty::Text),
             Tok::True => (Expr::BoolLit(true), Ty::Bool),
             Tok::False => (Expr::BoolLit(false), Ty::Bool),
             other => {
@@ -1210,9 +1479,49 @@ impl Parser {
     /// `int[]` reads as "ints" in the same left-to-right order the rest of a
     /// declaration does.
     fn type_keyword(&mut self) -> Result<Ty, ParseError> {
+        let t = self.type_inner()?;
+        if matches!(self.peek(), Tok::Question) {
+            return self.err(
+                "`?` marks a local that may hold no value, and only a local: an optional is a \
+                 value plus the hidden truth beside it, so it cannot cross into a parameter, a \
+                 return type, a list, a field or a module variable. Write `let v: T? = ...` \
+                 inside a subroutine and unwrap it there",
+            );
+        }
+        Ok(t)
+    }
+
+    /// The type in a `let` / `var` **inside a subroutine**, where a trailing `?`
+    /// is allowed: `let home: text? = env_get("HOME")`. Nowhere else accepts one
+    /// — see [`Ty::Optional`] for why.
+    fn local_type(&mut self) -> Result<Ty, ParseError> {
+        let base = self.type_inner()?;
+        if !matches!(self.peek(), Tok::Question) {
+            return Ok(base);
+        }
+        self.bump(); // `?`
+        match Elem::from_ty(base) {
+            Some(e) => Ok(Ty::Optional(e)),
+            None => self.err(format!(
+                "`{}?` is not a type — an optional holds one value (a number, a text, a truth \
+                 value or a record), and {} is not one of those",
+                base.as_str(),
+                base.as_str()
+            )),
+        }
+    }
+
+    fn type_inner(&mut self) -> Result<Ty, ParseError> {
         let base = match self.bump() {
             Tok::Ident(w) => match Ty::from_keyword(&w) {
                 Some(t) => t,
+                // An enum's name is a name for `int`s, so writing it as a type
+                // *is* writing `int`: a parameter typed `Colour` takes
+                // `Colour.red` and takes `1`, and every rule about ints — a
+                // comparison, arithmetic, crossing to C — applies unchanged.
+                // The alternative, a distinct type that coerces, would buy one
+                // diagnostic and cost a coercion rule in every checker.
+                None if self.enums.contains_key(&w) => Ty::Int,
                 // Any other word is a record type, by name. Whether a record
                 // with that name exists is the validator's question: a record
                 // may be declared after the subroutine that uses it, and a
@@ -1244,9 +1553,59 @@ impl Parser {
         }
     }
 
-    /// A statement starting with an identifier: assignment or property-set.
-    fn stmt_ident(&mut self) -> Result<Stmt, ParseError> {
+    /// A statement starting with an identifier: one of the soft-keyword
+    /// statements, an assignment, or a property-set.
+    fn stmt_ident(&mut self) -> Result<Option<Stmt>, ParseError> {
         let start = self.pos;
+        // The statement words that are soft keywords. Each is claimed only when
+        // what follows could not continue an assignment to a variable of that
+        // name — so `match = 1`, `repeat[0] = x`, `assert.text = "hi"` and
+        // `repeat mod= 2` all keep meaning what they always did. `repeat` is
+        // also a core command (`repeat("ab", 3)`), which is untouched: a bare
+        // call is spelled with `call`, so the word out here never was one.
+        if self.leads_stmt("match") {
+            return Ok(Some(self.stmt_match()?));
+        }
+        if self.leads_stmt("repeat") {
+            return Ok(Some(self.stmt_repeat()?));
+        }
+        if self.leads_stmt("assert") {
+            return self.stmt_assert();
+        }
+        if self.leads_stmt("defer") {
+            return Ok(Some(self.stmt_defer()?));
+        }
+        // `check file_write_text(p, s)` — run the call for its effect and leave
+        // the subroutine if it failed. The result is discarded, exactly as a
+        // `call` discards one.
+        if self.is_check_kw() {
+            self.bump(); // `check`
+            let e = self.expr()?;
+            let Expr::Call { cmd, args } = e else {
+                return self.err(
+                    "`check` on its own line guards a call — write `check name(...)`, or bind the \
+                     value with `let x: T = check name(...)`",
+                );
+            };
+            // Deliberately not `finish_simple`: a trailing one-line `if` would
+            // wrap the call alone and leave the guard running unconditionally,
+            // which would return on a failure the condition said to skip.
+            match self.peek() {
+                Tok::Newline => {
+                    self.bump();
+                }
+                Tok::Eof => {}
+                other => {
+                    return self.err(format!(
+                        "expected a newline after `check`, found {other:?}; a one-line `if` cannot \
+                         guard a `check`, because the propagation would not be guarded with it"
+                    ))
+                }
+            }
+            let stmt = self.finish(StmtKind::Call { cmd, args }, start);
+            self.pending.push(self.check_guard(start)?);
+            return Ok(Some(stmt));
+        }
         // `increment x` / `decrement x` are soft keywords: the word is the
         // statement only when a target name follows it. `increment = 5` (an
         // assignment to a variable named `increment`), `increment[0] = ...` and
@@ -1263,7 +1622,7 @@ impl Parser {
             let op = if up { BinOp::Add } else { BinOp::Sub };
             let value = Expr::Bin(op, Box::new(lv.read()), Box::new(Expr::IntLit(1)));
             let kind = lv.write(value);
-            return self.finish_simple(kind, start);
+            return self.finish_simple(kind, start).map(Some);
         }
         let name = self.ident("variable or component name")?;
         let lv = self.parse_lvalue(name)?;
@@ -1278,7 +1637,7 @@ impl Parser {
         let rhs = self.expr()?;
         let value = apply_assign_op(op, lv.read(), rhs);
         let kind = lv.write(value);
-        self.finish_simple(kind, start)
+        self.finish_simple(kind, start).map(Some)
     }
 
     /// Parse an assignment target, with the leading `name` already read: a bare
@@ -1292,6 +1651,17 @@ impl Parser {
             Tok::LBracket => {
                 self.bump();
                 let index = self.expr()?;
+                // `xs[a..b] = ...` — a slice is a value, not a place: it is a
+                // freshly built run, so assigning to it would write into
+                // something the program cannot reach afterwards. Said here
+                // rather than left as a stray `..` in an index.
+                if matches!(self.peek(), Tok::DotDot) {
+                    return self.err(
+                        "a slice `a..b` is a value, not a place — assign to one position \
+                         at a time, or build the new collection and assign that"
+                            .to_string(),
+                    );
+                }
                 self.expect(&Tok::RBracket, "`]` after the index")?;
                 // `xs[i][j]` / `xs[i].f`: more than one step is a path.
                 if matches!(self.peek(), Tok::Dot | Tok::LBracket) {
@@ -1344,6 +1714,17 @@ impl Parser {
                 Tok::LBracket => {
                     self.bump();
                     let index = self.expr()?;
+                    // `xs[a..b] = ...` — a slice is a value, not a place: it is a
+                    // freshly built run, so assigning to it would write into
+                    // something the program cannot reach afterwards. Said here
+                    // rather than left as a stray `..` in an index.
+                    if matches!(self.peek(), Tok::DotDot) {
+                        return self.err(
+                            "a slice `a..b` is a value, not a place — assign to one position \
+                             at a time, or build the new collection and assign that"
+                                .to_string(),
+                        );
+                    }
                     self.expect(&Tok::RBracket, "`]` after the index")?;
                     place = Expr::Index {
                         base: Box::new(place),
@@ -1416,6 +1797,403 @@ impl Parser {
         Ok(self.finish(kind, start))
     }
 
+    /// The words that are operators when they follow a complete operand.
+    ///
+    /// `check` is claimed only when an identifier follows it, and one of these
+    /// following it means the `check` was itself an operand — `check band mask`
+    /// is a bitwise-and of a variable named `check`, and it must stay one.
+    const INFIX_WORDS: &'static [&'static str] = &[
+        "band", "bor", "bxor", "shl", "shr", "ushr", "in", "otherwise", "then", "mod", "to",
+        "step", "at", "each", "of", "from", "as",
+    ];
+
+    /// Whether the cursor is on `check` used as the propagation keyword.
+    ///
+    /// A soft keyword: it means this only when a *name* follows, which is what
+    /// `check <call>` always looks like and what an expression starting with a
+    /// variable called `check` never does — `check = 1`, `check + 1`,
+    /// `check(1)` and `check[0]` all keep their old meaning.
+    fn is_check_kw(&self) -> bool {
+        if self.word() != Some("check") {
+            return false;
+        }
+        match self.peek_at(1) {
+            Tok::Ident(w) => !Self::INFIX_WORDS.contains(&w.as_str()),
+            _ => false,
+        }
+    }
+
+    /// The guard `check` expands to: `if last_error_code() <> 0 <return> end`.
+    ///
+    /// This is the whole of the feature — the value itself is bound by the
+    /// statement that carries it, and this is the four lines a program writes
+    /// by hand today, emitted straight after. `start` is the `check` token, so
+    /// a diagnostic about the synthesized `return` points at what was written.
+    fn check_guard(&self, start: usize) -> Result<Stmt, ParseError> {
+        if !self.in_sub {
+            return Err(ParseError {
+                line: self.toks[start].line,
+                msg: "`check` returns from the subroutine it is in, and there is none here"
+                    .to_string(),
+            });
+        }
+        // The value the early `return` carries: the sentinel a failing command
+        // of that type already returns, so a caller that checks the result sees
+        // the same failure it would have seen from the call itself.
+        let value = match self.cur_ret {
+            None => None,
+            Some(Ty::Int) | Some(Ty::Int64) => Some(Expr::IntLit(0)),
+            Some(Ty::Double) => Some(Expr::DoubleLit(0.0)),
+            Some(Ty::Text) => Some(Expr::TextLit(String::new())),
+            Some(Ty::Bool) => Some(Expr::BoolLit(false)),
+            Some(Ty::Ptr) => Some(Expr::Call {
+                cmd: "ptr_null".to_string(),
+                args: Vec::new(),
+            }),
+            Some(t) => {
+                return Err(ParseError {
+                    line: self.toks[start].line,
+                    msg: format!(
+                        "`check` returns early on failure, and {} has no failure value to return — \
+                         test `last_error_code()` yourself here",
+                        t.as_str()
+                    ),
+                })
+            }
+        };
+        let ret = self.finish(StmtKind::Return { value }, start);
+        Ok(self.finish(
+            StmtKind::If {
+                arms: vec![(
+                    Expr::Cmp(
+                        CmpOp::Ne,
+                        Box::new(Expr::Call {
+                            cmd: "last_error_code".to_string(),
+                            args: Vec::new(),
+                        }),
+                        Box::new(Expr::IntLit(0)),
+                    ),
+                    vec![ret],
+                )],
+                otherwise: None,
+            },
+            start,
+        ))
+    }
+
+    /// Whether the cursor is on `word` used as a statement keyword.
+    ///
+    /// Every one of these words is a SOFT keyword: it leads a statement only
+    /// when what follows could not be the rest of an assignment to a variable
+    /// spelled the same way. That is the whole rule, and it is what keeps
+    /// `match`, `repeat` and `assert` usable as ordinary names.
+    fn leads_stmt(&self, word: &str) -> bool {
+        if self.word() != Some(word) {
+            return false;
+        }
+        match self.peek_at(1) {
+            // `match = 1`, `repeat += 2`, `assert[0] = x`, `match.text = "hi"`:
+            // an assignment or a path into one, all of them the old meaning.
+            Tok::Eq
+            | Tok::PlusEq
+            | Tok::MinusEq
+            | Tok::StarEq
+            | Tok::SlashEq
+            | Tok::AmpEq
+            | Tok::LBracket
+            | Tok::Dot => false,
+            // `repeat mod= 2` — the one compound assignment spelled with a word.
+            Tok::Ident(w) if w == "mod" && matches!(self.peek_at(2), Tok::Eq) => false,
+            // Nothing follows, so nothing is being led.
+            Tok::Newline | Tok::Eof => false,
+            _ => true,
+        }
+    }
+
+    /// A name no program can write, for a binding the program never sees.
+    /// `$` is not an identifier character, and the counter runs over the whole
+    /// parse so two `repeat` loops in one subroutine cannot collide.
+    fn fresh_hidden(&mut self, tag: &str) -> String {
+        self.hidden += 1;
+        format!("${tag}${}", self.hidden)
+    }
+
+    /// `defer STMT` — one statement, run when the block it was written in is
+    /// left, whichever way it is left. See [`StmtKind::Defer`] for what that
+    /// expands to; the parser's whole job is to read the statement and to
+    /// refuse the shapes the expansion could not honour.
+    ///
+    /// `defer` is a soft keyword: it leads the statement only where a following
+    /// token could not continue an assignment to a variable of that name, so
+    /// `defer = 1` and `defer.text = "x"` are what they always were.
+    fn stmt_defer(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.pos;
+        self.bump(); // `defer`
+        let line = self.line();
+        let Some(inner) = self.statement()? else {
+            // `defer assert ...` in a release build: the statement compiled to
+            // nothing, so there is nothing to defer.
+            return Err(ParseError {
+                line,
+                msg: "`defer` needs a statement to run".into(),
+            });
+        };
+        // `check` leaves a guard behind it (`self.pending`), and that guard
+        // would run where the `defer` was written while the call it guards ran
+        // at the end — two halves of one statement in two places.
+        if !self.pending.is_empty() {
+            self.pending.clear();
+            return Err(ParseError {
+                line,
+                msg: "`defer check ...` would run the failure guard where the `defer` is written \
+                      and the call at the end of the block; write `defer call name(...)`".into(),
+            });
+        }
+        let refuse = |what: &str| {
+            Err(ParseError {
+                line,
+                msg: format!(
+                    "`defer` runs one simple statement when the block ends — {what}. Write the \
+                     call, assignment or property write you want to happen last"
+                ),
+            })
+        };
+        match &inner.kind {
+            // The one-line `STMT if COND` folds into an `if` before this sees
+            // it, so both spellings land here and get the one message.
+            StmtKind::If { .. } => {
+                return refuse(
+                    "an `if` is a block of its own, and its end is not the end of this one",
+                )
+            }
+            StmtKind::While { .. } | StmtKind::For { .. } | StmtKind::ForEach { .. } => {
+                return refuse("a loop is a block of its own")
+            }
+            StmtKind::Match { .. } => return refuse("a `match` is a block of its own"),
+            StmtKind::Let { .. } | StmtKind::LetInfer { .. } => {
+                return refuse("a binding made at the end of a block could never be read")
+            }
+            StmtKind::Return { .. } => {
+                return refuse("a deferred `return` would leave the subroutine from its own cleanup")
+            }
+            StmtKind::Break | StmtKind::Continue => {
+                return refuse("a deferred jump would leave the loop from its own cleanup")
+            }
+            StmtKind::Defer(_) => return refuse("a `defer` of a `defer` says nothing the first did not"),
+            _ => {}
+        }
+        Ok(self.finish(StmtKind::Defer(Box::new(inner)), start))
+    }
+
+    /// ```text
+    /// match := "match" expr NEWLINE
+    ///          ("when" expr ("," expr)* ":" (stmt | NEWLINE stmt*))+
+    ///          ("else" ":" (stmt | NEWLINE stmt*))?
+    ///          "end" NEWLINE
+    /// ```
+    ///
+    /// An if/else-if chain that tests one value with `=`, written once. The
+    /// value is evaluated **once** — see `StmtKind::Match` for why that is what
+    /// makes this a node rather than a rewrite here — and each `when` may list
+    /// several values, which means any of them. `else` is optional, and a
+    /// `match` that matches nothing does nothing.
+    ///
+    /// Real pattern matching — binding a name out of the value, matching a
+    /// shape — is deliberately not here: this compares, and comparison is all
+    /// an if-chain can do.
+    fn stmt_match(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.pos;
+        self.bump(); // `match`, a soft keyword consumed here
+        let scrutinee = self.expr()?;
+        self.expect(&Tok::Newline, "newline after the value a `match` tests")?;
+        let mut arms: Vec<(Vec<Expr>, Vec<Stmt>)> = Vec::new();
+        let mut otherwise = None;
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::Ident(w) if w == "when" => {
+                    self.bump();
+                    let mut values = vec![self.expr()?];
+                    while matches!(self.peek(), Tok::Comma) {
+                        self.bump();
+                        values.push(self.expr()?);
+                    }
+                    self.expect(&Tok::Colon, "`:` after the values a `when` matches")?;
+                    arms.push((values, self.arm_body()?));
+                }
+                Tok::Else => {
+                    self.bump();
+                    self.expect(&Tok::Colon, "`:` after `else`")?;
+                    otherwise = Some(self.arm_body()?);
+                    self.skip_newlines();
+                    self.expect(&Tok::End, "`end` after the `else` of a `match`")?;
+                    break;
+                }
+                Tok::End => {
+                    self.bump();
+                    break;
+                }
+                other => {
+                    return self.err(format!(
+                        "expected `when`, `else` or `end` in a `match`, found {other:?}"
+                    ))
+                }
+            }
+        }
+        if arms.is_empty() {
+            return self.err("a `match` needs at least one `when`");
+        }
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(self.finish(
+            StmtKind::Match {
+                scrutinee,
+                arms,
+                otherwise,
+            },
+            start,
+        ))
+    }
+
+    /// The body of one `when` or `else`, with the `:` already read: either the
+    /// rest of the line as a single statement, or — when the line ends there —
+    /// the statements up to the next `when`, the `else`, or the `end`.
+    fn arm_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        if !matches!(self.peek(), Tok::Newline) {
+            let mut body: Vec<Stmt> = self.statement()?.into_iter().collect();
+            // A desugar that produced a follow-on statement (a `check` guard)
+            // belongs inside the arm, directly after what it guards — the two
+            // statement loops drain this for the same reason.
+            body.extend(self.pending.drain(..));
+            return Ok(body);
+        }
+        self.bump(); // the newline
+        self.block_until(&|p: &Parser| {
+            matches!(p.peek(), Tok::Else | Tok::End) || p.leads_stmt("when")
+        })
+    }
+
+    /// `repeat N times NEWLINE ... end` — a counted loop with no visible index.
+    ///
+    /// Sugar for `for <hidden> = 1 to N`, and desugared to exactly that: the
+    /// count is evaluated once before the first turn, `break` and `continue`
+    /// behave, and a count of zero runs the body no times — every one of those
+    /// is the counting loop's own behaviour, because this *is* the counting
+    /// loop with its counter hidden. `times` is a soft keyword in this one
+    /// position.
+    fn stmt_repeat(&mut self) -> Result<Stmt, ParseError> {
+        let head = self.pos;
+        self.bump(); // `repeat`, a soft keyword consumed here
+        let count = self.expr()?;
+        match self.peek() {
+            Tok::Ident(w) if w == "times" => {
+                self.bump();
+            }
+            other => {
+                return self.err(format!(
+                    "expected `times` after the count in `repeat N times`, found {other:?}"
+                ))
+            }
+        }
+        self.expect(&Tok::Newline, "newline after `repeat N times`")?;
+        let body = self.block(&[Tok::End])?;
+        self.expect(&Tok::End, "`end`")?;
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        let var = self.fresh_hidden("repeat");
+        Ok(self.finish(
+            StmtKind::For {
+                var,
+                start: Expr::IntLit(1),
+                limit: count,
+                step: 1,
+                body,
+            },
+            head,
+        ))
+    }
+
+    /// ```text
+    /// assert := "assert" expr ("," expr)? NEWLINE
+    /// ```
+    ///
+    /// Sugar for `if not COND` around one call: `assert_failed(msg)` prints the
+    /// message and stops the program. With no message of its own an `assert`
+    /// quotes the condition as it was written, which is the message a reader
+    /// wanted anyway.
+    ///
+    /// In a **release** build the whole statement is dropped here — no branch,
+    /// no call, no message in the binary. The condition is still parsed, so a
+    /// misspelt `assert` is a compile error in both builds; only the emitted
+    /// code differs.
+    fn stmt_assert(&mut self) -> Result<Option<Stmt>, ParseError> {
+        let start = self.pos;
+        self.bump(); // `assert`, a soft keyword consumed here
+        let cond_start = self.pos;
+        let cond = self.expr()?;
+        let cond_end = self.pos;
+        let message = if matches!(self.peek(), Tok::Comma) {
+            self.bump();
+            self.expr()?
+        } else {
+            Expr::TextLit(format!(
+                "assertion failed: {}",
+                self.source_between(cond_start, cond_end)
+            ))
+        };
+        match self.peek() {
+            Tok::Newline => {
+                self.bump();
+            }
+            Tok::Eof => {}
+            other => {
+                return self.err(format!(
+                    "expected a newline after `assert`, found {other:?} — a message goes \
+                     after a comma, as in `assert n > 0, \"n must be positive\"`"
+                ))
+            }
+        }
+        if !self.opts.asserts {
+            return Ok(None);
+        }
+        let fail = self.finish(
+            StmtKind::Call {
+                cmd: "assert_failed".to_string(),
+                args: vec![message],
+            },
+            start,
+        );
+        Ok(Some(self.finish(
+            StmtKind::If {
+                arms: vec![(Expr::Not(Box::new(cond)), vec![fail])],
+                otherwise: None,
+            },
+            start,
+        )))
+    }
+
+    /// The source text the tokens `[from, to)` were read from, for an
+    /// `assert`'s own account of its condition. Sliced out of the line rather
+    /// than printed back from the tokens, so what the message quotes is what
+    /// the author actually typed, spacing and all. A condition spread over more
+    /// than one line is not one, so only the first line's part is quoted.
+    fn source_between(&self, from: usize, to: usize) -> String {
+        let first = &self.toks[from.min(self.toks.len() - 1)];
+        let last = &self.toks[to.saturating_sub(1).min(self.toks.len() - 1)];
+        let Some(line) = self.lines.get(first.line.saturating_sub(1)) else {
+            return String::new();
+        };
+        let start = first.col.saturating_sub(1);
+        let end = if last.line == first.line {
+            last.end_col.saturating_sub(1).min(line.len())
+        } else {
+            line.len()
+        };
+        line.get(start..end).unwrap_or("").trim().to_string()
+    }
+
     fn stmt_let(&mut self, mutable: bool) -> Result<Stmt, ParseError> {
         let start = self.pos;
         self.expect(
@@ -1423,64 +2201,135 @@ impl Parser {
             "`let` or `var`",
         )?;
         let name = self.ident("variable name")?;
-        self.expect(&Tok::Colon, "`:` after variable name")?;
-        let ty = self.type_keyword()?;
+        // `let n = length(xs)` — the annotation may be left out when the
+        // initializer says what the type is. `None` here means "read it off the
+        // value", which only the desugar (registry in hand) can do.
+        let ty = if matches!(self.peek(), Tok::Colon) {
+            self.bump();
+            Some(self.local_type()?)
+        } else {
+            if matches!(self.peek(), Tok::Newline) {
+                return self.err(format!(
+                    "`{name}` has neither a type nor a value — write `{}{name}: TYPE` or \
+                     `{}{name} = EXPR`",
+                    if mutable { "var " } else { "let " },
+                    if mutable { "var " } else { "let " }
+                ));
+            }
+            None
+        };
         // `var r: RECT` with no `= EXPR` is a zeroed c-record local. The parser
         // cannot yet know `RECT` is a c-record (one pass), so it accepts the
         // omitted initializer for any type and hands the checker a `ZeroInit`,
         // which the checker allows only for a c-record `var`. A missing `=` on
         // an ordinary type becomes a clear "only a c-record may be left
         // uninitialised" there, with the declared type to name.
+        // `let d: text = check file_read_text(p)` — bind the value as usual,
+        // and follow the binding with the guard that leaves on failure.
+        let mut checked = None;
         let value = if matches!(self.peek(), Tok::Newline) {
             Expr::ZeroInit
         } else {
             self.expect(&Tok::Eq, "`=`")?;
+            if self.is_check_kw() {
+                checked = Some(self.pos);
+                self.bump();
+            }
             self.expr()?
         };
         self.expect(&Tok::Newline, "newline after `let`")?;
-        Ok(self.finish(StmtKind::Let {
-            name,
-            ty,
-            value,
-            mutable,
-        }, start))
+        let kind = match ty {
+            Some(ty) => StmtKind::Let {
+                name,
+                ty,
+                value,
+                mutable,
+            },
+            None => StmtKind::LetInfer {
+                name,
+                value,
+                mutable,
+            },
+        };
+        let stmt = self.finish(kind, start);
+        if let Some(at) = checked {
+            self.pending.push(self.check_guard(at)?);
+        }
+        Ok(stmt)
     }
 
     /// Statements until one of `terminators`, which is not consumed.
     fn block(&mut self, terminators: &[Tok]) -> Result<Vec<Stmt>, ParseError> {
+        self.block_until(&|p: &Parser| terminators.contains(p.peek()))
+    }
+
+    /// The body of a block, up to whatever `stop` says ends it.
+    ///
+    /// A predicate rather than a list of tokens because a `match` arm ends at
+    /// the *word* `when`, and only when that word leads a `when` clause — a
+    /// statement that happens to assign to a variable called `when` is still a
+    /// statement, and a token list could not tell the two apart.
+    fn block_until(&mut self, stop: &dyn Fn(&Parser) -> bool) -> Result<Vec<Stmt>, ParseError> {
         let mut body = Vec::new();
         loop {
             self.skip_newlines();
-            if terminators.contains(self.peek()) {
+            if stop(self) {
                 return Ok(body);
             }
-            match self.peek().clone() {
-                Tok::Let => body.push(self.stmt_let(false)?),
-                Tok::Var => body.push(self.stmt_let(true)?),
-                Tok::Call => body.push(self.stmt_call()?),
-                Tok::If => body.push(self.stmt_if()?),
-                Tok::While => body.push(self.stmt_while()?),
-                Tok::For => body.push(self.stmt_for()?),
-                Tok::Break => body.push(self.stmt_jump(true)?),
-                Tok::Continue => body.push(self.stmt_jump(false)?),
-                Tok::Return => body.push(self.stmt_return()?),
-                Tok::Ident(_) => body.push(self.stmt_ident()?),
-                Tok::Eof => return self.err("unexpected end of file (missing `end`)"),
-                other => {
-                    return self.err(format!("expected a statement or `end`, found {other:?}"))
-                }
+            if matches!(self.peek(), Tok::Eof) {
+                return self.err("unexpected end of file (missing `end`)");
             }
+            if let Some(st) = self.statement()? {
+                body.push(st);
+            }
+            body.extend(self.pending.drain(..));
         }
+    }
+
+    /// One statement of any kind.
+    ///
+    /// `None` is a statement that compiled to *nothing*: an `assert` in a
+    /// release build, which is the whole of what "compiled out" means. Every
+    /// other statement is a `Some`.
+    fn statement(&mut self) -> Result<Option<Stmt>, ParseError> {
+        Ok(Some(match self.peek() {
+            Tok::Let => self.stmt_let(false)?,
+            Tok::Var => self.stmt_let(true)?,
+            Tok::Call => self.stmt_call()?,
+            Tok::If => self.stmt_if()?,
+            Tok::While => self.stmt_while()?,
+            Tok::For => self.stmt_for()?,
+            Tok::Break => self.stmt_jump(true)?,
+            Tok::Continue => self.stmt_jump(false)?,
+            Tok::Return => self.stmt_return()?,
+            // Either `name = expr`, `component.property = expr`, or one of the
+            // statement words that are soft keywords; `stmt_ident` sorts them.
+            Tok::Ident(_) => return self.stmt_ident(),
+            Tok::Eof => return self.err("unexpected end of file (missing `end`)"),
+            other => return self.err(format!("expected a statement or `end`, found {other:?}")),
+        }))
     }
 
     /// `if COND NEWLINE ... (else if COND NEWLINE ...)* (else NEWLINE ...)? end`
     fn stmt_if(&mut self) -> Result<Stmt, ParseError> {
         let start = self.pos;
         self.expect(&Tok::If, "`if`")?;
+        if self.leads_some() {
+            return self.stmt_if_some(start);
+        }
         let mut arms = Vec::new();
         let mut otherwise = None;
         loop {
             let cond = self.expr()?;
+            // `if c then a else b` is the *value* form, and a statement is not
+            // where a value goes. Naming that beats "expected a newline".
+            if self.word() == Some("then") {
+                return self.err(
+                    "`if COND then A else B` is the value form of `if` — write it where a value \
+                     goes, as in `let n: int = if c then 1 else 2`; a block `if` has its body on \
+                     the following lines",
+                );
+            }
             self.expect(&Tok::Newline, "newline after the condition")?;
             let body = self.block(&[Tok::Else, Tok::End])?;
             arms.push((cond, body));
@@ -1508,6 +2357,53 @@ impl Parser {
             self.bump();
         }
         Ok(self.finish(StmtKind::If { arms, otherwise }, start))
+    }
+
+    /// `if some EXPR as NAME NEWLINE ... (else NEWLINE ...)? end` — the body
+    /// runs with the optional's value bound to `NAME`, and only when there is
+    /// one. See [`StmtKind::IfSome`]; the expansion is the desugar's, because
+    /// only it knows what type `NAME` is.
+    fn stmt_if_some(&mut self, start: usize) -> Result<Stmt, ParseError> {
+        self.bump(); // `some`
+        let value = self.expr()?;
+        if self.word() != Some("as") {
+            return self.err(format!(
+                "expected `as` and a name for the value — `if some v as value`, found {:?}",
+                self.peek()
+            ));
+        }
+        self.bump(); // `as`
+        let bind = self.ident("the name to bind the value to")?;
+        self.expect(&Tok::Newline, "newline after `if some ... as ...`")?;
+        let body = self.block(&[Tok::Else, Tok::End])?;
+        let otherwise = if matches!(self.peek(), Tok::Else) {
+            self.bump();
+            // `else if` would start a second condition that cannot see the
+            // binding, and reads as though it could.
+            if matches!(self.peek(), Tok::If) {
+                return self.err(
+                    "`else if` cannot follow `if some ... as ...`: the name bound above is not in \
+                     scope in a second condition. Close this `if` and open another",
+                );
+            }
+            self.expect(&Tok::Newline, "newline after `else`")?;
+            Some(self.block(&[Tok::End])?)
+        } else {
+            None
+        };
+        self.expect(&Tok::End, "`end`")?;
+        if matches!(self.peek(), Tok::Newline) {
+            self.bump();
+        }
+        Ok(self.finish(
+            StmtKind::IfSome {
+                value,
+                bind,
+                body,
+                otherwise,
+            },
+            start,
+        ))
     }
 
     /// `while COND NEWLINE ... end`
@@ -1721,7 +2617,13 @@ impl Parser {
         // No value when the statement ends right here — a newline, EOF, or the
         // start of a one-line `if` suffix (`return if done`), where the `if` is
         // the suffix and not the returned expression.
-        let value = if matches!(self.peek(), Tok::Newline | Tok::Eof | Tok::If) {
+        //
+        // `return if c then a else b` is the one place the guard suffix and the
+        // conditional *value* start with the same token, and `then` on the line
+        // is what tells them apart: the guard form has no `then`, and the value
+        // form cannot be written without one.
+        let bare_if = matches!(self.peek(), Tok::If) && !self.line_has_then();
+        let value = if matches!(self.peek(), Tok::Newline | Tok::Eof) || bare_if {
             None
         } else {
             Some(self.expr()?)
@@ -1743,6 +2645,21 @@ impl Parser {
             );
         }
         let cmd = self.ident("command name")?;
+        // `call xs.sort()` — the method spelling reaches statement position
+        // too, so a command called for its effect is written the same way it is
+        // written for its value. The receiver is a whole postfix expression
+        // (`call people[1].greet()`), and the `(` is the same rule it is in an
+        // expression: without one this was never a statement.
+        if matches!(self.peek(), Tok::Dot | Tok::LBracket) {
+            let recv = self.postfix(Expr::Var(cmd))?;
+            let Expr::Call { cmd, args } = recv else {
+                return self.err(
+                    "`call` runs a command or a subroutine — write `call name(...)`, or the method \
+                     spelling `call value.name(...)`",
+                );
+            };
+            return self.finish_simple(StmtKind::Call { cmd, args }, start);
+        }
         self.expect(&Tok::LParen, "`(`")?;
         let args = self.arg_list()?;
         self.finish_simple(StmtKind::Call { cmd, args }, start)
@@ -1812,7 +2729,7 @@ impl Parser {
         } else {
             Expr::Var(name)
         };
-        self.postfix(base)
+        self.postfix_with(base, false)
     }
 
     /// Parse a comma-separated argument list, assuming the opening `(` has been
@@ -1821,7 +2738,7 @@ impl Parser {
         let mut args = Vec::new();
         if !matches!(self.peek(), Tok::RParen) {
             loop {
-                args.push(self.expr()?);
+                args.push(self.argument()?);
                 match self.peek() {
                     Tok::Comma => {
                         self.bump();
@@ -1839,8 +2756,190 @@ impl Parser {
         Ok(args)
     }
 
+    /// Whether what follows the `{` at `self.pos + at` is a record body: the
+    /// spread, or a named field. Newlines are stepped over, because a wide
+    /// record is written one field to a line and the `{` is then the end of it.
+    fn opens_record_body(&self, at: usize) -> bool {
+        let mut i = at;
+        while matches!(self.peek_at(i), Tok::Newline) {
+            i += 1;
+        }
+        matches!(self.peek_at(i), Tok::DotDot)
+            || (matches!(self.peek_at(i), Tok::Ident(_))
+                && matches!(self.peek_at(i + 1), Tok::Colon))
+    }
+
+    /// `NAME{field: v, ...}` and `NAME{...base, field: v}`, from the `{`.
+    ///
+    /// The brace form is the paren form's twin — same node, same rules — and
+    /// exists because `point{x: 1}` reads as a *value* where `point(x: 1)`
+    /// reads as a call. The spread is the one thing only this form has: it
+    /// carries the fields the author did not mention over from `base`.
+    fn record_braces(&mut self, name: String) -> Result<Expr, ParseError> {
+        self.expect(&Tok::LBrace, "`{`")?;
+        // A record literal may run over lines: a wide record is easier to read
+        // one field to a line, and there is no statement inside the braces for
+        // a newline to end.
+        self.skip_newlines();
+        let mut base: Option<Expr> = None;
+        if matches!(self.peek(), Tok::DotDot) {
+            self.bump();
+            // `...p` and `..p` are one spelling: the lexer fuses the first two
+            // dots and leaves the third, so the third is consumed here.
+            if matches!(self.peek(), Tok::Dot) {
+                self.bump();
+            }
+            base = Some(self.expr()?);
+            if matches!(self.peek(), Tok::Comma) {
+                self.bump();
+            }
+            self.skip_newlines();
+        }
+        let mut fields: Vec<(String, Expr)> = Vec::new();
+        while !matches!(self.peek(), Tok::RBrace) {
+            let field = self.ident("field name")?;
+            self.expect(&Tok::Colon, "`:` after a field name")?;
+            let value = self.expr()?;
+            if fields.iter().any(|(n, _)| *n == field) {
+                return self.err(format!("`{name}` gives field `{field}` twice"));
+            }
+            fields.push((field, value));
+            match self.peek() {
+                Tok::Comma => {
+                    self.bump();
+                    self.skip_newlines();
+                }
+                Tok::Newline => self.skip_newlines(),
+                Tok::RBrace => break,
+                other => {
+                    return self.err(format!(
+                        "expected `,` or `}}` in `{name}`, found {other:?}"
+                    ))
+                }
+            }
+        }
+        self.expect(&Tok::RBrace, "`}` after the fields")?;
+        Ok(match base {
+            Some(base) => Expr::RecordUpdate {
+                name,
+                base: Box::new(base),
+                fields,
+            },
+            None => Expr::RecordLit { name, fields },
+        })
+    }
+
+    /// One argument: an expression, or `name: expression` — the named form,
+    /// which the desugar matches to the parameter of that name.
+    ///
+    /// `IDENT :` is the whole of the lookahead, and it can mean nothing else
+    /// here: a bare name followed by a colon is not an expression in any other
+    /// reading.
+    fn argument(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Colon) {
+            let name = self.ident("argument name")?;
+            self.bump(); // `:`
+            let value = self.expr()?;
+            return Ok(Expr::Labeled {
+                name,
+                value: Box::new(value),
+            });
+        }
+        self.expr()
+    }
+
+    /// Whether `then` appears before this line ends.
+    ///
+    /// The single question that separates `return if done` (a guarded bare
+    /// return) from `return if c then a else b` (a conditional value). A line
+    /// is short and this runs once per `return if`, so a scan is cheaper than
+    /// threading a mode through the expression parser.
+    fn line_has_then(&self) -> bool {
+        self.toks[self.pos..]
+            .iter()
+            .take_while(|t| !matches!(t.tok, Tok::Newline | Tok::Eof))
+            .any(|t| matches!(&t.tok, Tok::Ident(w) if w == "then"))
+    }
+
+    /// The word at the cursor, when it is a plain identifier.
+    ///
+    /// Every soft keyword this parser reads goes through here or `infix_word`,
+    /// so a name that happens to be spelled like one keeps working wherever the
+    /// position does not claim it.
+    fn word(&self) -> Option<&str> {
+        match self.peek() {
+            Tok::Ident(w) => Some(w.as_str()),
+            _ => None,
+        }
+    }
+
+    /// An expression, including the two lowest-precedence forms: the
+    /// conditional `if C then A else B` and the fallback `E otherwise F`.
+    ///
+    /// Both sit below `or` because both take a whole expression on each side —
+    /// `if a and b then x else y` and `read() otherwise a + b` read the way they
+    /// look, with no parentheses.
     fn expr(&mut self) -> Result<Expr, ParseError> {
-        self.or_expr()
+        // `if` in expression position is the conditional value. A *statement*
+        // that starts with `if` never reaches here — `block` and `sub` route it
+        // to `stmt_if` — so the block form and this one cannot be confused.
+        if matches!(self.peek(), Tok::If) {
+            return self.if_expr();
+        }
+        let lhs = self.or_expr()?;
+        if self.word() == Some("otherwise") {
+            self.bump();
+            let fallback = self.or_expr()?;
+            // One `otherwise` per expression. A second would read an error slot
+            // the first fallback never cleared, so it would take the last arm
+            // every time the first call failed — a wrong answer rather than an
+            // error.
+            if self.word() == Some("otherwise") {
+                return self.err(
+                    "an expression can carry one `otherwise`; the failure a second one would test \
+                     is the same one the first already handled",
+                );
+            }
+            return Ok(Expr::Otherwise {
+                value: Box::new(lhs),
+                fallback: Box::new(fallback),
+            });
+        }
+        Ok(lhs)
+    }
+
+    /// `if COND then A else B` as a value. The `if` is already at the cursor.
+    ///
+    /// `then` is a soft keyword — it is read as one only here, between a
+    /// condition and its first arm, where an identifier could never have
+    /// followed a complete expression. `else` is the keyword it already was.
+    /// Both arms are full expressions, so `else if ... then ... else ...`
+    /// chains right the way an `else if` block does.
+    fn if_expr(&mut self) -> Result<Expr, ParseError> {
+        self.bump(); // `if`
+        let cond = self.or_expr()?;
+        if self.word() != Some("then") {
+            return self.err(format!(
+                "expected `then` after the condition of an `if` used as a value, found {:?}",
+                self.peek()
+            ));
+        }
+        self.bump(); // `then`
+        let then = self.expr()?;
+        // Not optional: a conditional *value* must produce one in both cases,
+        // and there is no other value to fall back on.
+        if !matches!(self.peek(), Tok::Else) {
+            return self.err(
+                "an `if` used as a value needs an `else` — every path must produce a value",
+            );
+        }
+        self.bump(); // `else`
+        let els = self.expr()?;
+        Ok(Expr::IfElse {
+            cond: Box::new(cond),
+            then: Box::new(then),
+            els: Box::new(els),
+        })
     }
 
     fn or_expr(&mut self) -> Result<Expr, ParseError> {
@@ -2093,12 +3192,50 @@ impl Parser {
     /// The first `.` of a chain never arrives here: `p.x` is read in `primary`,
     /// where it is indistinguishable from a component property read and is left
     /// as one for the checker to resolve.
-    fn postfix(&mut self, mut e: Expr) -> Result<Expr, ParseError> {
+    fn postfix(&mut self, e: Expr) -> Result<Expr, ParseError> {
+        self.postfix_with(e, true)
+    }
+
+    /// As `postfix`, told whether `.name(` may be read as a method call.
+    ///
+    /// It may not in the callee of a `call through`: there the parentheses
+    /// belong to the indirect call itself, so `call through r.vtbl.release()`
+    /// must read `r.vtbl.release` as the pointer and leave the `(` alone.
+    /// Everywhere else a value is being built and `.name(` is the method
+    /// spelling.
+    fn postfix_with(&mut self, mut e: Expr, methods: bool) -> Result<Expr, ParseError> {
         loop {
             match self.peek() {
                 Tok::LBracket => {
                     self.bump();
-                    let index = self.expr()?;
+                    // `xs[a..b]` is a slice and `xs[a]` is one element; the two
+                    // are told apart by the `..`, which the index expression
+                    // stops at of its own accord (`..` is no operator). Either
+                    // bound may be left out — `xs[..b]`, `xs[a..]`, `xs[..]` —
+                    // and means the collection's own end.
+                    let from = if matches!(self.peek(), Tok::DotDot) {
+                        None
+                    } else {
+                        Some(self.expr()?)
+                    };
+                    if matches!(self.peek(), Tok::DotDot) {
+                        self.bump();
+                        let to = if matches!(self.peek(), Tok::RBracket) {
+                            None
+                        } else {
+                            Some(self.expr()?)
+                        };
+                        self.expect(&Tok::RBracket, "`]` after the slice")?;
+                        e = Expr::Slice {
+                            base: Box::new(e),
+                            from: from.map(Box::new),
+                            to: to.map(Box::new),
+                        };
+                        continue;
+                    }
+                    // Not a range, so `from` is the index: a `..` in front of it
+                    // was the only way it could have been left out.
+                    let index = from.expect("an index is the expression just parsed");
                     self.expect(&Tok::RBracket, "`]` after the index")?;
                     e = Expr::Index {
                         base: Box::new(e),
@@ -2108,6 +3245,17 @@ impl Parser {
                 Tok::Dot => {
                     self.bump();
                     let name = self.ident("field name")?;
+                    // `x.f(a)` is the method spelling of `f(x, a)` — the value
+                    // on the left becomes the first argument. The `(` is the
+                    // whole rule: `.name` with no parentheses stays a field or
+                    // property read, so `label1.text` is untouched.
+                    if methods && matches!(self.peek(), Tok::LParen) {
+                        self.bump();
+                        let mut args = self.arg_list()?;
+                        args.insert(0, e);
+                        e = Expr::Call { cmd: name, args };
+                        continue;
+                    }
                     e = Expr::Field {
                         base: Box::new(e),
                         name,
@@ -2116,6 +3264,70 @@ impl Parser {
                 _ => return Ok(e),
             }
         }
+    }
+
+    /// The tail of `[EXPR for each ELEM [, VALUE] [at IDX] in COLL [where COND]]`,
+    /// with `EXPR` already parsed and `for` next.
+    ///
+    /// The header is the statement `for each`'s, word for word, so there is one
+    /// thing to learn and not two; `where` is a soft keyword, claimed only here,
+    /// between the collection and the closing `]`.
+    fn comprehension(&mut self, body: Expr) -> Result<Expr, ParseError> {
+        self.expect(&Tok::For, "`for`")?;
+        if self.word() != Some("each") {
+            return self.err(format!(
+                "expected `each` after `for` in a list — `[e for each x in xs]`, found {:?}",
+                self.peek()
+            ));
+        }
+        self.bump(); // `each`
+        let elem = self.ident("the element binding name after `for each`")?;
+        let value = if matches!(self.peek(), Tok::Comma) {
+            self.bump();
+            Some(self.ident("the value binding name after `,`")?)
+        } else {
+            None
+        };
+        let index = if self.word() == Some("at") {
+            self.bump();
+            Some(self.ident("the index binding name after `at`")?)
+        } else {
+            None
+        };
+        if self.word() != Some("in") {
+            return self.err(format!(
+                "expected `in` before the collection, found {:?}",
+                self.peek()
+            ));
+        }
+        self.bump(); // `in`
+        let coll = self.expr()?;
+        let cond = if self.word() == Some("where") {
+            self.bump();
+            Some(Box::new(self.expr()?))
+        } else {
+            None
+        };
+        self.expect(&Tok::RBracket, "`]` closing the list")?;
+        Ok(Expr::Comprehension {
+            body: Box::new(body),
+            elem,
+            value,
+            index,
+            coll: Box::new(coll),
+            cond,
+            holds: None,
+        })
+    }
+
+    /// Whether an `if` opens the optional-unwrapping form: the word `some`
+    /// followed by a name. A variable called `some` is untouched — `if some and
+    /// x`, `if some = 1`, `if some in xs` all still read it as the value it is,
+    /// because in each of those the token after the word is an operator and not
+    /// the start of an expression.
+    fn leads_some(&self) -> bool {
+        self.word() == Some("some")
+            && matches!(self.peek_at(1), Tok::Ident(w) if !Self::INFIX_WORDS.contains(&w.as_str()))
     }
 
     fn primary(&mut self) -> Result<Expr, ParseError> {
@@ -2127,6 +3339,12 @@ impl Parser {
             if !matches!(self.peek(), Tok::RBracket) {
                 loop {
                     items.push(self.expr()?);
+                    // `[EXPR for each x in xs]` — the list a loop would have
+                    // built. It is only ever the *first* element that a `for`
+                    // can follow, so a plain literal is undisturbed.
+                    if items.len() == 1 && matches!(self.peek(), Tok::For) {
+                        return self.comprehension(items.pop().unwrap());
+                    }
                     match self.peek() {
                         Tok::Comma => {
                             self.bump();
@@ -2211,7 +3429,11 @@ impl Parser {
             Tok::Int(v) => Ok(Expr::IntLit(v)),
             Tok::Bits(v) => Ok(Expr::BitsLit(v)),
             Tok::Float(v) => Ok(Expr::DoubleLit(v)),
-            Tok::Str(s) => interpolate(&s, tok_line),
+            Tok::Str(s) => interpolate(&s, tok_line, &self.enums.clone()),
+            // A raw literal is the one text that is not split: `{` is a brace
+            // and `\\d` is a backslash and a `d`, which is what makes the form
+            // worth having for a regular expression or a path.
+            Tok::RawStr(s) => Ok(Expr::TextLit(s)),
             Tok::Ident(name) => {
                 // `address of NAME` — the address of a subroutine as a `ptr`.
                 // `address` is a *soft* keyword: it means this only when the
@@ -2254,31 +3476,31 @@ impl Parser {
                     && matches!(self.peek_at(2), Tok::Colon)
                 {
                     self.bump();
-                    let mut fields: Vec<(String, Expr)> = Vec::new();
-                    loop {
-                        let field = self.ident("field name")?;
-                        self.expect(&Tok::Colon, "`:` after a field name")?;
-                        let value = self.expr()?;
-                        fields.push((field, value));
-                        match self.peek() {
-                            Tok::Comma => {
-                                self.bump();
-                                // A single trailing comma is allowed:
-                                // `point(x: 1, y: 2,)`.
-                                if matches!(self.peek(), Tok::RParen) {
-                                    break;
-                                }
-                            }
-                            Tok::RParen => break,
-                            other => {
-                                return self.err(format!(
-                                    "expected `,` or `)` in `{name}`, found {other:?}"
-                                ))
-                            }
-                        }
+                    let args = self.arg_list()?;
+                    // Every argument named is a record — the shape this branch
+                    // was written for. One of them *not* named means a call
+                    // with a named argument in it, and it stays a call so the
+                    // desugar can say which parameter each name meant (or, for
+                    // a record, that a field with no name is not a field).
+                    if args.iter().all(|a| matches!(a, Expr::Labeled { .. })) {
+                        let fields = args
+                            .into_iter()
+                            .map(|a| match a {
+                                Expr::Labeled { name, value } => (name, *value),
+                                _ => unreachable!(),
+                            })
+                            .collect();
+                        return Ok(Expr::RecordLit { name, fields });
                     }
-                    self.expect(&Tok::RParen, "`)` after the fields")?;
-                    return Ok(Expr::RecordLit { name, fields });
+                    return Ok(Expr::Call { cmd: name, args });
+                }
+                // `point{x: 1, y: 2}` — the same record in the brace spelling,
+                // and `point{...p, y: 9}`, a copy of `p` with `y` replaced. The
+                // lookahead (`{` then a labelled field, or `{` then the spread)
+                // is what keeps a dictionary literal that happens to follow a
+                // name from being read as a record.
+                if matches!(self.peek(), Tok::LBrace) && self.opens_record_body(1) {
+                    return self.record_braces(name);
                 }
                 if matches!(self.peek(), Tok::LParen) {
                     // Call-expression: NAME(args...)
@@ -2286,9 +3508,35 @@ impl Parser {
                     let args = self.arg_list()?;
                     Ok(Expr::Call { cmd: name, args })
                 } else if matches!(self.peek(), Tok::Dot) {
-                    // Property read: component.property
                     self.bump();
+                    // `colour.red` — a member of an enum, which is a `const`
+                    // named `colour.red`. Folded here, while the two names are
+                    // still side by side, so every later stage sees the plain
+                    // constant reference it already knows how to read; a
+                    // misspelt member is named here rather than reported as an
+                    // unknown component further downstream.
+                    if let Some(members) = self.enums.get(&name).cloned() {
+                        let m = self.ident("an enum member name after `.`")?;
+                        if !members.contains(&m) {
+                            return self.err(format!(
+                                "`{m}` is not a member of enum `{name}` — it has {}",
+                                members.join(", ")
+                            ));
+                        }
+                        return Ok(Expr::Var(format!("{name}.{m}")));
+                    }
                     let property = self.ident("property name")?;
+                    // `s.uppercase()` — the method spelling of `uppercase(s)`.
+                    // A `(` right after the name is what separates a call from
+                    // a read; without one this is the property read it always
+                    // was (`ok_button.text`), which is why a component keeps
+                    // working beside a method chain.
+                    if matches!(self.peek(), Tok::LParen) {
+                        self.bump();
+                        let mut args = self.arg_list()?;
+                        args.insert(0, Expr::Var(name));
+                        return Ok(Expr::Call { cmd: property, args });
+                    }
                     Ok(Expr::GetProperty {
                         component: name,
                         property,
@@ -2802,6 +4050,63 @@ mod tests {
         // `return if COND` reads the `if` as the suffix, not the return value.
         let b = first_body("module m\nsub f(): int\n  return if false\n  return 1\nend\n");
         assert!(matches!(&b[0].kind, StmtKind::If { .. }));
+    }
+
+    /// `xs[a]` and `xs[a..b]` are told apart by the `..`, and either bound may
+    /// be left out. The index form must be untouched — it is the one every
+    /// existing program uses.
+    #[test]
+    fn a_range_in_brackets_parses_as_a_slice() {
+        let b = first_body(
+            "module m\nsub main\n  let s: text = \"abcdef\"\n  call print_text(s[2..4])\n  call print_text(s[3..])\n  call print_text(s[..3])\n  call print_text(s[..])\nend\n",
+        );
+        let cases: Vec<(bool, bool)> = b[1..5]
+            .iter()
+            .map(|st| {
+                let StmtKind::Call { args, .. } = &st.kind else {
+                    panic!("expected a call")
+                };
+                let Expr::Slice { from, to, .. } = &args[0] else {
+                    panic!("expected a slice, got {:?}", args[0])
+                };
+                (from.is_some(), to.is_some())
+            })
+            .collect();
+        assert_eq!(cases, vec![(true, true), (true, false), (false, true), (false, false)]);
+        // No `..`: still the plain index it always was.
+        let b = first_body("module m\nsub main\n  var xs: int[] = [1]\n  call print_int(xs[1])\nend\n");
+        let StmtKind::Call { args, .. } = &b[1].kind else { panic!() };
+        assert!(matches!(args[0], Expr::Index { .. }));
+        // A slice is a value, not a place.
+        assert!(parse("module m\nsub main\n  var xs: int[] = [1]\n  xs[1..2] = [2]\nend\n").is_err());
+    }
+
+    /// A block literal carries its newlines and still splits into its holes; a
+    /// raw literal is its own bytes, so it is one `TextLit` however many braces
+    /// and backslashes are in it.
+    #[test]
+    fn block_and_raw_literals_lex_and_desugar() {
+        let b = first_body("module m\nsub main\n  let s: text = \"\"\"\na\nb\"\"\"\nend\n");
+        let StmtKind::Let { value: Expr::TextLit(t), .. } = &b[0].kind else {
+            panic!("expected a text literal, got {:?}", b[0].kind)
+        };
+        // The one newline after the opening delimiter is dropped; the rest is
+        // the literal's own.
+        assert_eq!(t, "a\nb");
+        // A hole in a block still becomes the concat chain.
+        let b = first_body("module m\nsub main\n  let n: int = 1\n  let s: text = \"\"\"x{n}\"\"\"\nend\n");
+        let StmtKind::Let { value, .. } = &b[1].kind else { panic!() };
+        assert!(matches!(value, Expr::Call { cmd, .. } if cmd == "concat"), "{value:?}");
+        // Raw: no escapes, no holes, one literal.
+        let b = first_body("module m\nsub main\n  let s: text = r\"a\\nb{c}\"\nend\n");
+        let StmtKind::Let { value: Expr::TextLit(t), .. } = &b[0].kind else {
+            panic!("expected one raw text literal, got {:?}", b[0].kind)
+        };
+        assert_eq!(t, "a\\nb{c}");
+        // `r` is a prefix, not a keyword.
+        assert!(parse("module m\nsub main\n  var r: int = 1\n  call print_int(r)\nend\n").is_ok());
+        // A newline in a one-line literal is still refused.
+        assert!(parse("module m\nsub main\n  let s: text = \"a\nb\"\nend\n").is_err());
     }
 
     #[test]

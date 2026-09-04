@@ -25,8 +25,8 @@ use crate::sema::{
 };
 use crate::registry::{ComponentKind, PropertyDesc};
 use crate::{
-    foreach_elem_types, Component, Elem, Expr, Item, Module, RecordDef, Registry, Span, Stmt,
-    StmtKind, Sub, Target, Ty,
+    foreach_elem_types, CmpOp, Component, Elem, Expr, Item, Module, RecordDef, Registry, Span,
+    Stmt, StmtKind, Sub, Target, Ty,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,10 +114,11 @@ fn validate_impl(
         })
     };
 
-    let subs: Vec<_> = m.subs().collect();
-    let forms: Vec<_> = m.forms().collect();
-    let sub_names: HashSet<&str> = subs.iter().map(|s| s.name.as_str()).collect();
-    let by_name: HashMap<&str, &Sub> = subs.iter().map(|s| (s.name.as_str(), *s)).collect();
+    // The declarations are read from the module as parsed; the *bodies* are
+    // read from the desugared copy below, because a named argument or an
+    // inferred `let` is not something the rules further down know how to check.
+    let declared: Vec<_> = m.subs().collect();
+    let by_name: HashMap<&str, &Sub> = declared.iter().map(|s| (s.name.as_str(), *s)).collect();
 
     // Subroutines become callable names in the same pass that resolves
     // commands, so `add(1, 2)` and `length("hi")` are looked up the same way.
@@ -173,6 +174,56 @@ fn validate_impl(
             Span::line(line),
         );
     }
+    // Named arguments, defaults, inferred `let`s and record updates are all
+    // rewritten here, once, into the forms the rest of this function checks.
+    let (desugared, sugar_errs) = crate::desugar::desugar(m, &with_subs);
+    for e in sugar_errs {
+        push(e.msg, e.span);
+    }
+    let m = &desugared;
+    let subs: Vec<_> = m.subs().collect();
+    let forms: Vec<_> = m.forms().collect();
+    let sub_names: HashSet<&str> = subs.iter().map(|s| s.name.as_str()).collect();
+
+    // Every parameter default is an expression evaluated where the *call* is
+    // written, so it may not read a name: the caller's scope is not the
+    // subroutine's, and a default that silently bound whatever the caller
+    // happened to have in hand would be the worst kind of working.
+    for sub in &subs {
+        for (i, default) in sub.defaults.iter().enumerate() {
+            let Some(default) = default else { continue };
+            let (pname, pty) = &sub.params[i];
+            if let Err(e) = check_default(default, &with_subs) {
+                push(
+                    format!(
+                        "in `{}`: the default for `{pname}` is worked out where the call is \
+                         written, so it cannot use anything from here — {e}",
+                        sub.name
+                    ),
+                    sub.name_span,
+                );
+                continue;
+            }
+            match type_of_expr_hinted(default, Some(*pty), &HashMap::new(), &with_subs, &Components::new()) {
+                Ok(got) if got == *pty => {}
+                Ok(got) => push(
+                    format!(
+                        "in `{}`: parameter `{pname}` is {} and its default is {}",
+                        sub.name,
+                        pty.as_str(),
+                        got.as_str()
+                    ),
+                    sub.name_span,
+                ),
+                Err(e) => push(
+                    format!("in `{}`: the default for `{pname}` is not a value ({e})", sub.name),
+                    sub.name_span,
+                ),
+            }
+        }
+    }
+
+
     // A module variable and a constant are both module-level bindings of one
     // name, and `register_consts` cannot see the variables (they are not in the
     // registry). Catch the clash here, where both lists are in hand, so a `var`
@@ -600,10 +651,19 @@ fn validate_impl(
         // Walk nested blocks. Locals are **function-scoped** in v0.3: a `let`
         // inside an `if` is visible after it, matching the alloca-at-top
         // lowering. Block scoping is a later refinement.
-        let mut stack: Vec<&Vec<Stmt>> = vec![&sub.body];
+        let mut stack: Vec<&[Stmt]> = vec![&sub.body];
         while let Some(block) = stack.pop() {
             for stmt in block {
                 match &stmt.kind {
+                    // The desugar has already turned every `LetInfer` into a
+                    // `Let` with the type it read off the initializer, or
+                    // reported why it could not. Reaching one here means the
+                    // module was checked without that pass, which is a wiring
+                    // mistake rather than a program's.
+                    StmtKind::LetInfer { name, .. } => push(
+                        format!("in `{}`: the type of `{name}` was never worked out", sub.name),
+                        stmt.span,
+                    ),
                     StmtKind::Let {
                         name,
                         ty,
@@ -615,6 +675,18 @@ fn validate_impl(
                                 format!("in `{}`: `{name}` has unknown type `{bad}`", sub.name),
                                 stmt.span,
                             );
+                        }
+                        // A c-record is flat storage, not a value: a local of one
+                        // IS its bytes, so there is no value to keep beside a
+                        // truth saying whether it is there.
+                        if let Ty::Optional(Elem::Record(n)) = ty {
+                            if reg.record(n).map(|d| d.is_c).unwrap_or(false) {
+                                push(format!(
+                                    "in `{}`: `{n}` is a c-record — flat storage, not a value — so \
+                                     `{n}?` is not a type. Keep a truth value of your own beside it",
+                                    sub.name
+                                ), stmt.span);
+                            }
                         }
                         // A c-record local is only ever zero-initialised: it has
                         // no constructor, and copying one struct into another is
@@ -773,6 +845,29 @@ fn validate_impl(
                         check_condition(cond, &vars, reg, hints, &components, &sub.name, stmt, &mut push);
                         stack.push(body);
                     }
+                    // Every `when` value is checked as the comparison it will
+                    // become, so the rule about what may be compared with what
+                    // is stated once, in `check_condition`, and a `when "red"`
+                    // against an `int` is reported in those words rather than
+                    // as something about a synthesized branch. Typing the
+                    // tested value once per arm costs nothing: the checker
+                    // reads it, the program evaluates it once.
+                    StmtKind::Match { scrutinee, arms, otherwise } => {
+                        for (values, body) in arms {
+                            for v in values {
+                                let test = Expr::Cmp(
+                                    CmpOp::Eq,
+                                    Box::new(scrutinee.clone()),
+                                    Box::new(v.clone()),
+                                );
+                                check_condition(&test, &vars, reg, hints, &components, &sub.name, stmt, &mut push);
+                            }
+                            stack.push(body);
+                        }
+                        if let Some(body) = otherwise {
+                            stack.push(body);
+                        }
+                    }
                     StmtKind::For {
                         var,
                         start,
@@ -859,6 +954,19 @@ fn validate_impl(
                     }
                     // Placement is checked separately: this worklist flattens
                     // the body, so it cannot tell what is inside a loop.
+                    // The deferred statement is checked once, where it is
+                    // written — not once per exit it is copied to, which is
+                    // what the backend's expansion would have produced.
+                    StmtKind::Defer(inner) => stack.push(std::slice::from_ref(inner)),
+                    // The desugar turns every `if some` into an `if`; reaching
+                    // one here means the module was checked without that pass.
+                    StmtKind::IfSome { bind, .. } => push(
+                        format!(
+                            "in `{}`: the type of `{bind}` was never worked out",
+                            sub.name
+                        ),
+                        stmt.span,
+                    ),
                     StmtKind::Break | StmtKind::Continue => {}
                     StmtKind::Return { value } => match (value, sub.ret) {
                         (None, None) => {}
@@ -1153,6 +1261,13 @@ fn always_returns(body: &[Stmt]) -> bool {
             arms,
             otherwise: Some(else_body),
         } => arms.iter().all(|(_, b)| always_returns(b)) && always_returns(else_body),
+        // The same rule, for the same reason: without an `else` there is a path
+        // that matches nothing and falls straight through.
+        StmtKind::Match {
+            arms,
+            otherwise: Some(else_body),
+            ..
+        } => arms.iter().all(|(_, b)| always_returns(b)) && always_returns(else_body),
         _ => false,
     })
 }
@@ -1184,6 +1299,17 @@ fn check_loop_control(
             | StmtKind::For { body, .. }
             | StmtKind::ForEach { body, .. } => check_loop_control(body, true, sub, push),
             StmtKind::If { arms, otherwise } => {
+                for (_, b) in arms {
+                    check_loop_control(b, in_loop, sub, push);
+                }
+                if let Some(b) = otherwise {
+                    check_loop_control(b, in_loop, sub, push);
+                }
+            }
+            // A `match` is a branch, not a loop: a `break` in one of its arms
+            // belongs to whatever loop encloses the `match`, exactly as it
+            // would inside an `if`.
+            StmtKind::Match { arms, otherwise, .. } => {
                 for (_, b) in arms {
                     check_loop_control(b, in_loop, sub, push);
                 }
@@ -1349,6 +1475,100 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 /// A module variable's initializer may call commands but must not read another
 /// module variable (see the note where this is called).
+/// Whether `e` may stand as a parameter default.
+///
+/// A default is copied to the call and worked out *there*, so it may not read a
+/// name: every name at the call belongs to the caller — a local of theirs would
+/// shadow the module variable this declaration meant — and a parameter of this
+/// subroutine does not exist there at all. A constant is fine, because it is a
+/// literal with a name and folds to the literal. A *call* is fine too: a call
+/// written in a default means at the call site exactly what it would mean typed
+/// there, which is the whole bargain of the desugar.
+fn check_default(e: &Expr, reg: &Registry) -> Result<(), String> {
+    let go = |e: &Expr| check_default(e, reg);
+    match e {
+        Expr::Var(n) if reg.is_const(n) => Ok(()),
+        Expr::Var(n) => Err(format!(
+            "`{n}` is a name, and the names where the call is written are the caller's"
+        )),
+        Expr::GetProperty {
+            component,
+            property,
+        } => Err(format!(
+            "`{component}.{property}` is read where the call is written, not here"
+        )),
+        Expr::AddressOf(n) => Err(format!("`address of {n}` cannot be a default")),
+        Expr::Bin(_, l, r)
+        | Expr::Cmp(_, l, r)
+        | Expr::Logical(_, l, r)
+        | Expr::Bit(_, l, r) => go(l).and_then(|_| go(r)),
+        Expr::Not(x) | Expr::BitNot(x) | Expr::Neg(x) | Expr::ToText { value: x, .. } => go(x),
+        Expr::IfElse { cond, then, els } => go(cond).and_then(|_| go(then)).and_then(|_| go(els)),
+        Expr::Otherwise { value, fallback } => go(value).and_then(|_| go(fallback)),
+        // A comprehension reads its own bindings, and those are names the call
+        // site does not have.
+        // An optional is made by a declaration, and a default is not one.
+        Expr::NoneLit => Err("`none` is the absence of a value a declaration named".to_string()),
+        Expr::HasValue(x) | Expr::Unwrap(x) => go(x),
+        Expr::Comprehension { .. } => Err(
+            "a list built by a loop cannot be a default: the loop's bindings are names, and the \
+             names where the call is written are the caller's"
+                .to_string(),
+        ),
+        Expr::In { needle, haystack, .. } => go(needle).and_then(|_| go(haystack)),
+        Expr::Chain { lo, mid, hi, .. } => go(lo).and_then(|_| go(mid)).and_then(|_| go(hi)),
+        Expr::Index { base, index } => go(base).and_then(|_| go(index)),
+        Expr::Field { base, .. } => go(base),
+        Expr::Slice { base, from, to } => {
+            go(base)?;
+            for part in [from, to].into_iter().flatten() {
+                check_default(part, reg)?;
+            }
+            Ok(())
+        }
+        Expr::Call { args, .. } | Expr::CallThrough { args, .. } => {
+            for a in args {
+                check_default(a, reg)?;
+            }
+            Ok(())
+        }
+        Expr::ArrayLit(items) => {
+            for i in items {
+                check_default(i, reg)?;
+            }
+            Ok(())
+        }
+        Expr::DictLit(pairs) => {
+            for (k, v) in pairs {
+                check_default(k, reg)?;
+                check_default(v, reg)?;
+            }
+            Ok(())
+        }
+        Expr::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                check_default(v, reg)?;
+            }
+            Ok(())
+        }
+        Expr::RecordUpdate { base, .. } => Err(format!(
+            "a record update copies from a name, and `{}` is not one here",
+            match &**base {
+                Expr::Var(n) => n.clone(),
+                _ => "it".to_string(),
+            }
+        )),
+        Expr::Labeled { value, .. } => go(value),
+        Expr::IntLit(_)
+        | Expr::BitsLit(_)
+        | Expr::DoubleLit(_)
+        | Expr::TextLit(_)
+        | Expr::BoolLit(_)
+        | Expr::SizeOf(_)
+        | Expr::ZeroInit => Ok(()),
+    }
+}
+
 fn check_initializer(
     e: &Expr,
     globals: &HashMap<String, Ty>,
@@ -1410,6 +1630,13 @@ fn check_initializer(
             check_initializer(base, globals, reg)?;
             check_initializer(index, globals, reg)
         }
+        Expr::Slice { base, from, to } => {
+            check_initializer(base, globals, reg)?;
+            for b in [from, to].into_iter().flatten() {
+                check_initializer(b, globals, reg)?;
+            }
+            Ok(())
+        }
         Expr::GetProperty { .. } => {
             Err("cannot read a component property before the form exists".to_string())
         }
@@ -1426,6 +1653,17 @@ fn check_initializer(
         // faces the same restriction the rest of the initializer does, since the
         // hole desugars to a `concat` of `*_to_text` calls run at start-up.
         Expr::ToText { value, .. } => check_initializer(value, globals, reg),
+        // A conditional and a fallback are ordinary expressions here: each side
+        // faces exactly the restriction the rest of the initializer does.
+        Expr::IfElse { cond, then, els } => {
+            check_initializer(cond, globals, reg)?;
+            check_initializer(then, globals, reg)?;
+            check_initializer(els, globals, reg)
+        }
+        Expr::Otherwise { value, fallback } => {
+            check_initializer(value, globals, reg)?;
+            check_initializer(fallback, globals, reg)
+        }
         _ => Ok(()),
     }
 }
@@ -1467,7 +1705,7 @@ fn place_root(place: &Expr) -> Option<&str> {
 fn undeclared_type(ty: Ty, reg: &Registry) -> Option<&'static str> {
     let name = match ty {
         Ty::Record(n) => n,
-        Ty::Array(Elem::Record(n)) | Ty::Dict(Elem::Record(n)) => n,
+        Ty::Array(Elem::Record(n)) | Ty::Dict(Elem::Record(n)) | Ty::Optional(Elem::Record(n)) => n,
         // An inline array's element is a type like any other: `Point[4]` is
         // unknown exactly when `Point` is.
         Ty::CArray(a) => return undeclared_type(a.elem, reg),
@@ -2543,7 +2781,7 @@ mod tests {
         use crate::registry::{ComponentDesc, ComponentKind};
         use crate::Signature;
         let mut r = Registry::core();
-        r.insert("sys_sleep_ms", Signature { params: vec![Ty::Int], ret: None }, "x");
+        r.insert("sys_sleep_ms", Signature::simple(vec![Ty::Int], None), "x");
         r.insert_component(ComponentDesc {
             name: "form".into(),
             a11y_role: 0,

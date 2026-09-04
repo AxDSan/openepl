@@ -45,7 +45,10 @@ pub fn c_type(t: Ty) -> Option<&'static str> {
         // array is a c-record field shape: none is ever a standalone exported
         // type — no sub signature carries one — so none has a C prototype
         // spelling here, alongside the runtime-owned aggregates.
-        Ty::Byte
+        // An optional is a local's type: no sub signature carries one, so it
+        // has no C spelling either.
+        Ty::Optional(_)
+        | Ty::Byte
         | Ty::Int16
         | Ty::Float
         | Ty::CArray(_)

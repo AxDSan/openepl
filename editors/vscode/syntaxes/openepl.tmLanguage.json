@@ -7,6 +7,15 @@
       "include": "#comment"
     },
     {
+      "include": "#raw-block-string"
+    },
+    {
+      "include": "#block-string"
+    },
+    {
+      "include": "#raw-string"
+    },
+    {
       "include": "#string"
     },
     {
@@ -29,6 +38,12 @@
     },
     {
       "include": "#keyword"
+    },
+    {
+      "include": "#statement-word"
+    },
+    {
+      "include": "#expression-word"
     },
     {
       "include": "#type"
@@ -61,6 +76,29 @@
           "name": "constant.character.escape.openepl"
         }
       ]
+    },
+    "block-string": {
+      "comment": "A block literal. Its escapes still escape, so it is the ordinary string rule with a longer delimiter; it is listed before `string` so the opening `\"\"\"` is not claimed as an empty literal followed by a quote.",
+      "name": "string.quoted.triple.openepl",
+      "begin": "\"\"\"",
+      "end": "\"\"\"",
+      "patterns": [
+        {
+          "match": "\\\\.",
+          "name": "constant.character.escape.openepl"
+        }
+      ]
+    },
+    "raw-block-string": {
+      "comment": "Raw: nothing inside is interpreted, so the body has no patterns at all — which is exactly the difference the highlighting should show.",
+      "name": "string.quoted.triple.raw.openepl",
+      "begin": "r\"\"\"",
+      "end": "\"\"\""
+    },
+    "raw-string": {
+      "name": "string.quoted.double.raw.openepl",
+      "begin": "r\"",
+      "end": "\""
     },
     "number": {
       "comment": "Hex and binary bit patterns first, so `0xFF` is one number rather than `0` followed by a name. `_` groups digits.",
@@ -122,12 +160,22 @@
       "match": "\\b(module|use|target|sub|end|let|var|call|if|else|while|form|on|and|or|not)\\b",
       "name": "keyword.control.openepl"
     },
+    "statement-word": {
+      "comment": "The statement words that lead a block or a check. Like the bitwise operators they are soft keywords in the language — a variable may still be named for one — which a grammar this size cannot tell apart, so a name that collides is highlighted as the keyword.",
+      "match": "\\b(match|when|repeat|times|assert|enum|defer|some|where)\\b",
+      "name": "keyword.control.openepl"
+    },
+    "expression-word": {
+      "comment": "The words that join or guard a value: `then` for the `if` written as a value, `otherwise` for what a failure or an absent optional falls back to, `check` for the call that returns early, and `as` for the name `if some` binds. Soft keywords too, with the same caveat as above.",
+      "match": "\\b(then|otherwise|check|as)\\b",
+      "name": "keyword.control.openepl"
+    },
     "type": {
       "match": "\\b(int|int64|double|bool|text|bytes|ptr)\\b",
       "name": "support.type.openepl"
     },
     "constant": {
-      "match": "\\b(true|false)\\b",
+      "match": "\\b(true|false|none)\\b",
       "name": "constant.language.openepl"
     },
     "call": {

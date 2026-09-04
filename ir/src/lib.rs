@@ -15,11 +15,13 @@
 
 pub mod lexer;
 pub mod parser;
+pub mod desugar;
 pub mod registry;
 pub mod sema;
 pub mod validate;
 
-pub use parser::{parse, ParseError};
+pub use desugar::expand_defer;
+pub use parser::{parse, parse_with, ParseError, ParseOptions};
 pub use registry::Registry;
 pub use validate::{validate, ValidateError};
 
@@ -216,6 +218,20 @@ pub enum Ty {
     /// of the keyed collection, and for the same reason: `dict_count` does not
     /// care, and five spellings of it would be five chances to disagree.
     AnyDict,
+    /// `text?` — a value that may not be there.
+    ///
+    /// It is a **local's** type and nothing else's: an optional never crosses a
+    /// slot, a parameter, a return, an array element or a record field, because
+    /// it is not one value in the ABI's sense. What the backend keeps is the
+    /// value in its own type plus a hidden truth value beside it saying whether
+    /// the value is there — which is why the inner type is an `Elem`: a scalar
+    /// or a record, the things that fit in one slot.
+    ///
+    /// The checker refuses to read one as a `T`. `EXPR otherwise FALLBACK`
+    /// supplies the value that is not there, and `if some v as value` binds the
+    /// one that is — those two are the only ways in, and both leave a plain `T`
+    /// behind them.
+    Optional(Elem),
 }
 
 impl Ty {
@@ -250,6 +266,7 @@ impl Ty {
             // named has no fixed set of spellings to enumerate.
             Ty::Dict(e) => intern(&format!("{}{{}}", e.as_str())),
             Ty::AnyDict => "dictionary",
+            Ty::Optional(e) => intern(&format!("{}?", e.as_str())),
             Ty::Array(Elem::Record(n)) => intern(&format!("{n}[]")),
         }
     }
@@ -374,6 +391,11 @@ impl Ty {
             // yields the element's surface type), so this arm only keeps the
             // match exhaustive.
             Ty::CArray(_) => 14, // an address, if it ever were one
+            // An optional is a local's type, never a slot's: the value crosses
+            // the ABI as the plain `T` it holds, with the "is it there" kept
+            // beside it in the caller's own frame. This arm keeps the match
+            // exhaustive and is never reached in marshaling.
+            Ty::Optional(e) => e.ty().sdt_tag(),
             Ty::Array(e) => ARRAY | e.ty().sdt_tag(),
             Ty::AnyArray => ARRAY | ALL,
             Ty::AnyElem => ALL,
@@ -420,10 +442,36 @@ impl Ty {
 
 /// A command's signature: parameter slot types plus an optional return slot
 /// (`None` = a void command, callable only as a statement).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Signature {
     pub params: Vec<Ty>,
     pub ret: Option<Ty>,
+    /// Parameter names, parallel to `params` — what a named argument
+    /// (`connect(host: "x")`) is matched against. Empty for a library command,
+    /// whose metadata carries types only; a call to one is positional, and the
+    /// desugar says so rather than guessing a name.
+    pub names: Vec<String>,
+    /// The default value of each parameter, parallel to `params`; `None` is a
+    /// required one. Only a `sub` may declare defaults — a `dll` names someone
+    /// else's function, which has no say in what a missing argument means.
+    pub defaults: Vec<Option<Expr>>,
+}
+
+impl Signature {
+    /// A signature with types only: what a library command has, and what every
+    /// caller that predates named arguments builds.
+    pub fn simple(params: Vec<Ty>, ret: Option<Ty>) -> Signature {
+        Signature {
+            params,
+            ret,
+            ..Signature::default()
+        }
+    }
+
+    /// The 1-based position of the parameter called `name`.
+    pub fn param_index(&self, name: &str) -> Option<usize> {
+        self.names.iter().position(|n| n == name).map(|i| i + 1)
+    }
 }
 
 /// Comparison operators. `=` is equality *in expression position*; assignment
@@ -611,6 +659,82 @@ pub enum Expr {
         value: Box<Expr>,
         hole: String,
     },
+    /// `if COND then A else B` used **as a value** — the conditional
+    /// expression. Both arms must have one type, and that is the type of the
+    /// whole thing; exactly one arm is evaluated.
+    ///
+    /// It is the same choice the block `if` makes, written where a value is
+    /// wanted rather than where a statement is, which is what lets
+    /// `let label: text = if n = 1 then "item" else "items"` be one line
+    /// instead of a `var` and four. The two forms never collide: a statement
+    /// that begins with `if` is always the block, and this one is reached only
+    /// from expression position, where `if` began nothing before. `then` is a
+    /// soft keyword — it means this only between an `if` condition and its
+    /// first arm, so a variable named `then` is untouched.
+    IfElse {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Box<Expr>,
+    },
+    /// `EXPR otherwise FALLBACK` — the value of `EXPR`, unless the call in it
+    /// failed, in which case `FALLBACK`.
+    ///
+    /// A fallible command reports failure by leaving a code in the error slot
+    /// (see `last_error_code`), so this is sugar for exactly what a program
+    /// writes by hand today: run `EXPR` into a temporary, and then
+    /// `if last_error_code() <> 0 then FALLBACK else <that temporary>`. The
+    /// backend lowers it as that `IfElse`, so there is one conditional
+    /// semantics and not two. Both sides must have one type.
+    ///
+    /// It does **not** clear the slot: `last_error_code()` still reports what
+    /// went wrong afterwards, which is what lets a fallback and a log coexist.
+    /// One `otherwise` per expression — a second would test a slot the first
+    /// fallback did not clear and take the last arm every time, so it is
+    /// refused rather than quietly wrong.
+    Otherwise {
+        value: Box<Expr>,
+        fallback: Box<Expr>,
+    },
+    /// `[EXPR for each x in xs where COND]` — the list a loop would have built.
+    ///
+    /// It is the `for each` the language already has, written as a value: a
+    /// fresh array, the same loop over the same four collection kinds, an
+    /// `append` of `body` each turn, and — when `cond` is written — an `if`
+    /// around that append. The backend builds exactly those statements and
+    /// hands back the array, so a comprehension can do nothing a hand-written
+    /// loop could not, and iterates in the one place every other loop does.
+    ///
+    /// The bindings are the `for each` header's, in full: `elem`, the `, VALUE`
+    /// a dictionary's value binds to, and the `at IDX` position counting from 1.
+    /// `holds` is the element type, which the parser cannot know (it is the type
+    /// of `body` under those bindings) — the desugar fills it in, the way it
+    /// answers every other question only the registry can.
+    Comprehension {
+        body: Box<Expr>,
+        elem: String,
+        value: Option<String>,
+        index: Option<String>,
+        coll: Box<Expr>,
+        cond: Option<Box<Expr>>,
+        holds: Option<Elem>,
+    },
+    /// `none` — the optional that holds nothing.
+    ///
+    /// It has no type of its own, exactly as `[]` has none: what it is the
+    /// absence *of* comes from the declaration it is written under, so
+    /// `let v: text? = none` is where it means something and `let v = none` is
+    /// refused.
+    NoneLit,
+    /// Whether an optional holds a value — the hidden truth value beside it.
+    ///
+    /// Internal: no program writes this. `if some v as value` and
+    /// `v otherwise d` are the two spellings, and both produce it.
+    HasValue(Box<Expr>),
+    /// The value inside an optional, read where something has already proved it
+    /// is there. Internal, for the same reason [`Expr::HasValue`] is: it is one
+    /// half of what `if some` and `otherwise` expand to, and unguarded it would
+    /// read a value that was never stored.
+    Unwrap(Box<Expr>),
     /// `and` / `or`, short-circuiting.
     Logical(LogicalOp, Box<Expr>, Box<Expr>),
     /// `not EXPR`.
@@ -627,6 +751,29 @@ pub enum Expr {
         base: Box<Expr>,
         index: Box<Expr>,
     },
+    /// `xs[2..5]`, `s[6..]`, `bs[..3]` — a slice: the run of a collection from
+    /// one position to another, **inclusive at both ends**, positions counting
+    /// from 1 like every other position in the language.
+    ///
+    /// It is sugar that becomes a concrete command once the checker knows what
+    /// `base` is — the same bargain `in` makes — because the three things it
+    /// runs over answer to three different commands: `substr` for text,
+    /// `bytes_slice` for a byte-set, `slice` for an array. A missing bound is
+    /// the collection's own end: `from` absent is 1, `to` absent is its length,
+    /// and `xs[..]` is a copy.
+    ///
+    /// Out-of-range bounds are clamped rather than refused, which is what
+    /// `substr` has always done — a start below 1 reads from 1, a `to` past the
+    /// end stops at the end, and a `to` before the `from` is an empty result.
+    /// A slice is where a program *asks* how much is there, so failing would
+    /// mean writing the bounds check the slice was supposed to be.
+    Slice {
+        base: Box<Expr>,
+        /// The first position, or `None` for "from the start".
+        from: Option<Box<Expr>>,
+        /// The last position, **included**, or `None` for "to the end".
+        to: Option<Box<Expr>>,
+    },
     /// `[a, b, c]` — a new array. Every element must share one type; an empty
     /// `[]` takes its type from where it is going, which is why the checker
     /// carries an expected type rather than inferring bottom-up alone.
@@ -641,6 +788,26 @@ pub enum Expr {
         name: String,
         fields: Vec<(String, Expr)>,
     },
+    /// `point{..p, y: 9}` — a copy of `p` with some fields replaced.
+    ///
+    /// Sugar with a lifetime of one pass: the desugar reads the record's field
+    /// list and rewrites it into the `RecordLit` the author would have written
+    /// by hand, with every field they left out spelled `base.field`. `base` is
+    /// restricted to a *place* (a name, or a field/index path from one) so that
+    /// reading it once per field is the same as reading it once.
+    RecordUpdate {
+        name: String,
+        base: Box<Expr>,
+        fields: Vec<(String, Expr)>,
+    },
+    /// `port: 8080` in an argument list — a named argument, on its way to the
+    /// slot the callee named `port`.
+    ///
+    /// It exists only between the parser and the desugar, which matches every
+    /// label to a parameter and hands the rest of the compiler the plain
+    /// positional call. Anything that meets one later is looking at an argument
+    /// list that was never resolved, and says so.
+    Labeled { name: String, value: Box<Expr> },
     /// `EXPR.name` — one field of a record.
     ///
     /// `p.x` on its own arrives as `GetProperty` (a component read and a field
@@ -777,6 +944,18 @@ impl Stmt {
 /// A single statement inside a subroutine body.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
+    /// `let NAME = EXPR` — a binding whose type is still to be read off the
+    /// initializer.
+    ///
+    /// The parser cannot type an expression (a command's return type lives in
+    /// the registry, a local's in the enclosing scope), so an unannotated `let`
+    /// arrives as this and the desugar turns it into the `Let` the author could
+    /// have written. Nothing downstream ever sees one.
+    LetInfer {
+        name: String,
+        value: Expr,
+        mutable: bool,
+    },
     /// `let NAME: TY = EXPR` (immutable) or `var NAME: TY = EXPR` (mutable).
     Let {
         name: String,
@@ -836,6 +1015,26 @@ pub enum StmtKind {
     },
     /// `while COND ... end`.
     While { cond: Expr, body: Vec<Stmt> },
+    /// `match E` / `when V1, V2: ...` / `else: ...` / `end`.
+    ///
+    /// It is an if/else-if chain that compares one value with `=`, and it is
+    /// lowered to exactly that. It earns a node of its own for the reason
+    /// `ForEach` does: the chain must test **one** evaluation of `E`, so `E`
+    /// has to be bound to a hidden local first, and a `let` needs its type
+    /// written out — which the parser cannot know. So the binding is made where
+    /// the type is: the checker types `E` and the backend pins it to a slot,
+    /// after which every arm is the ordinary `Cmp(Eq)` a hand-written
+    /// `if e = v1 or e = v2` would be.
+    ///
+    /// `arms` holds each `when` with its values (more than one is "any of
+    /// these") and its body, in source order; `otherwise` is the optional
+    /// final `else`. A `match` with no arm matching and no `else` does nothing,
+    /// exactly as an `if` with no `else` does.
+    Match {
+        scrutinee: Expr,
+        arms: Vec<(Vec<Expr>, Vec<Stmt>)>,
+        otherwise: Option<Vec<Stmt>>,
+    },
     /// `for NAME = START to LIMIT [step K] ... end`.
     ///
     /// `NAME` is an `int` that exists for the loop and is immutable inside it.
@@ -884,6 +1083,37 @@ pub enum StmtKind {
     Continue,
     /// `return` (from a sub with no return type) or `return EXPR`.
     Return { value: Option<Expr> },
+    /// `if some EXPR as NAME` — run the body with the optional's value bound to
+    /// `NAME`, and only when there is one.
+    ///
+    /// It is the test and the unwrapping in one line, because separately they
+    /// are two chances to write the second without the first. The desugar turns
+    /// it into the `if` it stands for — the hidden truth value as the condition,
+    /// a `let NAME` reading the value as the arm's first statement — so what
+    /// runs is an ordinary conditional and `NAME` is an ordinary local, typed
+    /// `T` and not `T?`, which is what makes the body's uses of it legal.
+    ///
+    /// The `else` runs when the value is absent, and cannot see `NAME`.
+    IfSome {
+        value: Expr,
+        bind: String,
+        body: Vec<Stmt>,
+        otherwise: Option<Vec<Stmt>>,
+    },
+    /// `defer STMT` — run `STMT` when the enclosing block is left, whichever way
+    /// it is left.
+    ///
+    /// It is sugar with no run-time machinery behind it: [`expand_defer`] copies
+    /// the statement to every exit of the block it was written in — the last
+    /// line, every `return` after it, and every `break`/`continue` that leaves
+    /// that block — so what runs is the program the author could have written by
+    /// hand, with the closing paired to the opening instead of scattered. Several
+    /// defers in one block unwind in reverse order of declaration, because the
+    /// second one's cleanup was set up while the first one's was still standing.
+    ///
+    /// The checker sees this node, not the copies, so a mistake inside a
+    /// deferred statement is reported once.
+    Defer(Box<Stmt>),
 }
 
 /// A subroutine (EPL 子程序).
@@ -897,6 +1127,14 @@ pub struct Sub {
     /// Declared parameters, in order: `(name, type)`. Parameters are immutable
     /// inside the body, like a `let`.
     pub params: Vec<(String, Ty)>,
+    /// The default value of each parameter, parallel to `params`; `None` is a
+    /// required one. Beside `params` rather than inside it so that everything
+    /// which already reads the pairs keeps reading them.
+    ///
+    /// Only *trailing* parameters may have one — a gap would make
+    /// `f(1, 2)` mean different things depending on which slot the reader
+    /// counted from — and the parser refuses the gap where it is written.
+    pub defaults: Vec<Option<Expr>>,
     /// Declared return type; `None` is a sub that returns nothing and may only
     /// be invoked with `call`.
     pub ret: Option<Ty>,
@@ -922,6 +1160,8 @@ impl Sub {
         Signature {
             params: self.params.iter().map(|(_, t)| *t).collect(),
             ret: self.ret,
+            names: self.params.iter().map(|(n, _)| n.clone()).collect(),
+            defaults: self.defaults.clone(),
         }
     }
 
@@ -1094,6 +1334,12 @@ impl DllDecl {
         Signature {
             params: self.params.iter().map(|(_, t)| *t).collect(),
             ret: self.ret,
+            // A foreign function has parameter names, so `MessageBoxA(text: "hi")`
+            // works — but no defaults: the C function on the other side has no
+            // opinion about a missing argument, and inventing one here would be
+            // OpenEPL guessing at someone else's contract.
+            names: self.params.iter().map(|(n, _)| n.clone()).collect(),
+            defaults: vec![None; self.params.len()],
         }
     }
 

@@ -27,6 +27,7 @@ static const int32_t P_A[]     = { OE_SDT_ANY_ARRAY };
 static const int32_t P_AE[]    = { OE_SDT_ANY_ARRAY, OE_SDT_ANY_ELEM };
 static const int32_t P_AI[]    = { OE_SDT_ANY_ARRAY, OE_SDT_INT };
 static const int32_t P_AT[]    = { OE_SDT_ANY_ARRAY, OE_SDT_TEXT };
+static const int32_t P_AII[]   = { OE_SDT_ANY_ARRAY, OE_SDT_INT, OE_SDT_INT };
 static const int32_t P_B[]     = { OE_SDT_BIN };
 static const int32_t P_BI[]    = { OE_SDT_BIN, OE_SDT_INT };
 static const int32_t P_BII[]   = { OE_SDT_BIN, OE_SDT_INT, OE_SDT_INT };
@@ -60,6 +61,8 @@ static const OpenEPL_CommandDesc CORE_COMMANDS[] = {
     CMD("read_line",    oe_read_line,    OE_SDT_TEXT, 0, NULL),
     CMD("input_ended",  oe_input_ended,  OE_SDT_BOOL, 0, NULL),
     CMD("ask",          oe_ask,          OE_SDT_TEXT, 1, P_T),
+    /* what a failed `assert` runs: print the message and stop, failing */
+    CMD("assert_failed", oe_assert_failed, OE_SDT_NULL, 1, P_T),
     /* errors — zero arity is what makes an out-parameter expressible */
     CMD("last_error_code", oe_last_error_code, OE_SDT_INT,  0, NULL),
     CMD("last_error_text", oe_last_error_text, OE_SDT_TEXT, 0, NULL),
@@ -119,6 +122,10 @@ static const OpenEPL_CommandDesc CORE_COMMANDS[] = {
     CMD("index_of", oe_ary_index_of, OE_SDT_INT,       2, P_AE),
     CMD("join",     oe_ary_join,     OE_SDT_TEXT,      2, P_AT),
     CMD("split",    oe_ary_split,    OE_SDT_ARRAY_OF(OE_SDT_TEXT), 2, P_TT),
+    /* `slice(xs, start, count)` is what `xs[a..b]` becomes; it is a command in
+     * its own right so the shorthand adds no semantics the language did not
+     * already have, and so a computed run can be taken without one. */
+    CMD("slice",    oe_ary_slice,    OE_SDT_ANY_ARRAY, 3, P_AII),
     /* byte-sets */
     CMD("bytes_new",       oe_bin_make,      OE_SDT_BIN,  1, P_I),
     CMD("bytes_count",     oe_bin_size,      OE_SDT_INT,  1, P_B),
@@ -126,6 +133,7 @@ static const OpenEPL_CommandDesc CORE_COMMANDS[] = {
     CMD("bytes_set",       oe_bin_put,       OE_SDT_NULL, 3, P_BII),
     CMD("bytes_from_text", oe_bin_from_text, OE_SDT_BIN,  1, P_T),
     CMD("text_from_bytes", oe_bin_to_text,   OE_SDT_TEXT, 1, P_B),
+    CMD("bytes_slice",     oe_bin_slice,     OE_SDT_BIN,  3, P_BII),
     /* dictionaries — values found by name.  `dict_get` on a key that is not
      * there answers the sentinel for its value type and sets the error slot;
      * `dict_has` is the predicate that tells that apart from a stored 0. */

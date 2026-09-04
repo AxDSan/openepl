@@ -179,6 +179,37 @@ void oe_ary_append(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     r->v.ptr = out;
 }
 
+/* A run of elements, from `start`, `count` of them, as a new array.
+ *
+ * The bounds are CLAMPED rather than refused, and clamped exactly the way
+ * `substr` does it — which is the only slice the language had before this one,
+ * and two slices that disagree about the same out-of-range request would be
+ * worse than either rule on its own. So a start below 1 reads from 1, a count
+ * that runs past the end stops at the end, and a request entirely outside the
+ * array is the empty array. `xs[a..b]` reaches here, and a slice is where a
+ * program asks how much is there: failing would mean writing the bounds check
+ * the slice was meant to be.
+ *
+ * Elements are copied as the 64-bit values they are, exactly as `append` does:
+ * an array of text ends up holding the same pointers, not copies of the text. */
+void oe_ary_slice(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
+    (void)c;
+    OpenEPL_Array *a = arg_ary(argv, 0);
+    int32_t len = ary_len(a);
+    int32_t start = oe_arg_int(argv, 1), count = oe_arg_int(argv, 2);
+    int32_t tag = a ? a->elem_tag : OE_SDT_INT;
+    if (start < 1) start = 1;
+    if (count < 0) count = 0;
+    if (start > len) count = 0;
+    else if (start - 1 + count > len) count = len - (start - 1);
+    OpenEPL_Array *out = (OpenEPL_Array *)oe_ary_new(tag, count);
+    if (!out) { r->tag = OE_SDT_ARRAY_OF(tag); r->v.ptr = NULL; return; }
+    if (count) memcpy(elems(out), elems(a) + (start - 1), (size_t)count * 8);
+    oe_error_clear();
+    r->tag = OE_SDT_ARRAY_OF(tag);
+    r->v.ptr = out;
+}
+
 /* In place: removing shortens, and shortening never needs to move anything.
  * That is why `remove` is a statement and `append` is a value. */
 void oe_ary_remove(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
@@ -320,6 +351,24 @@ void oe_bin_byte(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
 void oe_bin_put(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
     (void)c; (void)r;
     oe_bin_set(argv[0].v.ptr, oe_arg_int(argv, 1), oe_arg_int(argv, 2));
+}
+
+/* A run of bytes, clamped exactly as `slice` and `substr` are — see the note on
+ * `oe_ary_slice`. Positions count from 1, and the count is how many bytes. */
+void oe_bin_slice(OpenEPL_Slot *r, int32_t c, OpenEPL_Slot *argv) {
+    (void)c;
+    OpenEPL_Bin *b = arg_bin(argv, 0);
+    int32_t len = b ? b->len : 0;
+    int32_t start = oe_arg_int(argv, 1), count = oe_arg_int(argv, 2);
+    if (start < 1) start = 1;
+    if (count < 0) count = 0;
+    if (start > len) count = 0;
+    else if (start - 1 + count > len) count = len - (start - 1);
+    OpenEPL_Bin *out = (OpenEPL_Bin *)oe_bin_new(count);
+    if (out && count) memcpy(bin_bytes(out), bin_bytes(b) + (start - 1), (size_t)count);
+    oe_error_clear();
+    r->tag = OE_SDT_BIN;
+    r->v.ptr = out;
 }
 
 /* Text is UTF-8, so its bytes ARE its encoding: the round trip is exact, and

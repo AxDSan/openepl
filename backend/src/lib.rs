@@ -42,6 +42,25 @@ fn err<T>(msg: impl Into<String>) -> Result<T, LowerError> {
     Err(LowerError { msg: msg.into() })
 }
 
+/// The hidden local that carries "is the value there" for the optional `name`.
+/// `$` is not an identifier character, so no program can name it.
+fn has_name(name: &str) -> String {
+    format!("{name}$has")
+}
+
+/// The zero of a type, for the value half of a `none`: nothing will read it
+/// (the truth beside it says so), but leaving the slot untouched would make a
+/// stray read a different answer on every run.
+fn zero_operand(t: Ty) -> String {
+    match t {
+        Ty::Double => "0.000000e+00".to_string(),
+        Ty::Text | Ty::Bytes | Ty::Ptr | Ty::Array(_) | Ty::Record(_) | Ty::Dict(_) => {
+            "null".to_string()
+        }
+        _ => "0".to_string(),
+    }
+}
+
 fn llvm_ty(t: Ty) -> &'static str {
     match t {
         Ty::Int => "i32",
@@ -79,6 +98,12 @@ fn llvm_ty(t: Ty) -> &'static str {
         // Signature-only types; `resolve_ret` replaces them with what the call
         // actually produced before any value carries one.
         Ty::AnyArray | Ty::AnyElem | Ty::AnyDict => "ptr",
+        // An optional is two locals — the value in its own width, and a hidden
+        // truth value beside it — so it never has a width of its own. Anything
+        // that reaches this asked for storage of a shape optionals do not have;
+        // the width returned is the value half's, which is the only half a
+        // stray load could sensibly want.
+        Ty::Optional(e) => llvm_ty(e.ty()),
     }
 }
 
@@ -107,6 +132,17 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     with_subs.register_records(m);
     with_subs.register_consts(m);
     let reg = &with_subs;
+
+    // The same rewrite the checker ran: named arguments into positional ones,
+    // omitted arguments into their defaults, an inferred `let` into a typed
+    // one, a record update into the literal it stands for. Running it here as
+    // well is what keeps the two from ever disagreeing about what a call means
+    // — there is one implementation, and both call it.
+    let (desugared, sugar_errs) = openepl_ir::desugar::desugar(m, reg);
+    if let Some(first) = sugar_errs.first() {
+        return err(first.msg.clone());
+    }
+    let m = &desugared;
 
     let target = m.target();
     let subs: Vec<_> = m.subs().collect();
@@ -138,6 +174,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         loops: Vec::new(),
         ret_ty: None,
         needs_notify: false,
+        needs_error_clear: false,
         dll_cached: BTreeSet::new(),
         needs_dll_get: false,
         needs_dll_text: false,
@@ -171,7 +208,11 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
             writeln!(lo.body, "  store {} %p{i}, ptr {slot}", llvm_ty(*ty)).unwrap();
             lo.vars.insert(name.clone(), (slot, *ty));
         }
-        for stmt in &sub.body {
+        // `defer` is copied to the block exits here, where the sub's return
+        // type is known: a deferred cleanup must not run before the value the
+        // `return` is carrying has been computed.
+        let body = openepl_ir::expand_defer(&sub.body, sub.ret);
+        for stmt in &body {
             lo.stmt(stmt)?;
         }
         // A value-returning sub ends in `unreachable`: the validator has proven
@@ -360,6 +401,9 @@ struct Lowerer<'a> {
     /// Whether any lowered code aborts through `oe_notify`, which is declared
     /// only when it is actually called.
     needs_notify: bool,
+    /// Whether the error slot is cleared anywhere — an optional's initializer
+    /// is the only thing that does it.
+    needs_error_clear: bool,
     /// Foreign functions called, keyed by their declaration name.  Each needs
     /// one module-level `ptr` global to cache its resolved address across
     /// calls, so the symbol is looked up once no matter how many call sites
@@ -803,6 +847,11 @@ impl Lowerer<'_> {
     fn stmt(&mut self, s: &openepl_ir::Stmt) -> Result<(), LowerError> {
         use openepl_ir::StmtKind;
         match &s.kind {
+            // Erased by the desugar; reaching one means the module was lowered
+            // without it.
+            StmtKind::LetInfer { name, .. } => {
+                return err(format!("the type of `{name}` was never worked out"))
+            }
             StmtKind::Let {
                 name,
                 ty,
@@ -831,6 +880,18 @@ impl Lowerer<'_> {
                         return Ok(());
                     }
                 }
+                // An optional is two locals, not one: the value in its own
+                // width, and the truth beside it saying whether the value is
+                // there. Nothing else in lowering knows that — `Unwrap` reads
+                // the first, `HasValue` the second, and the checker has already
+                // refused every other reading of the name.
+                if let Ty::Optional(elem) = ty {
+                    let slot = self.alloca(elem.ty());
+                    let has = self.alloca(Ty::Bool);
+                    self.vars.insert(name.clone(), (slot, *ty));
+                    self.vars.insert(has_name(name), (has, Ty::Bool));
+                    return self.store_optional(name, *elem, value);
+                }
                 let v = self.eval_hinted(value, Some(*ty))?;
                 if v.ty != *ty {
                     return err(format!(
@@ -851,6 +912,12 @@ impl Lowerer<'_> {
                 Ok(())
             }
             StmtKind::Assign { name, value } => {
+                // Assigning to a `var v: T?` rewrites both halves, through the
+                // same code the declaration used — so `v = env_get("K")` and
+                // `let v: text? = env_get("K")` mean the same thing.
+                if let Some((_, Ty::Optional(elem))) = self.vars.get(name).cloned() {
+                    return self.store_optional(name, elem, value);
+                }
                 let want = self
                     .vars
                     .get(name)
@@ -980,6 +1047,62 @@ impl Lowerer<'_> {
                 }
                 writeln!(self.body, "  br label %{done}").unwrap();
                 writeln!(self.body, "{done}:").unwrap();
+                Ok(())
+            }
+            // A `match` is an if/else-if chain that tests one evaluation of
+            // the value. The binding is made here rather than in the parser
+            // for the reason `for each`'s is: the hidden local's type is the
+            // value's type, and nothing before this knows it. Past the store,
+            // every arm is the ordinary `x = v` (or-joined for a `when` that
+            // lists several) a hand-written chain would have.
+            StmtKind::Match {
+                scrutinee,
+                arms,
+                otherwise,
+            } => {
+                use openepl_ir::Stmt;
+                let line = s.line;
+                let v = self.eval(scrutinee)?;
+                let ty = v.ty;
+                let slot = self.alloca(ty);
+                writeln!(
+                    self.body,
+                    "  store {} {}, ptr {slot}",
+                    llvm_ty(ty),
+                    v.operand
+                )
+                .unwrap();
+                let name = self.fresh_hidden("match");
+                self.vars.insert(name.clone(), (slot, ty));
+                let subject = Expr::Var(name);
+                let mut if_arms: Vec<(Expr, Vec<Stmt>)> = Vec::new();
+                for (values, body) in arms {
+                    let mut cond: Option<Expr> = None;
+                    for val in values {
+                        let test = Expr::Cmp(
+                            CmpOp::Eq,
+                            Box::new(subject.clone()),
+                            Box::new(val.clone()),
+                        );
+                        cond = Some(match cond {
+                            None => test,
+                            Some(c) => {
+                                Expr::Logical(LogicalOp::Or, Box::new(c), Box::new(test))
+                            }
+                        });
+                    }
+                    let Some(cond) = cond else {
+                        return err("a `when` must list at least one value".to_string());
+                    };
+                    if_arms.push((cond, body.clone()));
+                }
+                self.stmt(&Stmt::new(
+                    StmtKind::If {
+                        arms: if_arms,
+                        otherwise: otherwise.clone(),
+                    },
+                    line,
+                ))?;
                 Ok(())
             }
             StmtKind::While { cond, body } => {
@@ -1220,6 +1343,14 @@ impl Lowerer<'_> {
                 let dead = self.fresh_label("postjump");
                 writeln!(self.body, "{dead}:").unwrap();
                 Ok(())
+            }
+            // Copied to the block's exits by `expand_defer` before lowering
+            // begins; reaching one means a body was lowered without that pass.
+            StmtKind::Defer(_) => err("a `defer` was never copied to the block's exits"),
+            // Expanded by the desugar into an `if`; reaching one means the
+            // module was lowered without that pass.
+            StmtKind::IfSome { bind, .. } => {
+                err(format!("`if some ... as {bind}` was never expanded into an `if`"))
             }
             StmtKind::Return { value } => {
                 match value {
@@ -1585,6 +1716,15 @@ impl Lowerer<'_> {
         }
         if let Expr::BitNot(inner) = e {
             return self.eval_bitnot(inner, hint);
+        }
+        // Both conditional forms pass the hint to their arms, for the same
+        // reason a bitwise operator does: `let n: int64 = if c then 0 else 1`
+        // must emit i64 constants in both, and only the destination knows.
+        if let Expr::IfElse { cond, then, els } = e {
+            return self.eval_ifelse(cond, then, els, hint);
+        }
+        if let Expr::Otherwise { value, fallback } = e {
+            return self.eval_otherwise(value, fallback, hint);
         }
         self.eval_inner(e)
     }
@@ -2263,6 +2403,171 @@ impl Lowerer<'_> {
     /// as many times as the desugar needs while running `e` only once. The name
     /// begins with `$`, which no source identifier can contain, so a temp never
     /// shadows a program's own variable.
+    /// The local an optional's two halves are kept under. Only a name reaches
+    /// here: `HasValue` and `Unwrap` are made by the desugar out of a binding,
+    /// never out of a computed value, because the two halves have to be read
+    /// from the same storage the one test wrote.
+    fn optional_name(&self, e: &Expr) -> Result<String, LowerError> {
+        match e {
+            Expr::Var(n) if matches!(self.vars.get(n), Some((_, Ty::Optional(_)))) => Ok(n.clone()),
+            _ => err("a value that may be absent is read through the name it was bound to"),
+        }
+    }
+
+    /// Write both halves of the optional local `name`: the value, and the truth
+    /// beside it.
+    ///
+    /// What sets the truth depends on what the initializer is, and there are
+    /// only three kinds:
+    ///
+    ///  * `none` — nothing is there, and the value half is the zero of its type
+    ///    so that a stray read is a zero rather than whatever was on the stack;
+    ///  * a **call** — the value is there when the call did not fail. The error
+    ///    slot is cleared first, so what is read afterwards is *this* call's
+    ///    verdict and not one an earlier failure left behind — a command that
+    ///    cannot fail never touches the slot, and without the clear it would
+    ///    inherit the last failure in the program;
+    ///  * anything else — a value written down is there.
+    ///
+    /// Copying one optional into another copies both halves, since the source
+    /// already carries its own answer.
+    fn store_optional(&mut self, name: &str, elem: Elem, value: &Expr) -> Result<(), LowerError> {
+        let (slot, _) = self.vars[name].clone();
+        let (has_slot, _) = self.vars[&has_name(name)].clone();
+        let store = |lo: &mut Self, operand: &str| {
+            writeln!(
+                lo.body,
+                "  store {} {operand}, ptr {slot}",
+                llvm_ty(elem.ty())
+            )
+            .unwrap();
+        };
+        let set_has = |lo: &mut Self, operand: &str| {
+            writeln!(lo.body, "  store i32 {operand}, ptr {has_slot}").unwrap();
+        };
+        match value {
+            Expr::NoneLit => {
+                let zero = zero_operand(elem.ty());
+                store(self, &zero);
+                set_has(self, "0");
+            }
+            // One optional into another: both halves travel together, because
+            // the answer to "is it there" belongs to the value and not to the
+            // moment of copying.
+            Expr::Var(n) if matches!(self.vars.get(n), Some((_, Ty::Optional(_)))) => {
+                let v = self.eval(&Expr::Unwrap(Box::new(value.clone())))?;
+                store(self, &v.operand);
+                let h = self.eval(&Expr::HasValue(Box::new(value.clone())))?;
+                set_has(self, &h.operand);
+            }
+            Expr::Call { .. } | Expr::CallThrough { .. } => {
+                self.needs_error_clear = true;
+                writeln!(self.body, "  call void @oe_error_clear()").unwrap();
+                let v = self.eval_hinted(value, Some(elem.ty()))?;
+                if v.ty != elem.ty() {
+                    return err(format!(
+                        "`{name}` holds {}, and the call yields {}",
+                        elem.as_str(),
+                        v.ty.as_str()
+                    ));
+                }
+                store(self, &v.operand);
+                let code = self.eval(&Expr::Call {
+                    cmd: "last_error_code".to_string(),
+                    args: Vec::new(),
+                })?;
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = icmp eq i32 {}, 0", code.operand).unwrap();
+                let w = self.fresh();
+                writeln!(self.body, "  {w} = zext i1 {t} to i32").unwrap();
+                set_has(self, &w);
+            }
+            _ => {
+                let v = self.eval_hinted(value, Some(elem.ty()))?;
+                if v.ty != elem.ty() {
+                    return err(format!(
+                        "`{name}` holds {}, and the value is {}",
+                        elem.as_str(),
+                        v.ty.as_str()
+                    ));
+                }
+                store(self, &v.operand);
+                set_has(self, "1");
+            }
+        }
+        Ok(())
+    }
+
+    /// `[EXPR for each x in xs where COND]` — build the array a loop would have
+    /// built, and hand it back as the value.
+    ///
+    /// The three statements written here are the three a program writes by hand:
+    /// an empty list, a `for each` over the same collection, and an `append`
+    /// inside it — under an `if` when a `where` was written. They go through
+    /// `self.stmt`, so the loop is the *same* loop, break/continue and all, and
+    /// the append is the same `append` (which copies, so the hidden name is
+    /// reassigned each turn, exactly as a hand-written accumulator would be).
+    fn eval_comprehension(&mut self, e: &Expr) -> Result<Val, LowerError> {
+        use openepl_ir::{Stmt, StmtKind};
+        let Expr::Comprehension {
+            body,
+            elem,
+            value,
+            index,
+            coll,
+            cond,
+            holds,
+        } = e
+        else {
+            return err("not a list comprehension");
+        };
+        let Some(holds) = holds else {
+            return err("a list built by a loop was never told what it holds");
+        };
+        let acc = self.fresh_hidden("list");
+        let line = 0;
+        self.stmt(&Stmt::new(
+            StmtKind::Let {
+                name: acc.clone(),
+                ty: Ty::Array(*holds),
+                value: Expr::ArrayLit(Vec::new()),
+                mutable: true,
+            },
+            line,
+        ))?;
+        let push = Stmt::new(
+            StmtKind::Assign {
+                name: acc.clone(),
+                value: Expr::Call {
+                    cmd: "append".to_string(),
+                    args: vec![Expr::Var(acc.clone()), (**body).clone()],
+                },
+            },
+            line,
+        );
+        let inner = match cond {
+            None => vec![push],
+            Some(c) => vec![Stmt::new(
+                StmtKind::If {
+                    arms: vec![((**c).clone(), vec![push])],
+                    otherwise: None,
+                },
+                line,
+            )],
+        };
+        self.stmt(&Stmt::new(
+            StmtKind::ForEach {
+                elem: elem.clone(),
+                value: value.clone(),
+                index: index.clone(),
+                coll: (**coll).clone(),
+                body: inner,
+            },
+            line,
+        ))?;
+        self.eval(&Expr::Var(acc))
+    }
+
     fn bind_temp(&mut self, e: &Expr) -> Result<String, LowerError> {
         let v = self.eval(e)?;
         let slot = self.alloca(v.ty);
@@ -2308,6 +2613,82 @@ impl Lowerer<'_> {
             )),
         );
         self.eval(&desugared)
+    }
+
+    /// `xs[a..b]` — bind the base and both bounds to temps, in the order they
+    /// were written, then lower to the command the base's type answers to:
+    /// `substr` for text, `bytes_slice` for a byte-set, `slice` for an array.
+    ///
+    /// Temps rather than the expressions themselves because each appears twice
+    /// in the rewrite — the base in the length, `from` in the count — and
+    /// `s[f()..g()]` must call each of them once. A missing bound is filled in
+    /// from the temp: `from` absent is 1, `to` absent is the base's own length,
+    /// which is a read of a value already computed and not a second evaluation.
+    ///
+    /// The commands take a **count**, and the slice is inclusive at both ends,
+    /// so the count is `to - from + 1`. Clamping is the command's: a bound
+    /// outside the collection is trimmed, never an error.
+    fn eval_slice(
+        &mut self,
+        base: &Expr,
+        from: Option<&Expr>,
+        to: Option<&Expr>,
+    ) -> Result<Val, LowerError> {
+        let base_t = self.bind_temp(base)?;
+        let bty = self.var_ty(&base_t).expect("temp just bound");
+        let (cmd, len_cmd) = match bty {
+            Ty::Text => ("substr", "length"),
+            Ty::Bytes => ("bytes_slice", "bytes_count"),
+            Ty::Array(_) => ("slice", "count"),
+            other => {
+                return err(format!(
+                    "{} cannot be sliced — `a..b` takes a run of text, of bytes, or of a list",
+                    other.as_str()
+                ))
+            }
+        };
+        // The three commands clamp a start below 1 up to 1 but leave the count
+        // alone, so a raw `substr(s, 0, 4)` reads four characters from the
+        // first. `a..b` counts POSITIONS, and position 0 is not one of them, so
+        // the start is raised to 1 here — before the count is measured from it —
+        // and `s[0..3]` is the three characters at 1, 2 and 3.
+        let start = match from {
+            // A literal start already at or past 1 needs no guard, which is
+            // almost every slice ever written.
+            Some(Expr::IntLit(v)) if *v >= 1 => Expr::IntLit(*v),
+            Some(e) => Expr::Call {
+                cmd: "max_int".to_string(),
+                args: vec![Expr::Var(self.bind_temp(e)?), Expr::IntLit(1)],
+            },
+            None => Expr::IntLit(1),
+        };
+        let end = match to {
+            Some(e) => Expr::Var(self.bind_temp(e)?),
+            None => Expr::Call {
+                cmd: len_cmd.to_string(),
+                args: vec![Expr::Var(base_t.clone())],
+            },
+        };
+        // `to - from + 1`: both ends are included, so a one-position slice
+        // `s[3..3]` is a count of one. `start` may be a `max_int` call, so it is
+        // bound to a temp when it is one — it appears twice below.
+        let start = match start {
+            Expr::IntLit(v) => Expr::IntLit(v),
+            other => Expr::Var(self.bind_temp(&other)?),
+        };
+        let count = Expr::Bin(
+            BinOp::Add,
+            Box::new(Expr::Bin(
+                BinOp::Sub,
+                Box::new(end),
+                Box::new(start.clone()),
+            )),
+            Box::new(Expr::IntLit(1)),
+        );
+        self.eval(&Expr::Call {
+            cmd: cmd.to_string(),
+            args: vec![Expr::Var(base_t), start, count],
+        })
     }
 
     /// `e in xs` / `k in d` / `sub in text` — bind the haystack once (its type
@@ -2361,15 +2742,143 @@ impl Lowerer<'_> {
         self.eval(&desugared)
     }
 
+    /// `if COND then A else B` as a value — one slot, two branches, exactly the
+    /// shape `and`/`or` already lower to.
+    ///
+    /// The `then` arm is evaluated first so its type is known before the slot
+    /// is reserved; allocas are emitted at the top of the function, so
+    /// reserving one part-way through the body is only a bookkeeping order.
+    /// Only one arm runs, so a call in the arm not taken never happens.
+    fn eval_ifelse(
+        &mut self,
+        cond: &Expr,
+        then: &Expr,
+        els: &Expr,
+        hint: Option<Ty>,
+    ) -> Result<Val, LowerError> {
+        let then_l = self.fresh_label("then_v");
+        let else_l = self.fresh_label("else_v");
+        let done = self.fresh_label("ifval");
+        self.branch_on(cond, &then_l, &else_l)?;
+
+        writeln!(self.body, "{then_l}:").unwrap();
+        let tv = self.eval_hinted(then, hint)?;
+        let slot = self.alloca(tv.ty);
+        writeln!(self.body, "  store {} {}, ptr {slot}", llvm_ty(tv.ty), tv.operand).unwrap();
+        writeln!(self.body, "  br label %{done}").unwrap();
+
+        writeln!(self.body, "{else_l}:").unwrap();
+        let ev = self.eval_hinted(els, hint.or(Some(tv.ty)))?;
+        if ev.ty != tv.ty {
+            return err(format!(
+                "both sides of `if` must have one type; `then` is {} and `else` is {}",
+                tv.ty.as_str(),
+                ev.ty.as_str()
+            ));
+        }
+        writeln!(self.body, "  store {} {}, ptr {slot}", llvm_ty(ev.ty), ev.operand).unwrap();
+        writeln!(self.body, "  br label %{done}").unwrap();
+
+        writeln!(self.body, "{done}:").unwrap();
+        let t = self.fresh();
+        writeln!(self.body, "  {t} = load {}, ptr {slot}", llvm_ty(tv.ty)).unwrap();
+        Ok(Val { ty: tv.ty, operand: t })
+    }
+
+    /// `EXPR otherwise FALLBACK` — run `EXPR` into a temporary, then lower
+    /// *literally* the desugar the language documents:
+    /// `if last_error_code() <> 0 then FALLBACK else <that temporary>`.
+    ///
+    /// Reusing the conditional means there is one branch semantics in the
+    /// backend, not two, and the fallback stays lazy for free: it is an arm, so
+    /// it runs only when the call failed.
+    fn eval_otherwise(
+        &mut self,
+        value: &Expr,
+        fallback: &Expr,
+        hint: Option<Ty>,
+    ) -> Result<Val, LowerError> {
+        // A value that may be absent carries its own answer: `otherwise` reads
+        // the truth beside it rather than the error slot, so a fallback taken
+        // long after the call that failed is still taken for the right reason.
+        if let Expr::Var(n) = value {
+            if let Some((_, Ty::Optional(elem))) = self.vars.get(n).cloned() {
+                let desugared = Expr::IfElse {
+                    cond: Box::new(Expr::HasValue(Box::new(value.clone()))),
+                    then: Box::new(Expr::Unwrap(Box::new(value.clone()))),
+                    els: Box::new(fallback.clone()),
+                };
+                return self.eval_hinted(&desugared, hint.or(Some(elem.ty())));
+            }
+        }
+        let t = self.bind_temp(value)?;
+        // The fallback becomes the `then` arm, so it is the one an untyped
+        // literal sits in: `f() otherwise []` in a position that declares
+        // nothing has only the value's own type to take. The checker agreed to
+        // exactly this fallback (`hint.or(Some(value_ty))`).
+        let vty = self.var_ty(&t);
+        let desugared = Expr::IfElse {
+            cond: Box::new(Expr::Cmp(
+                CmpOp::Ne,
+                Box::new(Expr::Call {
+                    cmd: "last_error_code".to_string(),
+                    args: Vec::new(),
+                }),
+                Box::new(Expr::IntLit(0)),
+            )),
+            then: Box::new(fallback.clone()),
+            els: Box::new(Expr::Var(t)),
+        };
+        self.eval_hinted(&desugared, hint.or(vty))
+    }
+
     fn eval_inner(&mut self, e: &Expr) -> Result<Val, LowerError> {
         match e {
             // Intercepted by `eval_hinted`, which is the only caller.
             Expr::Bit(..) | Expr::BitNot(_) => {
                 err("a bitwise operator is lowered by `eval_hinted`")
             }
+            Expr::IfElse { .. } | Expr::Otherwise { .. } => {
+                err("a conditional value is lowered by `eval_hinted`")
+            }
+            Expr::Comprehension { .. } => self.eval_comprehension(e),
+            // `none` never reaches here: it is only ever the initializer of an
+            // optional, and `store_optional` reads it before evaluating.
+            Expr::NoneLit => err("`none` here does not say what it is the absence of"),
+            Expr::HasValue(x) => {
+                let name = self.optional_name(x)?;
+                let (slot, _) = self.vars[&has_name(&name)].clone();
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = load i32, ptr {slot}").unwrap();
+                Ok(Val {
+                    ty: Ty::Bool,
+                    operand: t,
+                })
+            }
+            Expr::Unwrap(x) => {
+                let name = self.optional_name(x)?;
+                let (slot, ty) = self.vars[&name].clone();
+                let Ty::Optional(elem) = ty else {
+                    return err(format!("`{name}` holds no value to unwrap"));
+                };
+                let t = self.fresh();
+                writeln!(self.body, "  {t} = load {}, ptr {slot}", llvm_ty(elem.ty())).unwrap();
+                Ok(Val {
+                    ty: elem.ty(),
+                    operand: t,
+                })
+            }
             Expr::ArrayLit(_) => err("`[]` here does not say what it holds"),
             Expr::DictLit(_) => err("`{}` here does not say what it holds"),
             Expr::RecordLit { name, fields } => self.eval_record_lit(name, fields),
+            // Erased by the desugar; reaching one means the module was lowered
+            // without it.
+            Expr::Labeled { name, .. } => err(format!(
+                "the named argument `{name}:` was never matched to a parameter"
+            )),
+            Expr::RecordUpdate { name, .. } => {
+                err(format!("`{name}{{...}}` was never expanded into its fields"))
+            }
             Expr::Field { base, name } => {
                 let b = self.eval(base)?;
                 match b.ty {
@@ -2392,6 +2901,9 @@ impl Lowerer<'_> {
                 Ok(self.c_load(&p, ty))
             }
             Expr::Index { base, index } => self.eval_index(base, index),
+            Expr::Slice { base, from, to } => {
+                self.eval_slice(base, from.as_deref(), to.as_deref())
+            }
             // `1 <= x <= 12` and `e in xs` are sugar that only becomes a
             // concrete command once the operand types are known — which they are
             // here. Both lower to expressions built entirely from nodes that
@@ -2459,6 +2971,17 @@ impl Lowerer<'_> {
                         if self.reg.record(rec).map(|d| d.is_c).unwrap_or(false) {
                             return Ok(Val { ty, operand: slot });
                         }
+                    }
+                    // A value that may be absent is not a value yet. The
+                    // checker refuses every reading of one that has not been
+                    // unwrapped, so this is unreachable from a program that
+                    // type-checked — and if it ever were reached, a silent load
+                    // would hand back a value nothing had stored.
+                    if let Ty::Optional(_) = ty {
+                        return err(format!(
+                            "`{name}` may hold no value — read it with `{name} otherwise ...` or \
+                             `if some {name} as ...`"
+                        ));
                     }
                     let t = self.fresh();
                     writeln!(self.body, "  {t} = load {}, ptr {slot}", llvm_ty(ty)).unwrap();
@@ -3416,6 +3939,13 @@ impl Lowerer<'_> {
         // with a message. Declared only when something actually aborts.
         if self.needs_notify {
             writeln!(out, "declare ptr @oe_notify(i32, ptr, ptr)\n").unwrap();
+        }
+
+        // The error slot's reset (runtime/oe_error.c). An optional's initializer
+        // clears it before the call it is reading, so that what it reads back is
+        // that call's verdict and not an older failure's.
+        if self.needs_error_clear {
+            writeln!(out, "declare void @oe_error_clear()\n").unwrap();
         }
 
         // The foreign-function loader (runtime/oe_dll.c): resolve-and-cache a

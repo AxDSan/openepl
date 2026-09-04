@@ -81,6 +81,37 @@ fn header_after(src: &str, line: usize, col: usize, name: &str) -> Option<String
     (!rest.is_empty()).then(|| rest.to_string())
 }
 
+/// The `##` lines directly above line `line`, joined, or `None` when there are
+/// none.
+///
+/// A doc comment is read out of the *source*, not the tokens: the lexer drops
+/// every `#` comment before the parser ever sees one, which is exactly the
+/// behaviour a plain `#` note must keep. Two hashes is the whole of the
+/// distinction — `## what this does` is written for a reader of the symbol,
+/// `# why this line is like this` is written for a reader of the line — so
+/// only the doubled form is picked up here, and a `#` comment stays invisible.
+///
+/// Blank lines break the run: a comment paragraph separated from a declaration
+/// by an empty line is about something else.
+fn doc_before(src: &str, line: usize) -> Option<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = line.checked_sub(1)?;
+    while i > 0 {
+        let text = lines.get(i - 1)?.trim();
+        let Some(rest) = text.strip_prefix("##") else {
+            break;
+        };
+        out.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+        i -= 1;
+    }
+    if out.is_empty() {
+        return None;
+    }
+    out.reverse();
+    Some(out.join("\n"))
+}
+
 /// One `type id … end` block (or the `form … end` around them): what it
 /// declares and which lines it spans, so a request from inside it can be
 /// answered with that component's own properties and events.
@@ -118,6 +149,11 @@ pub struct Index {
     /// frequently not yet a legal one — a half-typed parameter list still has
     /// a useful shape to show.
     pub sub_headers: HashMap<String, String>,
+    /// Symbol name -> the `##` lines written directly above its declaration.
+    ///
+    /// Hover is the whole point: a subroutine's header says what it *takes*,
+    /// and this is the only place the author can say what it *does*.
+    pub docs: HashMap<String, String>,
     /// Locals declared in each subroutine, so shadowing resolves correctly.
     locals_by_sub: HashMap<String, Vec<String>>,
 }
@@ -146,6 +182,9 @@ impl Index {
                     if let Some((name, sp)) = ident_at(&toks, i + 1) {
                         if let Some(h) = header_after(src, sp.line, sp.col, &name) {
                             ix.sub_headers.insert(name.clone(), h);
+                        }
+                        if let Some(d) = doc_before(src, sp.line) {
+                            ix.docs.insert(name.clone(), d);
                         }
                         ix.push(name.clone(), sp, true, SymKind::Sub, None);
                         scope = Some(name.clone());
@@ -261,6 +300,34 @@ impl Index {
                     if w == "record" && scope.is_none() && form_depth == 0 =>
                 {
                     if let Some((name, sp)) = ident_at(&toks, i + 1) {
+                        if let Some(d) = doc_before(src, sp.line) {
+                            ix.docs.insert(name.clone(), d);
+                        }
+                        ix.push(name, sp, true, SymKind::Record, None);
+                        i += 2;
+                        while i < toks.len() && toks[i].tok != Tok::End {
+                            i += 1;
+                        }
+                        i += 1; // past `end`
+                        continue;
+                    }
+                }
+                // `enum colour ... end` declares a name and its members. It
+                // is indexed as a type name for the same reason a `record` is,
+                // and its body is skipped wholesale: a member is not a
+                // variable, and out here two identifiers on a line would
+                // otherwise read as a component declaration and swallow the
+                // rest of the file into a block that never closes.
+                Tok::Ident(w)
+                    if w == "enum"
+                        && scope.is_none()
+                        && form_depth == 0
+                        && matches!(toks.get(i + 2).map(|t| &t.tok), Some(Tok::Newline)) =>
+                {
+                    if let Some((name, sp)) = ident_at(&toks, i + 1) {
+                        if let Some(d) = doc_before(src, sp.line) {
+                            ix.docs.insert(name.clone(), d);
+                        }
                         ix.push(name, sp, true, SymKind::Record, None);
                         i += 2;
                         while i < toks.len() && toks[i].tok != Tok::End {
@@ -280,6 +347,9 @@ impl Index {
                     if let Some((name, sp)) = ident_at(&toks, i + 1) {
                         if let Some(h) = header_after(src, sp.line, sp.col, &name) {
                             ix.sub_headers.insert(name.clone(), h);
+                        }
+                        if let Some(d) = doc_before(src, sp.line) {
+                            ix.docs.insert(name.clone(), d);
                         }
                         ix.push(name, sp, true, SymKind::Sub, None);
                         while i < toks.len() && !matches!(toks[i].tok, Tok::Newline | Tok::Eof) {

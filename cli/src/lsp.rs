@@ -441,6 +441,14 @@ impl Server {
         } else {
             return None;
         };
+        // A `##` note above the declaration is the author's own account of the
+        // symbol, and it goes below the signature — which says what the thing
+        // takes, never what it is for. A plain `#` comment is not shown: that
+        // is the whole difference between the two spellings.
+        let text = match ix.docs.get(&occ.name) {
+            Some(doc) => format!("{text}\n\n{doc}"),
+            None => text,
+        };
 
         serde_json::to_value(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -812,6 +820,23 @@ const KEYWORDS: &[&str] = &[
     // does double duty (a membership test `e in xs`, and a range/`for each`
     // bound); `each` and `at` belong to `for each x at i in xs`.
     "increment", "decrement", "in", "each", "at",
+    // The 0.9.0 expression sugar, soft keywords every one. `then` joins an `if`
+    // used as a *value* to its first arm; `otherwise` supplies the value a
+    // failed call did not; `check` leads a statement or a `let` initializer and
+    // returns early when the call it guards failed.
+    "then", "otherwise", "check",
+    // The 0.9.0 control-flow and declaration sugar, soft keywords every one.
+    // `match`/`when` is the if-chain that tests one value; `repeat N times` is
+    // the counting loop with its counter hidden; `assert` is the check a
+    // release build compiles out; `enum` names a run of ints from 1.
+    "match", "when", "repeat", "times", "assert", "enum",
+    // The 0.9.0 hard tier. `some` and `as` open an optional (`if some v as
+    // value`) and are soft keywords claimed only there; `where` filters a list
+    // built by a loop (`[e for each x in xs where c]`); `defer` runs a statement
+    // when its block ends. `none` is the one *literal* among them — a bare
+    // `none` is the empty optional wherever it is written, so it is not usable
+    // as a name.
+    "some", "as", "where", "defer", "none",
 ];
 
 fn item(label: &str, kind: CompletionItemKind, detail: String) -> CompletionItem {

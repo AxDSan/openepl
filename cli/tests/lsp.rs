@@ -372,6 +372,38 @@ fn completion_offers_the_indirect_call_and_bitwise_words() {
     c.shutdown();
 }
 
+/// The words 0.9.0 added are offered like any other keyword.
+///
+/// All but one are *soft* keywords the parser recognises by position — the
+/// lexer reserves nothing for `match`, `defer` or `then`, and a variable may
+/// still be named for any of them — so nothing else in the compiler would
+/// notice if completion forgot one existed. This is where that is noticed.
+/// `none` is the exception, a literal rather than a position, and is offered
+/// beside the rest.
+#[test]
+fn completion_offers_the_shorthand_words() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_complete09.oir";
+    c.open(uri, "module m\nsub main\n  let total: int = 1\n  \nend\n");
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(63, "textDocument/completion", serde_json::json!({
+        "textDocument": { "uri": uri },
+        "position": { "line": 3, "character": 2 }
+    }));
+    let labels = labels(&r);
+    for word in [
+        "then", "otherwise", "check", "match", "when", "repeat", "times",
+        "assert", "enum", "some", "none", "as", "where", "defer",
+    ] {
+        assert!(
+            labels.contains(&word.to_string()),
+            "completion should offer `{word}`: {labels:?}"
+        );
+    }
+    c.shutdown();
+}
+
 #[test]
 fn hover_shows_a_command_signature() {
     let mut c = Client::start();
@@ -383,6 +415,93 @@ fn hover_shows_a_command_signature() {
     let text = r["contents"]["value"].as_str().unwrap_or("");
     assert!(text.contains("print_text"), "hover should name it: {r}");
     assert!(text.contains("command"), "and say what it is: {r}");
+    c.shutdown();
+}
+
+/// A `##` note above a declaration is the author's own account of the symbol,
+/// and hover is the only place it can be read. A plain `#` comment is a note to
+/// whoever is reading the source and must stay invisible — that difference is
+/// the whole of the feature, so both halves are asserted here.
+#[test]
+fn hover_shows_a_doc_comment_and_hides_a_plain_one() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_doc.oir";
+    c.open(
+        uri,
+        "module m\n\
+         ## Greet someone by name.\n\
+         ## The name is not checked.\n\
+         sub greet(who: text)\n\
+         end\n\
+         # an ordinary note\n\
+         sub quiet()\n\
+         end\n\
+         sub main\n\
+         \x20 call greet(\"you\")\n\
+         \x20 call quiet()\n\
+         end\n",
+    );
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(80, "textDocument/hover", Client::at(uri, 9, 8));
+    let text = r["contents"]["value"].as_str().unwrap_or("");
+    assert!(text.contains("greet"), "hover should name it: {r}");
+    assert!(
+        text.contains("Greet someone by name."),
+        "hover should carry the doc comment: {r}"
+    );
+    assert!(
+        text.contains("The name is not checked."),
+        "every `##` line above the declaration belongs to it: {r}"
+    );
+
+    let r = c.request(81, "textDocument/hover", Client::at(uri, 10, 8));
+    let text = r["contents"]["value"].as_str().unwrap_or("");
+    assert!(text.contains("quiet"), "hover should name it: {r}");
+    assert!(
+        !text.contains("an ordinary note"),
+        "a single-`#` comment is not documentation: {r}"
+    );
+    c.shutdown();
+}
+
+/// An `enum` declares a name and a run of members, and at module level those
+/// are two identifiers on a line — which is also how a non-visual component is
+/// declared. Read as a component, the enum would open a block that swallows
+/// the rest of the file and every symbol after it would go unindexed, so the
+/// declaration is claimed here and its body skipped, exactly as a `record`'s is.
+#[test]
+fn an_enum_is_a_type_name_not_a_component() {
+    let mut c = Client::start();
+    let uri = "file:///tmp/openepl_lsp_enum.oir";
+    c.open(
+        uri,
+        "module m\n\
+         enum colour\n\
+         \x20 red, green\n\
+         end\n\
+         sub after()\n\
+         end\n",
+    );
+    let _ = c.diagnostics(uri);
+
+    let r = c.request(84, "textDocument/hover", Client::at(uri, 1, 6));
+    let text = r["contents"]["value"].as_str().unwrap_or("");
+    assert!(text.contains("colour"), "hover should name it: {r}");
+    assert!(
+        !text.contains("component"),
+        "an enum is not a component: {r}"
+    );
+
+    // The subroutine after the enum must still be indexed — proof the enum's
+    // `end` closed the enum and not something the server thinks is a block.
+    let syms = c.request(
+        85,
+        "textDocument/documentSymbol",
+        serde_json::json!({ "textDocument": { "uri": uri } }),
+    );
+    let names = syms.to_string();
+    assert!(names.contains("after"), "the sub after the enum is missing: {syms}");
     c.shutdown();
 }
 

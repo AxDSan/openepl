@@ -61,6 +61,18 @@ let n: int = 42
 call print_text(concat("answer: ", int_to_text(n)))
 ```
 
+### Writing text
+
+Text is written between quotes, with `\n`, `\t`, `\\`, `\"` and `\0` for the
+characters that cannot be typed, and `{...}` holes for values — see
+[String interpolation](./sugar.md#string-interpolation).
+
+Two other spellings exist for the two places that one is awkward: a **block**
+between three quotes, whose newlines are the newlines themselves, and a **raw**
+literal, `r"..."`, whose backslashes are backslashes. Both are the same text
+value written a different way — see [Blocks and raw
+text](./sugar.md#blocks-and-raw-text).
+
 ## Groups of values
 
 A list is written with `[]`, a dictionary with `{}`, and both count from 1 —
@@ -100,6 +112,12 @@ Fields are given by name when a record is built, and read and written with a
 dot: `p.x`, `p.x = 5`. A record is a **reference**, exactly as a list is — two
 names for one record are two names for the same fields — so passing one to a
 subroutine does not copy it.
+
+A collection also answers to `xs[a..b]` for a run of it, and a record has a
+second spelling, `point{x: 1, y: 2}`, that reads as a value rather than a call.
+Both are shorthands for what is above — see [Taking a run:
+`a..b`](./sugar.md#taking-a-run-ab) and [Saying less at the
+call](./sugar.md#saying-less-at-the-call).
 
 ## Values that change, and values that do not
 
@@ -230,6 +248,36 @@ exactly what the event hands it, or nothing at all, and returns nothing: a
 or plain `sub on_tick`, and `sub on_tick(s: text)` is a compile error that
 shows the header to paste. See [Components](./components.md).
 
+Four shorthands let a call say less than it used to: a `let` may leave out its
+type, a parameter may carry a default, an argument may name its parameter, and
+a record may be written with braces. Each is rewritten into the header or the
+call you would have typed — see [Saying less at the
+call](./sugar.md#saying-less-at-the-call).
+
+## Documenting a subroutine
+
+A comment beginning with two hashes, directly above a `sub`, a `dll` or a
+`record`, is that symbol's documentation. The editor shows it when you hover
+the name, wherever the name is used:
+
+```
+module greet
+
+## Greet someone by name.
+## The name is not checked — an empty one greets nobody in particular.
+sub hello(who: text)
+  call print_text("Hello, {who}.")
+end
+
+sub main
+  call hello("Ada")
+end
+```
+
+A single `#` comment stays what it always was: a note to whoever is reading
+that line, and invisible everywhere else. The difference is deliberate — `##`
+says *what this is for*, and a signature can only ever say what it takes.
+
 ## When a command fails
 
 There are no exceptions. A command that can fail returns a sentinel — `0` for
@@ -257,6 +305,15 @@ failure. That is what makes `false` and `0` readable: `false` with code `0`
 is a genuine no, and `0` from `find` means *not there* — nothing sits at
 position 0. [A tour of the language](./tour.md) walks through this with a
 program that grows.
+
+Two shorthands write the two things a program does with a failure — carry on
+with something else, or give up and pass it back — without spelling that `if`
+out each time. [`otherwise`](./sugar.md#a-value-to-fall-back-on-otherwise)
+supplies the value the failed call did not, and
+[`check`](./sugar.md#passing-a-failure-back-check) returns from the subroutine
+the moment a call fails. A local may also be typed
+[`T?`](./sugar.md#a-value-that-may-not-be-there-t), which is the checker
+refusing to let a missing value be read as though it were there.
 
 ## Expressions
 
@@ -444,11 +501,36 @@ word is refused as a name at the line that writes it.
 
 ## Shorthands and sugar
 
-The 0.8.0 assignment and operator shorthands — compound assignment,
-`increment`/`decrement`, text `+` and `*`, chained comparison, `in`, the
-one-line `if` — and string interpolation live in their own chapter,
-[Shorthands and sugar](./sugar.md). Every one of them desugars to something
-on this page.
+A shorthand is a spelling the compiler rewrites into something on this page
+before the type checker ever sees it, so each obeys exactly the rules its
+longhand does and carries no second meaning. They have a chapter of their own,
+[Shorthands and sugar](./sugar.md), where each is set beside what it stands
+for:
+
+- **Values and text** — [compound assignment and the operator
+  words](./sugar.md#assignment-and-operator-shorthands), [blocks and raw
+  text](./sugar.md#blocks-and-raw-text), [string
+  interpolation](./sugar.md#string-interpolation), and
+  [`xs[a..b]`](./sugar.md#taking-a-run-ab) for a run of a collection.
+- **Choosing and repeating** — [`if c then a else
+  b`](./sugar.md#choosing-a-value) where a value goes,
+  [`match`](./sugar.md#choosing-among-values-match) for the chain that tests one
+  value, the [range and `for each`
+  loops](./sugar.md#iteration-ranges-and-for-each), [`repeat N
+  times`](./sugar.md#repeating-a-fixed-number-of-times), and [a list built by a
+  loop](./sugar.md#building-a-list-with-a-loop-written-as-a-value).
+- **Calling** — [the dot call](./sugar.md#calling-with-a-dot), and the four
+  shorthands that let a call [say less](./sugar.md#saying-less-at-the-call): a
+  `let` without a type, a parameter default, a named argument, and a record
+  literal.
+- **Failing and finishing** —
+  [`otherwise`](./sugar.md#a-value-to-fall-back-on-otherwise),
+  [`check`](./sugar.md#passing-a-failure-back-check), the optional
+  [`T?`](./sugar.md#a-value-that-may-not-be-there-t), and
+  [`defer`](./sugar.md#cleaning-up-on-the-way-out-defer).
+- **Naming and checking** — [`enum`](./sugar.md#named-numbers-enum) for a run of
+  named whole numbers, and [`assert`](./sugar.md#checking-as-you-go-assert) for
+  what a debug build should stop on.
 
 ## Choosing
 
@@ -464,6 +546,12 @@ end
 
 The condition must be a `bool`. There is no truthiness — an `int` is not a
 condition, and saying so is a compile error rather than a surprise.
+
+The same choice written where a *value* goes is [`if c then a else
+b`](./sugar.md#choosing-a-value), and a chain that tests one value against
+several is written once with
+[`match`](./sugar.md#choosing-among-values-match). Both are shorthands for the
+block above.
 
 ## Repeating
 
@@ -511,10 +599,12 @@ end
 Local variables are visible for the whole subroutine, so two loops in one
 subroutine need two different loop-variable names.
 
-Two shorthands sit on top of this counting loop: a range loop
+Three shorthands sit on top of this counting loop: the range loop
 `for i in 1..n` and `for each x in xs`, which walk a collection without
-spelling the index. Both are pure sugar over the `for` above; see
-[Shorthands and sugar](./sugar.md#iteration-ranges-and-for-each).
+spelling the index, and [`repeat N
+times`](./sugar.md#repeating-a-fixed-number-of-times), which hides the counter
+when nothing uses it. All are pure sugar over the `for` above; see [Shorthands
+and sugar](./sugar.md#iteration-ranges-and-for-each).
 
 ## Components
 
@@ -530,3 +620,7 @@ name and the type, so a typo is an error at build time rather than a control
 that silently does nothing. See [Forms and events](./forms-and-events.md) for
 the shape of a form, and [Components](./components.md) for what the
 components are and what their events hand a handler.
+
+The dot has one more job, and the parentheses are what tell it from this one:
+a `.name` followed by `(` is the call `f(x, a)`, written left to right. See
+[Calling with a dot](./sugar.md#calling-with-a-dot).

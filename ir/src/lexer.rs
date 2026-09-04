@@ -50,6 +50,15 @@ pub enum Tok {
     Bits(u64),
     Float(f64),
     Str(String),
+    /// A **raw** text literal — `r"C:\\logs"`, or `r"""..."""` for one that
+    /// runs over lines. Its bytes are exactly what was written: no `\n`/`\t`
+    /// escapes, and no `{...}` interpolation.
+    ///
+    /// It is a token of its own rather than a flag on `Str` because the two
+    /// differ in what the *parser* then does — a `Str` is split into its
+    /// interpolation holes and a `RawStr` never is — and a flag would have to be
+    /// read at every one of those places to mean anything.
+    RawStr(String),
     // Punctuation / operators
     LParen,
     RParen,
@@ -60,10 +69,17 @@ pub enum Tok {
     Comma,
     Colon,
     Dot,
+    /// `?` — written after a type, and only there: `text?` is the text that may
+    /// not be there. It is a token of its own because nothing else in the
+    /// language spells `?`, so a stray one is an error with a position rather
+    /// than a character the lexer had to guess at.
+    Question,
     /// `..` — the range operator in `for i in 1..10`. A fused token so a range
     /// bound's expression ends cleanly at the `..`; without it `A..B` would lex
     /// as `A` then a `.` that the expression parser reads as a field access into
-    /// a second `.`, which is nothing. `..` appears nowhere else in the grammar.
+    /// a second `.`, which is nothing. It is also the range in a slice —
+    /// `s[2..5]`, `xs[3..]` — which is the same "from here to there" it means in
+    /// a `for`, and reads with the same token.
     DotDot,
     Eq,
     Plus,
@@ -185,6 +201,10 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                 push(&mut out, Tok::RBrace, line, start_col);
                 i += 1;
             }
+            b'?' => {
+                push(&mut out, Tok::Question, line, start_col);
+                i += 1;
+            }
             b',' => {
                 push(&mut out, Tok::Comma, line, start_col);
                 i += 1;
@@ -275,9 +295,58 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                 push(&mut out, Tok::AmpEq, line, start_col);
                 i += 2;
             }
+            // A block string, `"""..."""`, before the one-line `"..."`: three
+            // quotes open a literal whose newlines are the newlines themselves,
+            // so a paragraph, a SQL statement or a usage message is written the
+            // way it will be printed. Its holes still fire — it is a text
+            // literal, not a different kind of thing.
+            b'"' if i + 2 < n && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' => {
+                let open_line = line;
+                let (s, ni) =
+                    lex_quoted(bytes, i + 3, true, false, &mut line, &mut line_start)?;
+                push(&mut out, Tok::Str(s), open_line, start_col);
+                // A token that ran over lines has no honest end column on the
+                // line it started on — every column after the newline is
+                // measured from a later `line_start` — so the span covers the
+                // opening delimiter and stops. One that stayed on its line
+                // spans itself, as every other token does.
+                out.last_mut().unwrap().end_col = if line == open_line {
+                    ni - line_start + 1
+                } else {
+                    start_col + 3
+                };
+                i = ni;
+            }
             b'"' => {
                 let (s, ni) = lex_string(bytes, i + 1, line)?;
                 push(&mut out, Tok::Str(s), line, start_col);
+                i = ni;
+            }
+            // `r"..."` / `r"""..."""` — a raw literal, whose backslashes are
+            // backslashes. It is what a Windows path and a regular expression
+            // are made of, and writing either with doubled escapes is how a
+            // wrong one gets shipped. `r` is a prefix, not a keyword: it means
+            // this only when a quote follows it immediately, and two tokens in
+            // a row (a name then a string) were never valid, so a variable
+            // named `r` is untouched.
+            b'r' if i + 1 < n && bytes[i + 1] == b'"' => {
+                let triple = i + 3 < n && bytes[i + 2] == b'"' && bytes[i + 3] == b'"';
+                let open_len = if triple { 4 } else { 2 };
+                let open_line = line;
+                let (s, ni) = lex_quoted(
+                    bytes,
+                    i + open_len,
+                    triple,
+                    true,
+                    &mut line,
+                    &mut line_start,
+                )?;
+                push(&mut out, Tok::RawStr(s), open_line, start_col);
+                out.last_mut().unwrap().end_col = if line == open_line {
+                    ni - line_start + 1
+                } else {
+                    start_col + open_len
+                };
                 i = ni;
             }
             // `0x...` / `0b...` — a bit pattern, before the decimal path, which
@@ -451,6 +520,132 @@ fn is_ident_start(c: u8) -> bool {
 }
 fn is_ident_cont(c: u8) -> bool {
     c == b'_' || c.is_ascii_alphanumeric()
+}
+
+/// Scan a block (`"""`) or raw (`r"`) string body, starting just after the
+/// opening delimiter; returns the decoded text and the index just past the
+/// closing one.
+///
+/// `line` and `line_start` are advanced past every newline the body swallows,
+/// because a block literal is the one token that can end on a different line
+/// than it began on and every column after it is measured from the last one.
+///
+/// `triple` says the delimiter is three quotes — which is also what allows a
+/// newline inside — and `raw` says the body is its own bytes: no escapes, and
+/// (in the parser) no interpolation.
+fn lex_quoted(
+    bytes: &[u8],
+    mut i: usize,
+    triple: bool,
+    raw: bool,
+    line: &mut usize,
+    line_start: &mut usize,
+) -> Result<(String, usize), LexError> {
+    let n = bytes.len();
+    let open_line = *line;
+    let mut s = String::new();
+    // One newline directly after the opening `"""` is dropped, so a block can
+    // start on the line after its delimiter — which is how one is written — and
+    // still not begin with a blank line. Exactly one, and nothing else: the
+    // body's indentation is its own, so what is between the delimiters is what
+    // comes out, with no second rule to remember.
+    if triple && i < n {
+        if bytes[i] == b'\n' {
+            i += 1;
+            *line += 1;
+            *line_start = i;
+        } else if bytes[i] == b'\r' && i + 1 < n && bytes[i + 1] == b'\n' {
+            i += 2;
+            *line += 1;
+            *line_start = i;
+        }
+    }
+    loop {
+        if i >= n {
+            return Err(LexError {
+                line: open_line,
+                msg: if triple {
+                    "unterminated block string literal — it needs a closing `\"\"\"`".into()
+                } else {
+                    "unterminated string literal".into()
+                },
+            });
+        }
+        match bytes[i] {
+            // In a block, a lone `"` is content and only three in a row close.
+            b'"' if triple => {
+                if i + 2 < n && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
+                    return Ok((s, i + 3));
+                }
+                s.push('"');
+                i += 1;
+            }
+            b'"' => return Ok((s, i + 1)),
+            // CRLF becomes LF, so a literal means the same thing whichever way
+            // the file was saved.
+            b'\r' if triple && i + 1 < n && bytes[i + 1] == b'\n' => i += 1,
+            b'\n' if triple => {
+                s.push('\n');
+                i += 1;
+                *line += 1;
+                *line_start = i;
+            }
+            b'\n' => {
+                return Err(LexError {
+                    line: *line,
+                    msg: "newline in string literal — `\"\"\"` opens one that may run over lines"
+                        .into(),
+                })
+            }
+            b'\\' if !raw => {
+                i += 1;
+                if i >= n {
+                    return Err(LexError {
+                        line: *line,
+                        msg: "unterminated escape".into(),
+                    });
+                }
+                match bytes[i] {
+                    b'n' => s.push('\n'),
+                    b't' => s.push('\t'),
+                    b'\\' => s.push('\\'),
+                    b'"' => s.push('"'),
+                    b'0' => s.push('\0'),
+                    other => {
+                        return Err(LexError {
+                            line: *line,
+                            msg: format!("unknown escape: \\{}", other as char),
+                        })
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                // A run of ordinary bytes. In a raw literal a backslash is one
+                // of them, which is the whole point of the form.
+                let start = i;
+                while i < n
+                    && bytes[i] != b'"'
+                    && bytes[i] != b'\n'
+                    && bytes[i] != b'\r'
+                    && !(bytes[i] == b'\\' && !raw)
+                {
+                    i += 1;
+                }
+                if i == start {
+                    // A lone `\r` outside a block, or a `\r` not before a `\n`:
+                    // carried through as the byte it is.
+                    s.push(bytes[i] as char);
+                    i += 1;
+                } else {
+                    s.push_str(std::str::from_utf8(&bytes[start..i]).map_err(|_| LexError {
+                        line: open_line,
+                        msg: "invalid UTF-8 in string literal".into(),
+                    })?);
+                }
+            }
+        }
+    }
 }
 
 /// Lex a string body starting just after the opening quote; returns the decoded

@@ -116,7 +116,26 @@ pub fn type_of_expr_hinted(
             }
         }
     }
+    // A `T?` is filled by a `T` — the value is there — or by `none`, or by
+    // another `T?`. This is the one place an optional is *made*, and it is a
+    // declaration that makes one: there is no expression whose own type is
+    // optional, which is what keeps `T?` from turning up where the ABI has no
+    // room for it.
+    if let Some(Ty::Optional(e)) = hint {
+        if matches!(expr, Expr::NoneLit) {
+            return Ok(Ty::Optional(e));
+        }
+        let got = type_of_expr_hinted(expr, Some(e.ty()), vars, reg, components)?;
+        if got == e.ty() || got == Ty::Optional(e) {
+            return Ok(Ty::Optional(e));
+        }
+        return Ok(got);
+    }
     match expr {
+        Expr::NoneLit => err(
+            "`none` on its own does not say what it is the absence of — declare the type, \
+             as in `let home: text? = none`",
+        ),
         Expr::ArrayLit(items) if items.is_empty() => match hint {
             Some(Ty::Array(e)) => Ok(Ty::Array(e)),
             _ => err(
@@ -151,6 +170,16 @@ pub fn type_of_expr_hinted(
         // as 64-bit patterns, and only this function knows that.
         Expr::Bit(op, l, r) => bit_type(*op, l, r, hint, vars, reg, components),
         Expr::BitNot(e) => bitnot_type(e, hint, vars, reg, components),
+        // The two conditional forms pass the surrounding hint down to *both*
+        // arms, for the same reason a bitwise operator does: in
+        // `let n: int64 = if c then 0 else 1` each arm must read as an `int64`,
+        // and only this function knows that.
+        Expr::IfElse { cond, then, els } => {
+            ifelse_type(cond, then, els, hint, vars, reg, components)
+        }
+        Expr::Otherwise { value, fallback } => {
+            otherwise_type(value, fallback, hint, vars, reg, components)
+        }
         // A `var r: RECT` with no initializer: the declared type is the only
         // thing that says which record, and it must be a c-record — a heap
         // record is a reference with nothing to point at until it is built, so
@@ -308,6 +337,206 @@ fn bitnot_type(
     Ok(t)
 }
 
+/// The type of a two-armed conditional, once both arms have been typed: they
+/// must agree, and that agreement is the type of the whole expression.
+///
+/// The second arm is typed with the first arm's type as its hint when the
+/// context supplied none, so `if c then 0 else 1` in an `int64` position and
+/// `xs otherwise []` both work — the literal that has no type of its own takes
+/// the one its sibling already settled.
+#[allow(clippy::too_many_arguments)]
+fn arms_agree(
+    what: &str,
+    left_name: &str,
+    right_name: &str,
+    left: &Expr,
+    right: &Expr,
+    hint: Option<Ty>,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
+    let lt = type_of_expr_hinted(left, hint, vars, reg, components)?;
+    let rt = type_of_expr_hinted(right, hint.or(Some(lt)), vars, reg, components)?;
+    if lt != rt {
+        return err(format!(
+            "both sides of `{what}` must have one type; {left_name} is {} and {right_name} is {}",
+            lt.as_str(),
+            rt.as_str()
+        ));
+    }
+    Ok(lt)
+}
+
+/// `if COND then A else B` used as a value: the condition is a truth value and
+/// the two arms share one type, which is the type of the whole expression.
+#[allow(clippy::too_many_arguments)]
+fn ifelse_type(
+    cond: &Expr,
+    then: &Expr,
+    els: &Expr,
+    hint: Option<Ty>,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
+    let c = type_of_expr_in(cond, vars, reg, components)?;
+    if c != Ty::Bool {
+        return err(format!(
+            "the condition of an `if` used as a value must be a truth value, got {}",
+            c.as_str()
+        ));
+    }
+    arms_agree("if", "`then`", "`else`", then, els, hint, vars, reg, components)
+}
+
+/// The sentence a type error gains when the value that turned up may be
+/// absent: the mismatch is not a wrong type, it is a value that has not been
+/// unwrapped yet, and saying so is the difference between a puzzle and a fix.
+pub fn unwrap_advice(got: Ty) -> String {
+    match got {
+        Ty::Optional(e) => format!(
+            " — a value that may be absent. Supply the missing one with `... otherwise <{}>`, \
+             or open it with `if some ... as value`",
+            e.as_str()
+        ),
+        _ => String::new(),
+    }
+}
+
+/// `EXPR otherwise FALLBACK` — the type both sides settle on.
+///
+/// When the left side is an optional the whole point is that the result is not
+/// one: `otherwise` is how a `T?` becomes a `T`, so the fallback is agreed
+/// against the value *inside*, and that inner type is the answer. Otherwise this
+/// is the plain two-arm agreement a conditional makes, which is what a fallible
+/// call's fallback has always been.
+fn otherwise_type(
+    value: &Expr,
+    fallback: &Expr,
+    hint: Option<Ty>,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
+    if let Ok(Ty::Optional(e)) = type_of_expr_in(value, vars, reg, components) {
+        let inner = e.ty();
+        let f = type_of_expr_hinted(fallback, Some(inner), vars, reg, components)?;
+        if f != inner {
+            return err(format!(
+                "`otherwise` supplies the value that is not there, so it has that value's type: \
+                 expected {}, found {}",
+                inner.as_str(),
+                f.as_str()
+            ));
+        }
+        return Ok(inner);
+    }
+    arms_agree(
+        "otherwise",
+        "the value",
+        "the fallback",
+        value,
+        fallback,
+        hint,
+        vars,
+        reg,
+        components,
+    )
+}
+
+/// The type of `[EXPR for each x in xs]` — an array of whatever `EXPR` is,
+/// with the loop's bindings in scope while that is worked out.
+///
+/// It answers the same three questions the statement `for each` does, in the
+/// same words and through the same helper, so a collection a loop can walk is
+/// exactly a collection a comprehension can walk.
+pub fn comprehension_type(
+    expr: &Expr,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<Ty, SemaError> {
+    let Expr::Comprehension {
+        body,
+        elem,
+        value,
+        index,
+        coll,
+        cond,
+        ..
+    } = expr
+    else {
+        return err("not a list comprehension");
+    };
+    let inner = comprehension_scope(coll, elem, value.as_deref(), index.as_deref(), vars, reg, components)?;
+    if let Some(c) = cond {
+        let ct = type_of_expr_in(c, &inner, reg, components)?;
+        if ct != Ty::Bool {
+            return err(format!(
+                "`where` keeps the elements a test is true of, and {} is not a truth value",
+                ct.as_str()
+            ));
+        }
+    }
+    let bt = type_of_expr_in(body, &inner, reg, components)?;
+    match Elem::from_ty(bt) {
+        Some(e) => Ok(Ty::Array(e)),
+        None => err(format!(
+            "a list cannot hold {} — `[{} for each ...]` has nowhere to put its elements",
+            bt.as_str(),
+            bt.as_str()
+        )),
+    }
+}
+
+/// The variables in scope inside a comprehension: the enclosing ones plus the
+/// loop's bindings, typed from the collection exactly as `for each` types them.
+pub fn comprehension_scope(
+    coll: &Expr,
+    elem: &str,
+    value: Option<&str>,
+    index: Option<&str>,
+    vars: &HashMap<String, Ty>,
+    reg: &Registry,
+    components: &Components,
+) -> Result<HashMap<String, Ty>, SemaError> {
+    let cty = type_of_expr_in(coll, vars, reg, components)?;
+    let Some((elem_ty, value_ty)) = crate::foreach_elem_types(cty) else {
+        return err(format!(
+            "`for each` in a list walks an array, a byte-set, a text or a dictionary — {} is \
+             none of those",
+            cty.as_str()
+        ));
+    };
+    if value.is_some() && value_ty.is_none() {
+        return err(format!(
+            "two bindings (`k, v`) read a dictionary's key and value — {} yields one element at \
+             a time",
+            cty.as_str()
+        ));
+    }
+    let mut inner = vars.clone();
+    // A binding may not take a name that already means something. Locals are
+    // function-scoped here, so a comprehension that shadowed one would leave
+    // the outer name pointing at the loop's last element for the rest of the
+    // subroutine — the same collision `for each` is refused for, and refused in
+    // the same words.
+    for name in [Some(elem), value, index].into_iter().flatten() {
+        if vars.contains_key(name) {
+            return err(format!("variable `{name}` is defined more than once"));
+        }
+    }
+    inner.insert(elem.to_string(), elem_ty);
+    if let Some(v) = value {
+        inner.insert(v.to_string(), value_ty.unwrap_or(elem_ty));
+    }
+    if let Some(i) = index {
+        inner.insert(i.to_string(), Ty::Int);
+    }
+    Ok(inner)
+}
+
 fn type_of_expr_bare(
     expr: &Expr,
     vars: &HashMap<String, Ty>,
@@ -319,6 +548,30 @@ fn type_of_expr_bare(
         Expr::BitsLit(v) => Ok(bits_bare_type(*v)),
         Expr::Bit(op, l, r) => bit_type(*op, l, r, None, vars, reg, components),
         Expr::BitNot(e) => bitnot_type(e, None, vars, reg, components),
+        Expr::IfElse { cond, then, els } => {
+            ifelse_type(cond, then, els, None, vars, reg, components)
+        }
+        Expr::Otherwise { value, fallback } => {
+            otherwise_type(value, fallback, None, vars, reg, components)
+        }
+        // Both are made by the desugar out of an optional local, so both are
+        // typed from it: the truth beside the value, and the value itself.
+        Expr::HasValue(e) => match type_of_expr_in(e, vars, reg, components)? {
+            Ty::Optional(_) => Ok(Ty::Bool),
+            other => err(format!(
+                "only a value that may be absent has a truth beside it, and {} is always there",
+                other.as_str()
+            )),
+        },
+        Expr::Unwrap(e) => match type_of_expr_in(e, vars, reg, components)? {
+            Ty::Optional(el) => Ok(el.ty()),
+            other => err(format!("{} holds no value to unwrap", other.as_str())),
+        },
+        Expr::NoneLit => err(
+            "`none` on its own does not say what it is the absence of — declare the type, \
+             as in `let home: text? = none`",
+        ),
+        Expr::Comprehension { .. } => comprehension_type(expr, vars, reg, components),
         Expr::DoubleLit(_) => Ok(Ty::Double),
         Expr::TextLit(_) => Ok(Ty::Text),
         Expr::Var(name) => vars.get(name).copied().ok_or_else(|| SemaError {
@@ -438,6 +691,31 @@ fn type_of_expr_bare(
                 ),
             }
         }
+        // A slice gives back the same kind of thing it was cut from: a piece of
+        // text is text, a run of bytes is bytes, part of a list is a list of the
+        // same elements. Both bounds count positions, so both are `int`; a
+        // missing one is the collection's own end and needs no check.
+        Expr::Slice { base, from, to } => {
+            let bt = type_of_expr_bare(base, vars, reg, components)?;
+            for (bound, which) in [(from, "start"), (to, "end")] {
+                if let Some(b) = bound {
+                    let t = type_of_expr_in(b, vars, reg, components)?;
+                    if t != Ty::Int {
+                        return err(format!(
+                            "a slice's {which} is a position, counted with `int` values, got {}",
+                            t.as_str()
+                        ));
+                    }
+                }
+            }
+            match bt {
+                Ty::Text | Ty::Bytes | Ty::Array(_) => Ok(bt),
+                other => err(format!(
+                    "{} cannot be sliced — `a..b` takes a run of text, of bytes, or of a list",
+                    other.as_str()
+                )),
+            }
+        }
         Expr::Index { base, index } => {
             let bt = type_of_expr_bare(base, vars, reg, components)?;
             // The index goes through the hinted path, not the bare one, so a
@@ -531,6 +809,21 @@ fn type_of_expr_bare(
                     other.as_str()
                 )),
             }
+        }
+        // Two nodes the desugar erases before the checker proper runs. They are
+        // typed here anyway, and leniently, because the language server reads a
+        // freshly parsed file — no registry pass, no desugar — and a hover over
+        // a named argument should still say what the value is.
+        Expr::Labeled { value, .. } => type_of_expr_bare(value, vars, reg, components),
+        Expr::RecordUpdate { name, base, .. } => {
+            let got = type_of_expr_bare(base, vars, reg, components)?;
+            if got != Ty::Record(intern(name)) {
+                return err(format!(
+                    "`{name}{{...}}` copies a `{name}`, and the value after `...` is {}",
+                    got.as_str()
+                ));
+            }
+            Ok(got)
         }
         Expr::RecordLit { name, fields } => {
             // A c-record has no `NAME(field: ...)` constructor: it is a flat
@@ -1127,10 +1420,7 @@ pub fn check_args_labeled(
     reg: &Registry,
     components: &Components,
 ) -> Result<(), SemaError> {
-    let sig = Signature {
-        params: params.to_vec(),
-        ret: None,
-    };
+    let sig = Signature::simple(params.to_vec(), None);
     check_call(what, cmd, &sig, args, vars, reg, components).map(|_| ())
 }
 
@@ -1236,10 +1526,11 @@ pub fn check_call(
             t => {
                 if got != *t {
                     return err(format!(
-                        "{what} `{cmd}` argument {} expects {}, got {}",
+                        "{what} `{cmd}` argument {} expects {}, got {}{}",
                         i + 1,
                         t.as_str(),
-                        got.as_str()
+                        got.as_str(),
+                        unwrap_advice(got)
                     ));
                 }
             }

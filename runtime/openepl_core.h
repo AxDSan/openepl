@@ -70,6 +70,7 @@ void *E_MRealloc(void *p, long size);
 /* I/O */
 OE_CMD(oe_print_int); OE_CMD(oe_print_int64); OE_CMD(oe_print_double); OE_CMD(oe_print_text);
 OE_CMD(oe_read_line); OE_CMD(oe_input_ended); OE_CMD(oe_ask);
+OE_CMD(oe_assert_failed);
 /* errors */
 OE_CMD(oe_last_error_code); OE_CMD(oe_last_error_text);
 /* integer math */
@@ -90,9 +91,10 @@ OE_CMD(oe_now); OE_CMD(oe_year); OE_CMD(oe_format_time);
 /* arrays */
 OE_CMD(oe_ary_count); OE_CMD(oe_ary_append); OE_CMD(oe_ary_remove); OE_CMD(oe_ary_sort);
 OE_CMD(oe_ary_contains); OE_CMD(oe_ary_index_of); OE_CMD(oe_ary_join); OE_CMD(oe_ary_split);
+OE_CMD(oe_ary_slice);
 /* byte-sets */
 OE_CMD(oe_bin_make); OE_CMD(oe_bin_size); OE_CMD(oe_bin_byte); OE_CMD(oe_bin_put);
-OE_CMD(oe_bin_from_text); OE_CMD(oe_bin_to_text);
+OE_CMD(oe_bin_from_text); OE_CMD(oe_bin_to_text); OE_CMD(oe_bin_slice);
 /* dictionaries */
 OE_CMD(oe_dict_count); OE_CMD(oe_dict_has); OE_CMD(oe_dict_lookup);
 OE_CMD(oe_dict_store); OE_CMD(oe_dict_erase); OE_CMD(oe_dict_keys);
