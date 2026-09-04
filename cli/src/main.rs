@@ -153,6 +153,8 @@ fn usage() {
          openepl kits                        list the kits found, and from where\n  \
          openepl kit add <path>              install a kit into ~/.openepl/kits\n  \
          openepl project <file-or-dir>       dump a project file's resolved fields\n  \
+         openepl project <file-or-dir> set <key>=<value>...\n  \
+           the only writer of a project file: name, main, target, kits, version\n  \
          openepl version                     print the toolchain and ABI versions\n\n\
          Wherever <in.oir> is accepted, a project.oeproj or its directory is too.\n"
     );

@@ -22,6 +22,8 @@ USAGE:
   openepl kits                        list the kits found, and from where
   openepl kit add <path>              install a kit into ~/.openepl/kits
   openepl project <file-or-dir>       dump a project file's resolved fields
+  openepl project <file-or-dir> set <key>=<value>...
+  the only writer of a project file: name, main, target, kits, version
   openepl version                     print the toolchain and ABI versions
 
 Wherever <in.oir> is accepted, a project.oeproj or its directory is too.

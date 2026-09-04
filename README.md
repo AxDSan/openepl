@@ -44,6 +44,19 @@ position counts from 1, so `0` is free to mean *not found*. A command that
 fails returns a sentinel and leaves the reason in an error slot — there are
 no exceptions.
 
+Small does not mean bare. A loop reads `for each x in xs` or `for i in 1..10`,
+a string carries its values inline — `"x is {x}"` — and there is `match` with
+`when`, slicing (`s[1..5]`), collection literals, `enum`, module constants,
+named arguments, `let` inference, compound assignment, `defer`, and `check`
+and `otherwise` for the two things that happen to a call that can fail.
+
+```
+let names = ["ada", "grace"]
+for each n in names
+  call print_text("hello, {n}")
+end
+```
+
 <div align="center">
 <img src="assets/screenshot-designer.png" alt="The OpenEPL Studio visual designer" width="860">
 </div>
@@ -119,7 +132,7 @@ end
 ```
 
 Beyond that: 13 bundled kits — `file`, `text`, `json`, `net`, `time`, `ui`
-and the rest — 302 commands and 19 components, and `use <name>` is the whole
+and the rest — 337 commands and 21 components, and `use <name>` is the whole
 of asking for a kit. `openepl commands --use <name>` lists what each adds;
 the [Commands](https://axdsan.github.io/openepl/docs/reference-commands.html)
 reference is generated from the same answer.
@@ -236,8 +249,7 @@ OpenEPL is young, and honest about it:
   the `httpserver` component is plaintext either way.
 - **Memory is reclaimed at exit**, not before: a program that runs for days
   grows with the work it has done.
-- Nineteen components, and the language has no enum and no module-level
-  constant yet. The
+- Twenty-one components. The
   [limitations page](https://axdsan.github.io/openepl/docs/limitations.html)
   is the full list, checked against the toolchain.
 

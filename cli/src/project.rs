@@ -141,6 +141,131 @@ pub fn render(name: &str, main: &str, target: Target, kits: &[String], version: 
     )
 }
 
+/// The keys `openepl project ... set` accepts, in the order `render` writes
+/// them. A key not on this list is rejected rather than written: a project
+/// file may carry a hand-added line the toolchain does not know, and silently
+/// accepting `targt: gui` would look like it worked.
+pub const SETTABLE: &[&str] = &["name", "main", "target", "kits", "version"];
+
+/// Apply `key: value` edits to a project file's text, in place.
+///
+/// Lines are rewritten where they stand rather than the file being
+/// re-rendered from a parsed `Project`, so a comment, a blank line, a hand-
+/// added key and the file's own field order all survive an edit made from
+/// Studio. A key the file does not have yet is appended.
+pub fn apply_edits(text: &str, edits: &[(String, String)]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut written: Vec<&str> = Vec::new();
+    let ends_with_newline = text.is_empty() || text.ends_with('\n');
+
+    for line in text.lines() {
+        let key = if line.trim_start().starts_with('#') {
+            None
+        } else {
+            line.split_once(':').map(|(k, _)| k.trim().to_string())
+        };
+        match key.as_deref().and_then(|k| edits.iter().find(|(ek, _)| ek == k)) {
+            Some((k, v)) => {
+                written.push(SETTABLE.iter().find(|s| *s == k).copied().unwrap_or(""));
+                out.push(format!("{k}: {v}"));
+            }
+            None => out.push(line.to_string()),
+        }
+    }
+    for (k, v) in edits {
+        if !written.contains(&k.as_str()) {
+            out.push(format!("{k}: {v}"));
+        }
+    }
+    let mut joined = out.join("\n");
+    if ends_with_newline || !joined.is_empty() {
+        joined.push('\n');
+    }
+    joined
+}
+
+/// `openepl project <file-or-dir> set <key>=<value>...`
+///
+/// Studio's only way to change a project file: by the house rule the CLI is
+/// the single reader — and writer — of `.oeproj`, so a second parser in C++
+/// cannot drift from this one.
+fn cmd_project_set(path: &str, args: &[String]) -> i32 {
+    let file = match locate(Path::new(path)) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("openepl: {e}");
+            return 1;
+        }
+    };
+    if args.is_empty() {
+        eprintln!("openepl: usage: openepl project <project.oeproj | directory> set <key>=<value>...");
+        eprintln!("openepl: keys: {}", SETTABLE.join(", "));
+        return 2;
+    }
+
+    let mut edits: Vec<(String, String)> = Vec::new();
+    for a in args {
+        let Some((key, value)) = a.split_once('=') else {
+            eprintln!("openepl: `{a}` is not <key>=<value>");
+            return 2;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if !SETTABLE.contains(&key) {
+            eprintln!("openepl: cannot set `{key}` — keys: {}", SETTABLE.join(", "));
+            return 2;
+        }
+        // Validated here rather than at the next build: a project file that
+        // names a target nothing can parse is a file Studio wrote and cannot
+        // open again.
+        if key == "target" && Target::parse(value).is_none() {
+            eprintln!(
+                "openepl: unknown target `{value}` — expected console, gui, sharedlib or staticlib"
+            );
+            return 2;
+        }
+        if key == "main" && value.is_empty() {
+            eprintln!("openepl: `main` is the entry file — it cannot be empty");
+            return 2;
+        }
+        // A value carrying a newline would split into a second line and read
+        // back as a different key entirely.
+        if value.contains('\n') || value.contains('\r') {
+            eprintln!("openepl: a value cannot contain a newline");
+            return 2;
+        }
+        edits.retain(|(k, _)| k != key);
+        edits.push((key.to_string(), value.to_string()));
+    }
+
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("openepl: cannot read {}: {e}", file.display());
+            return 1;
+        }
+    };
+    let updated = apply_edits(&text, &edits);
+    if let Err(e) = std::fs::write(&file, &updated) {
+        eprintln!("openepl: cannot write {}: {e}", file.display());
+        return 1;
+    }
+    // Read it back through the same loader the build uses, so `set` reports
+    // the file it actually produced rather than the edit it intended.
+    match load(&file) {
+        Ok(_) => {
+            for (k, v) in &edits {
+                println!("{k}: {v}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("openepl: wrote {} but it no longer loads: {e}", file.display());
+            1
+        }
+    }
+}
+
 /// `openepl project <file-or-dir>` — the resolved fields, one per line.
 ///
 /// `main:` is printed resolved rather than as written, because the reader is
@@ -149,9 +274,12 @@ pub fn render(name: &str, main: &str, target: Target, kits: &[String], version: 
 /// reader never splits a value.
 pub fn cmd_project(args: &[String]) -> i32 {
     let Some(path) = args.first() else {
-        eprintln!("openepl: usage: openepl project <project.oeproj | directory>");
+        eprintln!("openepl: usage: openepl project <project.oeproj | directory> [set <key>=<value>...]");
         return 2;
     };
+    if args.get(1).map(String::as_str) == Some("set") {
+        return cmd_project_set(path, &args[2..]);
+    }
     if args.len() > 1 {
         eprintln!("openepl: unexpected argument `{}`", args[1]);
         return 2;
@@ -198,6 +326,29 @@ mod tests {
         assert_eq!(p.kits, vec!["ui", "file"]);
         assert_eq!(p.version, "0.1.0");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_rewrites_a_field_and_keeps_the_rest() {
+        let text = "# my project\nname: demo\nmain: src/main.oir\ntarget: console\nkits: ui\nversion: 0.1.0\nauthor: someone\n";
+        let out = apply_edits(
+            text,
+            &[("target".into(), "gui".into()), ("version".into(), "0.2.0".into())],
+        );
+        assert!(out.contains("target: gui"), "{out}");
+        assert!(out.contains("version: 0.2.0"), "{out}");
+        // The comment, the field order and a key the toolchain does not know
+        // all survive: a project file is a file a person may have edited.
+        assert!(out.starts_with("# my project\n"), "{out}");
+        assert!(out.contains("author: someone"), "{out}");
+        assert!(!out.contains("target: console"), "{out}");
+        assert_eq!(out.lines().count(), text.lines().count());
+    }
+
+    #[test]
+    fn set_appends_a_field_the_file_lacks() {
+        let out = apply_edits("main: a.oir\n", &[("version".into(), "1.0.0".into())]);
+        assert_eq!(out, "main: a.oir\nversion: 1.0.0\n");
     }
 
     #[test]
