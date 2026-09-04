@@ -1,4 +1,4 @@
-/* The "process" support library — running other programs.
+/* The "process" kit — running other programs.
  *
  * Two ways to run something, and the difference is the whole design:
  *

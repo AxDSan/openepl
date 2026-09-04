@@ -14,9 +14,13 @@ is tested under wine and runs; a windowed one is tested under wine as far as
 a machine without a display allows — it loads with its DLLs and reaches the
 UI library — and its drawn window has not been checked under wine or on a
 Windows machine. Accessibility is off in a Windows build: the a11y bridge
-has no AccessKit Windows adapter yet. Studio itself is Linux-only, nothing is
-built natively *on* Windows — the toolchain runs on Linux — and macOS and
-arm64 are not supported at all.
+has no AccessKit Windows adapter yet. Studio cross-builds too and ships as
+`openepl-studio.exe` in the Windows bundle, on the same footing as the
+programs: under wine it gets through Windows' loader and as far as asking for
+a window, and its drawn window has not been looked at there or on a Windows
+machine. Nothing is built natively *on* Windows — the toolchain that
+produces the bundle runs on Linux — and macOS and arm64 are not supported at
+all.
 
 **The `win` kit is declarations, and it is Windows-only.** `use win` brings in
 the Win32 API — user32, gdi32, kernel32 and advapi32 — and a program that uses
@@ -120,14 +124,14 @@ not breakpoints, stepping or variable inspection.
   declared (`var r: rect = rect{left: 10}`, which is the zeroed declaration
   plus those field writes) and nowhere else, and it has no `{...base}` update,
   because there is nothing to copy from.
-- A support library cannot take or return a record or a dictionary. The ABI
+- A kit cannot take or return a record or a dictionary. The ABI
   has a tag for each, and core's `dict_*` commands use it, but the layouts are
-  the runtime's own; a library sees `int`, `int64`, `double`, `bool`, `text`,
+  the runtime's own; a kit sees `int`, `int64`, `double`, `bool`, `text`,
   arrays and `bytes`.
 
-## The component library
+## The components
 
-The components each library provides are listed in
+The components each kit provides are listed in
 [Components](./reference-components.md), and what they are for is in
 [Components](./components.md). The designer's toolbox lists four more greyed
 out — a tab control, a splitter, a file dialog and a tray icon: they are part
@@ -141,10 +145,13 @@ fill one from a query.
 ## The IDE
 
 - The console shows the tail of the output rather than a full scrollback.
-- No project-wide search, no refactoring, no version-control integration.
-- Completion, hover and go-to-definition work in external editors through the
-  language server; inside Studio, the editor has highlighting and diagnostics
-  so far.
+- No project-wide search and no version-control integration. The one
+  refactoring is rename: the inspector's Name field renames a form or a
+  component and rewrites the `id.` references in the source.
+- Studio's editor and an external one now ask the same language server, so
+  completion, hover, go-to-definition and find-references work in both. What
+  Studio does not have is the editor furniture around them: no multiple
+  cursors, no find-and-replace, no bracket matching.
 
 ## What does work
 

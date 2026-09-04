@@ -1,6 +1,6 @@
 // The one place in Studio that knows which operating system it is on.
 //
-// Same rule as libs/README.md gives a support library: the branch is a thin
+// Same rule as libs/README.md gives a kit: the branch is a thin
 // shim, `#ifdef _WIN32` appears here and in the few process-handling
 // functions that cannot be shimmed at this size, and everything else reads
 // the same on both. The POSIX half is the calls Studio always made, inlined

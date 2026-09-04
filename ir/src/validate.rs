@@ -4,7 +4,7 @@
 //! structural rules it doesn't cover — entry-point presence, redefinition, and
 //! (new in Phase 2) the component model: component types, property names and
 //! types, and event bindings are all checked against the descriptors
-//! introspected from support libraries, so a typo in a form is a compile error
+//! introspected from kits, so a typo in a form is a compile error
 //! rather than a silently missing widget.
 //!
 //! Collects *all* errors rather than stopping at the first.

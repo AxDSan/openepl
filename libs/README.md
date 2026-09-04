@@ -1,8 +1,10 @@
-# Writing a support library
+# Writing a kit
 
-A support library is a directory under `libs/`. `use <name>` in a program finds
-it — there is no registration list, no build-system entry, and no `lib.json`
-unless the library needs C++, pkg-config, or a vendored dependency.
+A kit is a directory of commands and components written in C. The ones under
+`libs/` are the bundled tier; a kit beside a project or installed under
+`~/.openepl/kits/` is the same thing found earlier. `use <name>` in a program
+finds it — there is no registration list, no build-system entry, and no
+`lib.json` unless the kit needs C++, pkg-config, or a vendored dependency.
 
 Two kinds of file, distinguished only by name:
 

@@ -137,7 +137,7 @@ fn subs_build_and_run() {
 
 #[test]
 fn hello_library_via_abi() {
-    // `use hello` — a third-party support library loaded through the ABI.
+    // `use hello` — a third-party kit loaded through the ABI.
     let stdout = run(&build_as("hellolib", "abi"));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines, vec!["Hello, OpenEPL!", "HELLO, WORLD!"]);
@@ -1315,7 +1315,7 @@ fn text_commands_are_utf8_correct() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Every support library's example builds, runs, and reports no failure.
+/// Every kit's example builds, runs, and reports no failure.
 ///
 /// The examples are self-checking transcripts: one prints `FAIL` on a check
 /// that did not hold, so the assertion here is that no line says FAIL and that

@@ -5,6 +5,7 @@
 # Getting started
 
 - [Installation](./installation.md)
+- [Setting up on Windows](./setup-windows.md)
 - [Quick start](./quick-start.md)
 - [Your first GUI app](./first-gui-app.md)
 

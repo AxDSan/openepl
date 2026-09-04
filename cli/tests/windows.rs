@@ -146,7 +146,7 @@ fn release_cross_build_is_a_pe_that_runs() {
     }
 }
 
-/// The support libraries a console program reaches for most — files and the
+/// The kits a console program reaches for most — files and the
 /// environment — cross-build and answer the same, with one deliberate
 /// difference: the program knows which operating system it is on.
 ///

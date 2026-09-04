@@ -1,4 +1,4 @@
-/* The "text" support library — string work beyond what core already carries.
+/* The "text" kit — string work beyond what core already carries.
  *
  * Core owns length, uppercase, lowercase, trim, substr, find, replace, concat,
  * repeat, reverse, and (inside this prefix) text_eq, text_to_int and

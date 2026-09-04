@@ -10,7 +10,7 @@ call print_text("hello")            # as a statement
 let n: int = max_int(3, 9)          # as an expression
 ```
 
-The core commands are always available. The rest come from a support library,
+The core commands are always available. The rest come from a kit,
 which a module asks for by name:
 
 ```
@@ -92,19 +92,19 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `ptr_from_int` | int64 | ptr |
 | `ptr_is_null` | ptr | bool |
 | `ptr_null` | — | ptr |
-| `ptr_offset` | ptr, int64 | ptr |
 | `ptr_of_text` | text | ptr |
+| `ptr_offset` | ptr, int64 | ptr |
 | `ptr_read_byte` | ptr, int64 | int |
 | `ptr_read_double` | ptr, int64 | double |
-| `ptr_read_int64` | ptr, int64 | int64 |
 | `ptr_read_int` | ptr, int64 | int |
+| `ptr_read_int64` | ptr, int64 | int64 |
 | `ptr_read_ptr` | ptr, int64 | ptr |
 | `ptr_read_text` | ptr | text |
 | `ptr_to_int` | ptr | int64 |
 | `ptr_write_byte` | ptr, int64, int | — |
 | `ptr_write_double` | ptr, int64, double | — |
-| `ptr_write_int64` | ptr, int64, int64 | — |
 | `ptr_write_int` | ptr, int64, int | — |
+| `ptr_write_int64` | ptr, int64, int64 | — |
 | `ptr_write_ptr` | ptr, int64, ptr | — |
 | `ptr_write_text` | ptr, int64, text | — |
 | `quit` | — | — |
@@ -320,16 +320,16 @@ read. The [Language guide](./language.md#when-a-command-fails) has the rules.
 | `net_timeout_set` | int | bool |
 | `net_url_decode` | text | text |
 | `net_url_encode` | text | text |
-| `tcpclient_connected` | text | bool |
 | `tcpclient_connect` | text | bool |
+| `tcpclient_connected` | text | bool |
 | `tcpclient_disconnect` | text | bool |
 | `tcpclient_send` | text, text | bool |
+| `tcpserver_client` | text, int | int |
 | `tcpserver_client_address` | text, int | text |
 | `tcpserver_client_count` | text | int |
-| `tcpserver_client` | text, int | int |
 | `tcpserver_disconnect` | text, int | bool |
-| `tcpserver_send_all` | text, text | int |
 | `tcpserver_send` | text, int, text | bool |
+| `tcpserver_send_all` | text, text | int |
 
 ## process
 

@@ -1656,7 +1656,7 @@ fn mingw_release_cflags(driver_args: &[String]) -> Vec<String> {
 /// `--high-entropy-va` (64-bit ASLR), and the strip.
 ///
 /// Probed by linking an object compiled with the cflags already taken, so a
-/// stack protector whose support library is missing shows up here, at the
+/// stack protector whose support runtime is missing shows up here, at the
 /// link, the way it would in the real build.
 fn mingw_release_ldflags(driver_args: &[String], cflags: &[String]) -> Vec<String> {
     let want: Vec<Requirement> = vec![

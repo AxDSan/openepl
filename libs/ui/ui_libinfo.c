@@ -1,4 +1,4 @@
-/* "ui" support library metadata — visual component descriptors (D9/D11).
+/* "ui" kit metadata — visual component descriptors (D9/D11).
  *
  * DESIGN-TIME ONLY: compiled into the introspection .so, never into a shipped
  * program (same split as core_libinfo.c. The compiler reads this

@@ -1,4 +1,4 @@
-/* The "time" support library — dates and clocks.
+/* The "time" kit — dates and clocks.
  *
  * UTC EVERYWHERE. Every command in this library that turns a timestamp into
  * calendar fields, or calendar fields into a timestamp, works in UTC — the

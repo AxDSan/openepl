@@ -255,7 +255,8 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
       <div class="card">
         <h3>One project, every artifact</h3>
         <p>The same source builds as a console program, a windowed program, a
-        shared library or a static library. A build option, not a rewrite.</p>
+        shared library or a static library — and cross-builds for Windows from
+        Linux. A build option, not a rewrite.</p>
       </div>
     </div>
   </div>
@@ -271,11 +272,14 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
         <code>if x = 5</code> compares — it cannot silently assign.
       </p>
       <p class="lede">
-        Whole numbers, doubles, booleans and text; arrays, bytes, records and
-        dictionaries; subroutines with parameters and return values. Every
-        position counts from 1, so <code>0</code> is free to mean <em>not
-        found</em>. A command that fails returns a sentinel and leaves the
-        reason in an error slot — there are no exceptions to catch.
+        Whole numbers, doubles, booleans and text; arrays, bytes, records,
+        dictionaries and enums; subroutines with parameters and return values.
+        Then the shorthands that make it pleasant: string interpolation,
+        <code>for each</code> and ranges, <code>match</code>, optionals,
+        comprehensions and <code>defer</code>. Every position counts from 1, so
+        <code>0</code> is free to mean <em>not found</em>. A command that fails
+        returns a sentinel and leaves the reason in an error slot — there are no
+        exceptions to catch.
       </p>
       <p class="lede">
         <!-- landing-counts: the numbers below are checked against the
@@ -296,8 +300,7 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
   <span class="k">call</span> print_text(<span class="s">"Hello from OpenEPL."</span>)
 
   <span class="k">let</span> answer: <span class="k">int</span> = <span class="n">6</span> * <span class="n">7</span>
-  <span class="k">let</span> shown: <span class="k">text</span> = int_to_text(answer)
-  <span class="k">call</span> print_text(<span class="s">"six times seven is "</span> + shown)
+  <span class="k">call</span> print_text(<span class="s">"six times seven is {answer}"</span>)
 <span class="k">end</span></pre>
   </div>
 </section>
@@ -347,14 +350,18 @@ footer .right { margin-left: auto; display: flex; gap: 20px; }
   <div class="wrap">
     <div class="note">
       <h3>OpenEPL is young — here is the honest part</h3>
-      <p>Linux on x86-64 only. A release build is hardened and stripped, not
-      hidden — a native binary can always be disassembled. TLS is opt-in and
-      client-side only. Memory is reclaimed when a program exits, not before.
-      There is no debugger, and the toolbox still greys out a few controls that
-      are not written yet.</p>
+      <p>Linux on x86-64 is where the toolchain runs and where it is developed.
+      Windows x86-64 is a cross build from there — programs, libraries and
+      Studio itself — and no drawn window has yet been looked at on a Windows
+      machine. macOS and arm64 are not supported. A release build is hardened
+      and stripped, not hidden: a native binary can always be disassembled. TLS
+      is opt-in and client-side only. Memory is reclaimed when a program exits,
+      not before. There is no debugger, and the toolbox still greys out a few
+      controls that are not written yet.</p>
       <p>What does work, end to end: design a form, wire an event, build it, run
       it, and ship the binary — and a console program, a web server or a
-      library the same way — today.</p>
+      library the same way — today, with the same program cross-built for
+      Windows.</p>
       <p><a href="docs/limitations.html">The full list of limitations →</a></p>
     </div>
   </div>

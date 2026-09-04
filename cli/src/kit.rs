@@ -1,6 +1,7 @@
-//! Kits — a support library plus the design-time material that goes with it.
+//! Kits — a directory of commands and components plus the design-time material
+//! that goes with it.
 //!
-//! A kit is the directory a support library already is: `<name>_libinfo.c`
+//! A kit is the directory `libs/<name>` already is: `<name>_libinfo.c`
 //! builds the metadata `.so` the compiler dlopens and never ships, and the
 //! other sources static-link and dead-strip. Delphi split that into a
 //! design-time package and a runtime package, and paid for it with a DLL

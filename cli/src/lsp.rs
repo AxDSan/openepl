@@ -517,7 +517,7 @@ impl Server {
         let (src, line, col) = self.context(params)?;
         let ix = Index::build(&src);
         let occ = ix.at(line, col)?;
-        // Commands live in C support libraries: there is no `.oir` position to
+        // Commands live in C kits: there is no `.oir` position to
         // jump to. Returning null is honest; hover carries the signature.
         let def = ix.definition_of(occ)?;
         serde_json::to_value(Location {

@@ -1,4 +1,4 @@
-/* The "file" support library — files, directories and paths.
+/* The "file" kit — files, directories and paths.
  *
  * Three surfaces, in order of how often they are the right one:
  *

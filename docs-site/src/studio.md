@@ -94,15 +94,21 @@ none.
 Double-clicking a component in the tray does the same for a timer or an
 action.
 
-## Hover, definition, references
+## Completion, hover, definition, references
 
 The editor asks the same language server that VS Code and Neovim use:
 
 | Gesture | What happens |
 |---|---|
+| type a name | a completion popup: commands, components, a component's properties and events after `id.`, your own subroutines, locals, keywords |
+| **Enter** / **Tab** on the popup | accept the highlighted entry; **Esc** dismisses it |
 | rest the pointer on a name | a tip with its signature: a command's parameters, a subroutine's, a property's type and editor, what an event hands its handler |
 | **F12** | jump to the declaration of the name at the caret |
 | **Shift+F12** | list every use of the name at the caret in the Problems strip; click one to jump |
+
+The popup narrows as you type without asking the server again, and closes when
+the caret leaves the word — so it keeps up with a line still being written,
+which is most of the time you are actually editing.
 
 A command has no declaration to jump to — it is written in C, in the runtime
 or a library — so F12 on one says so, and hover shows what a jump would have.
@@ -120,6 +126,11 @@ written to the source, and anything you write is read back by the designer.
 The editor has syntax highlighting and live diagnostics from the same language
 server other editors use. **Ctrl+S** saves. Saving from the editor re-reads
 the file, so the canvas follows what you wrote.
+
+**Tab** indents by two spaces and **Return** keeps the indentation of the line
+you were on, one level deeper after a line that opens a block — so a `sub`, an
+`if` or a `form` lays itself out as you type. Nothing re-indents a file you
+opened: the editor only ever indents the line you are writing.
 
 Code that does not parse is still saved — the error appears in Problems rather
 than blocking you. Losing what you typed because it is not finished yet would

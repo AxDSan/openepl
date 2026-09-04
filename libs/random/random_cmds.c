@@ -1,4 +1,4 @@
-/* The "random" support library — pseudo-random numbers for games, sampling and
+/* The "random" kit — pseudo-random numbers for games, sampling and
  * test data.
  *
  * NOT FOR SECURITY. This is a fast, fully deterministic generator whose entire

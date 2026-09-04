@@ -19,7 +19,7 @@ themselves, not through environment variables.
 | Any build | `clang`, `ar` |
 | GUI programs and the IDE | `pkg-config`, SDL2, SDL2_image, FreeType, OpenGL |
 
-The runtime and support libraries ship as **source** and are compiled into each
+The runtime and the bundled kits ship as **source** and are compiled into each
 program you build. That is what lets the linker drop every command your program
 does not call, so a hello-world stays small and contains no unpacking stub.
 

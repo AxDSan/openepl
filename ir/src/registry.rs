@@ -1,4 +1,4 @@
-//! Command registry — the Phase 1 stand-in for the support-library ABI.
+//! Command registry — the stand-in for the kit ABI.
 //!
 //! Maps a surface command name to its `Signature` and the runtime symbol the
 //! backend emits a call to.  In Phase 2 this table is replaced by signatures
@@ -47,7 +47,7 @@ pub enum ComponentKind {
     NonVisual,
 }
 
-/// A component type contributed by a support library.
+/// A component type contributed by a kit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentDesc {
     pub name: String,
@@ -82,7 +82,7 @@ pub struct Command {
 
 /// The set of commands the compiler knows how to lower.  Built either from the
 /// hard-coded `core()` set (used by unit tests) or from `LibInfo` metadata read
-/// out of a support library at build time (the CLI's authoritative path).
+/// out of a kit at build time (the CLI's authoritative path).
 #[derive(Debug, Clone, Default)]
 pub struct Registry {
     map: HashMap<String, Command>,

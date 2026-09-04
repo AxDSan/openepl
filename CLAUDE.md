@@ -11,7 +11,7 @@ ir/         parser, type checker, validator          (Rust)
 backend/    lowering to LLVM IR                      (Rust)
 cli/        the `openepl` binary, language server    (Rust)
 runtime/    the core runtime and its commands        (C)
-libs/       support libraries — `use <name>`         (C / C++)
+libs/       the bundled kits — `use <name>`          (C / C++)
 abi/        the C ABI shared by all of the above
 designer/   OpenEPL Studio, the IDE                  (C++ / RmlUi)
 templates/  project templates for `openepl new`
@@ -45,9 +45,10 @@ tools/fetch-mbedtls.sh       # optional: https in `net`
   the landing page's kit, command and component counts to what the toolchain
   reports. `docs-site/src/limitations.md` is checked against the toolchain the
   same way, by hand: a limitation that has been solved is removed, not left.
-- **The editors page has one source.** `docs/editors.md` ships in the bundle
-  and is what the README links; `docs-site/src/editors.md` is an mdBook
-  include of it. Edit the one in `docs/`.
+- **Two pages have one source.** `docs/editors.md` ships in the bundle and is
+  what the README links; `docs/SETUP-WINDOWS.md` ships at the root of the
+  Windows bundle. `docs-site/src/editors.md` and `docs-site/src/setup-windows.md`
+  are mdBook includes of them. Edit the ones in `docs/`.
 - **Verify UI work by rendering it.** Studio bugs pass tests and fail on screen.
   `OPENEPL_DESIGNER_DUMP=x.ppm OPENEPL_DESIGNER_SCRIPT='view:code' ...` writes a
   frame you can look at; the scripted verbs are in `designer/main.cpp`.
@@ -57,8 +58,11 @@ tools/fetch-mbedtls.sh       # optional: https in `net`
   override. Never run a UI test or a scripted session without one of them.
 - **Never open a tracked example in Studio.** It saves on exit, and the change
   lands in your next commit.
-- Support libraries are plain C: add `libs/<name>/<name>_libinfo.c` (metadata)
-  and `<name>_cmds.c` (implementations), and `use <name>` finds it — there is no
+- **One word: kit.** Whether it sits in `libs/` (bundled), `~/.openepl/kits/`
+  (installed) or a project's `kits/`, it is a kit. "Library" means only what
+  `target sharedlib` and `target staticlib` build.
+- Kits are plain C: add `libs/<name>/<name>_libinfo.c` (metadata) and
+  `<name>_cmds.c` (implementations), and `use <name>` finds it — there is no
   registration list.
 
 ## Adding a command

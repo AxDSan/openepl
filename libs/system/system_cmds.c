@@ -1,4 +1,4 @@
-/* The "system" support library — the environment the program runs in.
+/* The "system" kit — the environment the program runs in.
  *
  * Three families, one per prefix:
  *   env_*  the environment block          (get / has / set / unset / enumerate)

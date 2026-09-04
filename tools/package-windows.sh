@@ -101,7 +101,7 @@ if [ -n "$CLI" ]; then
     fi
 fi
 
-# The runtime, ABI and support libraries ship as SOURCE, as on Linux: the
+# The runtime, ABI and bundled kits ship as SOURCE, as on Linux: the
 # compiler on the Windows machine builds them into each program.
 for d in runtime abi libs kits templates examples editors assets; do
     cp -r "$d" "$OUT/$d"

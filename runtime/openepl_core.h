@@ -1,6 +1,6 @@
 /* libopenepl_core — internal runtime header (Phase 2).
  *
- * The core support library, now speaking the real slot ABI (abi/openepl_abi.h):
+ * The core runtime, now speaking the real slot ABI (abi/openepl_abi.h):
  * every command is an `OpenEPL_CommandFn` — `void cmd(Slot* ret, int argc,
  * Slot* argv)`.  Command implementations live in the family `.c` files and are
  * static-linked into each program; the LibInfo *table* that names them lives in

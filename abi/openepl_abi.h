@@ -1,7 +1,7 @@
-/* OpenEPL support-library ABI + SDK — v3 (Phase 2).
+/* OpenEPL kit ABI + SDK — v3 (Phase 2).
  *
  * The single documented contract between the OpenEPL runtime/compiler and a
- * support library, a clean-room descendant of EPL's
+ * kit, a clean-room descendant of EPL's
  * `GetNewInf`/`LIB_INFO`.  A library is a shared object that
  * exports ONE function, `openepl_get_lib_info`, returning a fully-populated
  * `OpenEPL_LibInfo`.  The compiler dlopens the library at build time to read

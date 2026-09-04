@@ -1555,7 +1555,7 @@ pub struct Module {
     /// form is a GUI program, otherwise a console one — so every file written
     /// before targets existed still means what it meant.
     pub target: Option<Target>,
-    /// Support libraries this module uses (`use <name>`), beyond the implicit
+    /// Kits this module uses (`use <name>`), beyond the implicit
     /// `core`.  The compiler introspects each for command signatures and links
     /// its implementations.
     pub uses: Vec<String>,

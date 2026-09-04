@@ -1,4 +1,4 @@
-/* The "net" support library — TCP and HTTP over raw BSD sockets.
+/* The "net" kit — TCP and HTTP over raw BSD sockets.
  *
  * The plain path has no dependencies: getaddrinfo(3), socket(2), poll(2) and
  * the C library, which is all a program needs to speak TCP and HTTP/1.1.

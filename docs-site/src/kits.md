@@ -1,6 +1,7 @@
 # Kits
 
-A kit is a support library together with what an IDE needs to present it: a
+A kit is a directory of commands and components together with what an IDE
+needs to present it: a
 display name, a toolbox section, an icon for each component it contributes, a
 version, and the project templates it ships.
 
@@ -68,7 +69,7 @@ and installing over an existing one replaces it and says so.
 ## Writing one
 
 A kit is a library directory, so start from
-[Writing a support library](https://github.com/AxDSan/openepl/blob/main/libs/README.md)
+[Writing a kit](https://github.com/AxDSan/openepl/blob/main/libs/README.md)
 and add a `lib.json` with the design-time keys:
 
 ```json

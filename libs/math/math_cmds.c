@@ -1,4 +1,4 @@
-/* The `math` support library — what core arithmetic leaves out.
+/* The `math` kit — what core arithmetic leaves out.
  *
  * Core already covers the everyday cases: sqrt, sin/cos/tan, pow, exp, ln,
  * log10, floor/ceil/round, abs, min/max and mod_int.  This library is the rest

@@ -27,7 +27,7 @@ pub enum SymKind {
     ComponentType,
     /// A record type declared with `record name … end`.
     Record,
-    /// Provided by a support library — defined in C, so it has no definition
+    /// Provided by a kit — defined in C, so it has no definition
     /// site in this file.
     Command,
     Property,

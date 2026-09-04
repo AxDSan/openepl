@@ -11,6 +11,13 @@ cd openepl-<version>-linux-x86_64
 bin/openepl-studio
 ```
 
+On Windows, unpack the `windows-x86_64` zip and run `bin\openepl-studio.exe`.
+The bundle carries Studio, the compiler, the runtime and the kits; what it
+cannot carry is a linker, so install LLVM first —
+[Setting up on Windows](./setup-windows.md) walks through it (it is
+`SETUP-WINDOWS.md` beside the binaries too), and the one step most first runs
+miss is ticking **Add LLVM to the system PATH**.
+
 The binaries find everything they need relative to themselves, so you can move
 the folder wherever you like.
 
@@ -20,6 +27,7 @@ the folder wherever you like.
 | --- | --- |
 | Building any program | `clang`, `ar` |
 | Windowed programs and the IDE | `pkg-config`, SDL2, SDL2_image, FreeType, OpenGL |
+| Cross-building for Windows | `mingw-w64` — `mingw64-gcc` on Fedora, `gcc-mingw-w64-x86-64` on Debian and Ubuntu |
 
 The runtime ships as source and is compiled into each program you build. That
 is what lets the linker drop every command your program never calls.
@@ -71,8 +79,21 @@ To produce a release bundle of your own:
 ```sh
 tools/package.sh                                # -> dist/
 tools/verify-bundle.sh dist/openepl-*.tar.gz    # prove it works unpacked elsewhere
+tools/package-windows.sh                        # -> the Windows bundle, cross-built
 ```
 
 ## Platform support
 
-Linux on x86-64. Windows, macOS and arm64 are not supported yet.
+**Linux on x86-64**, natively: the toolchain and Studio are built and run
+there, and that is where OpenEPL is developed.
+
+**Windows on x86-64**, cross-built from Linux. Programs — windowed and
+console — and libraries build with `--os windows`, and
+`tools/package-windows.sh` produces a bundle carrying `openepl.exe` and
+`openepl-studio.exe`. Nothing is built natively *on* Windows: the toolchain
+that produces the bundle runs on Linux. See
+[Build targets](./build-targets.md#building-for-windows) for what a Windows
+build does and does not include, and [Limitations](./limitations.md) for what
+has and has not been checked on a Windows machine.
+
+macOS and arm64 are not supported.

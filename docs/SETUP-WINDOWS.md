@@ -5,7 +5,7 @@ does not ship its own code generator, so it needs a C toolchain on the machine
 to produce the executable — the same way a C or Rust install does.
 
 This bundle contains everything else: the compiler (`bin\openepl.exe`), Studio
-(`bin\openepl-studio.exe`), the runtime, the support libraries and the
+(`bin\openepl-studio.exe`), the runtime, the bundled kits and the
 examples. What it cannot contain is a linker.
 
 If you see this in Studio's PROBLEMS pane or in the console:

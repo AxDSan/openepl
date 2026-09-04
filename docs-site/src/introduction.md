@@ -40,7 +40,7 @@ changes; edit the source and the canvas follows.
 
 **Programs are ordinary native binaries.** Your project is compiled to machine
 code and linked with the system linker. Nothing is unpacked at startup, no
-support libraries are loaded at run time, and there is no interpreter inside.
+kits are loaded at run time, and there is no interpreter inside.
 Programs stay small, start immediately, and look unremarkable to antivirus
 software.
 

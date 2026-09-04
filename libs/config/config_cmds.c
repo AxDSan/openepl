@@ -1,4 +1,4 @@
-/* The "config" support library — INI settings files.
+/* The "config" kit — INI settings files.
  *
  * INI because it is the settings format a beginner can open in a text editor
  * and understand without being taught a grammar first: a `[section]`, then

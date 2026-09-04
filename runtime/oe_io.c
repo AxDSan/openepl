@@ -25,7 +25,7 @@ void oe_print_double(OpenEPL_Slot *ret, int32_t argc, OpenEPL_Slot *argv) {
  * The core could print four ways and read none, which made the first program
  * anyone writes — ask a question, use the answer — impossible without a `use`
  * declaration.  These are the other half of the print_* pair, so they belong
- * beside them rather than in a support library. */
+ * beside them rather than in a kit. */
 
 /* Read one line from stdin, without its newline.  Grows as it goes, so a long
  * line is not silently truncated the way a fixed buffer would. */

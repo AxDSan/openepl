@@ -1,4 +1,4 @@
-/* The "hello" support library — a minimal third-party OpenEPL library (.4,
+/* The "hello" kit — a minimal third-party OpenEPL library (.4,
  * M5). It includes ONLY the public SDK header (abi/openepl_abi.h) — not any
  * runtime-internal header — and allocates its result through the notification
  * channel (oe_malloc -> oe_notify), proving the ABI is a real extension point. */

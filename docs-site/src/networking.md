@@ -19,7 +19,7 @@ sub on_request
 end
 
 sub route(req: int)
-  call net_req_reply(req, 200, concat("you asked for ", net_req_path(req)))
+  call net_req_reply(req, 200, "you asked for {net_req_path(req)}")
 end
 
 sub main
@@ -153,16 +153,16 @@ end
 sub main
   echo.port = text_to_int(sys_arg(1))
   echo.active = true
-  call print_text(concat("echo server on port ", int_to_text(echo.port)))
+  call print_text("echo server on port {echo.port}")
 end
 
 sub on_connect(client: int)
-  call print_text(concat("connect ", int_to_text(client)))
-  call print_text(concat("  from ", tcpserver_client_address("echo", client)))
+  call print_text("connect {client}")
+  call print_text("  from {tcpserver_client_address(\"echo\", client)}")
 end
 
 sub on_disconnect(client: int)
-  call print_text(concat("disconnect ", int_to_text(client)))
+  call print_text("disconnect {client}")
 end
 
 sub on_receive(client: int, data: text)
@@ -170,12 +170,12 @@ sub on_receive(client: int, data: text)
     call tcpserver_send_all("echo", "bye\n")
     call quit()
   else
-    call tcpserver_send("echo", client, concat("echo: ", concat(data, "\n")))
+    call tcpserver_send("echo", client, "echo: {data}\n")
   end
 end
 
 sub on_error(message: text)
-  call print_text(concat("error: ", message))
+  call print_text("error: {message}")
   call quit()
 end
 ```

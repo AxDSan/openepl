@@ -1,4 +1,4 @@
-//! The `time` support library, cross-built for Windows, says what it says on
+//! The `time` kit, cross-built for Windows, says what it says on
 //! Linux — including for instants before 1970.
 //!
 //! Windows' `gmtime_s` refuses a negative `time_t`, so a library that asked it

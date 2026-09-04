@@ -68,7 +68,7 @@ if [ "$REPORTED" != "$VERSION" ]; then
     exit 1
 fi
 
-# The runtime, ABI and support libraries ship as SOURCE: `openepl build`
+# The runtime, ABI and bundled kits ship as SOURCE: `openepl build`
 # compiles and links them into each program, which is what makes dead-stripping
 # per-command possible.
 # `kits/` travels too, so the kits this repository ships are present in an

@@ -1,4 +1,4 @@
-//! Build-time support-library introspection.
+//! Build-time kit introspection.
 //!
 //! For the implicit `core` library and each `use <name>`, the loader:
 //!   1. builds an introspection shared object from the library's sources

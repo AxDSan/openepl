@@ -1,4 +1,4 @@
-/* The "hash" support library — digests and encodings.
+/* The "hash" kit — digests and encodings.
  *
  * DIGESTS AND ENCODINGS ONLY. There is no cipher here, no password hashing and
  * no key derivation. SHA-256, SHA-1, MD5, CRC32 and Base64/hex are *not*

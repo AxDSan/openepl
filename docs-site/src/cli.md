@@ -40,6 +40,10 @@ openepl build lib.oir --target sharedlib   # a different artifact
 openepl run app.oir
 ```
 
+A build also leaves the LLVM IR it went through next to the artifact, as
+`app.ll`. It is there to be read when you want to see what your program
+lowered to; nothing links against it, and deleting it is safe.
+
 `--target` overrides whatever the module declares, so one source can be built
 as a program or as a library without editing it. See
 [Build targets](./build-targets.md).
@@ -99,7 +103,8 @@ that skips what it does not know keeps working.
 
 ## Kits
 
-A kit is a support library plus what an IDE needs to present it. `openepl kits`
+A kit is a directory of commands and components plus what an IDE needs to
+present it. `openepl kits`
 lists the ones resolution found, each with its version and where it came from —
 `project` for a `kits/` directory beside your source, `user` for
 `~/.openepl/kits/`, `bundled` for the ones shipped with the toolchain. The

@@ -127,7 +127,7 @@ end
 Everything beyond the core runtime comes from a kit: a directory of commands
 and components, written in plain C, that `use <name>` brings into a program.
 Thirteen ship with the toolchain — `file`, `text`, `json`, `net`, `time`,
-`process`, `ui` and the rest — for 302 commands and 19 components in all.
+`process`, `ui` and the rest — for 337 commands and 21 components in all.
 
 ```sh
 openepl commands --use net       # what a kit adds
@@ -220,7 +220,7 @@ linker against a runtime that ships as source and is compiled into your
 program. The linker then drops every command your program never calls.
 
 The result is a single ordinary executable. Nothing is unpacked at startup, no
-support libraries are loaded at run time, and there is no interpreter inside —
+kits are loaded at run time, and there is no interpreter inside —
 which keeps programs small, quick to start, and unremarkable to antivirus
 software.
 

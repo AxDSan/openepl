@@ -66,7 +66,7 @@ call print_text("hello")            # as a statement
 let n: int = max_int(3, 9)          # as an expression
 ```
 
-The core commands are always available. The rest come from a support library,
+The core commands are always available. The rest come from a kit,
 which a module asks for by name:
 
 ```
@@ -249,7 +249,8 @@ that skips what it does not know keeps working.
 
 ## Kits
 
-A kit is a support library plus what an IDE needs to present it. `openepl kits`
+A kit is a directory of commands and components plus what an IDE needs to
+present it. `openepl kits`
 lists the ones resolution found, each with its version and where it came from —
 `project` for a `kits/` directory beside your source, `user` for
 `~/.openepl/kits/`, `bundled` for the ones shipped with the toolchain. The
