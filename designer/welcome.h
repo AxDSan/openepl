@@ -34,7 +34,7 @@ inline void chomp(std::string& line) {
 }
 
 /// What the toolchain says it is — the first line of `openepl version`, e.g.
-/// `openepl 0.8.0` — or "" when it cannot be asked. Shown on the welcome
+/// `openepl 0.9.0` — or "" when it cannot be asked. Shown on the welcome
 /// screen so the product says somewhere what it is; before this it did not.
 inline std::string version_string(const std::string& openepl_bin) {
     if (openepl_bin.empty()) return "";
