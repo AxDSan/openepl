@@ -51,6 +51,8 @@
 #include "highlight.h"
 #include "model.h"
 #include "portable.h"
+#include "settings.h"
+#include "settings_page.h"
 #include "theme.h"
 #include "lspclient.h"
 #include "welcome.h"
@@ -82,6 +84,7 @@ inline const std::vector<Menu>& menus() {
                   {"Delete", "delete", "Del"}}},
         {"View", {{"Designer", "view-designer", ""}, {"Code", "view-code", ""}}},
         {"Build", {{"Build Binary", "build", ""}, {"Run", "run", ""}, {"Stop", "stop", ""}}},
+        {"Tools", {{"Settings…", "settings", "Ctrl+,"}}},
         {"Help", {{"About OpenEPL", "about", ""}}},
     };
     return m;
@@ -134,6 +137,16 @@ struct Designer {
     /// Editor scroll, in pixels from the top. Ours rather than RmlUi's: a text
     /// control keeps its own overflow hidden, and both layers are absolutely
     /// positioned, so neither the control nor its container will scroll them.
+    /// What the chrome's stylesheet was built from. Kept so a theme change can
+    /// build it again without threading three arguments through every caller.
+    std::string mono, dot_tile;
+    /// The Settings dialog, and the category it is showing.
+    Rml::ElementDocument* settings_doc = nullptr;
+    std::string settings_cat = "Appearance";
+    /// The canvas grid's decorator value, as `build_styles` composed it. Kept
+    /// so `designer.show_grid` can put it back: `decorator:none` is easy to
+    /// set and impossible to undo without this string.
+    std::string grid_decorator;
     int code_scroll = 0;
     int code_content_h = 0;
     /// The same, sideways. The textarea is `wrap='nowrap'`, so it scrolls a long
@@ -792,7 +805,13 @@ std::string icon_img(const std::string& name, int px, const char* cls) {
     return "<img class='" + std::string(cls) + "' src='" + path + "'/>";
 }
 
-std::string build_chrome(const std::string& family, const std::string& mono,
+/// The stylesheet alone — everything between `<style>` and `</style>`.
+///
+/// Split out of `build_chrome` so the theme setting can regenerate it against
+/// an already-running IDE: every colour in it was copied out of `theme::` as a
+/// string when it was built, so a palette swap reaches the screen only by
+/// building the sheet again and handing it to the document.
+std::string build_styles(const std::string& family, const std::string& mono,
                          const std::string& dot_tile) {
     using namespace theme;
     const int WIN_W = g.win_w, WIN_H = g.win_h;
@@ -802,7 +821,6 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     const int canvas_h  = content_h - TABBAR_H - BOTTOM_H;
 
     std::ostringstream s;
-    s << "<rml><head><style>";
 
     // ---- base -----------------------------------------------------------
     s << "body{font-family:'" << family << "';font-size:12px;color:" << TEXT
@@ -830,7 +848,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << "px;background-color:" << CHROME_ALT << ";border-bottom:1px " << BORDER_SOFT << "}";
     s << "#menubar .m{display:inline-block;padding:6px 10px 6px 10px;"
          "font-size:12px;color:" << TEXT << ";border-radius:4px}";
-    s << "#menubar .m:hover{background-color:#e8eaed}";
+    s << "#menubar .m:hover{background-color:" << HOVER_STRONG << "}";
     s << "#menupop{position:absolute;background-color:" << PANEL << ";border:1px "
          << BORDER << ";border-radius:6px;padding:4px;"
          "box-shadow:#00000024 0 6px 18px 0px;z-index:10}";
@@ -844,7 +862,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << TOOLBAR_H << "px;background-color:" << CHROME_ALT << ";border-bottom:1px " << BORDER << "}";
     s << ".tb{display:inline-block;height:26px;margin:7px 2px 0 2px;padding:5px 10px 0 10px;"
          "border-radius:5px;font-size:12px;color:" << TEXT << "}";
-    s << ".tb:hover{background-color:#e8eaed}";
+    s << ".tb:hover{background-color:" << HOVER_STRONG << "}";
     s << ".tb img.tbi{width:16px;height:16px;vertical-align:-3px;margin-right:6px}";
     s << ".tb.primary{background-color:" << ACCENT << ";color:" << ACCENT_TEXT << "}";
     s << ".tb.ghost{color:" << TEXT_MUTED << "}";
@@ -870,12 +888,12 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "text-transform:uppercase;color:" << TEXT_MUTED << "}";
     s << ".tool{display:block;height:28px;margin:0 6px 2px 6px;padding:6px 8px 0 8px;"
          "border-radius:4px;font-size:12px;color:" << TEXT << "}";
-    s << ".tool:hover{background-color:#eef2f8}";
+    s << ".tool:hover{background-color:" << HOVER << "}";
     s << ".tool.sel{background-color:" << ACCENT << ";color:" << ACCENT_TEXT << "}";
-    s << ".tool.soon{color:#aeb6c2}";
+    s << ".tool.soon{color:" << DISABLED << "}";
     s << ".tool .ico{display:inline-block;width:14px;color:" << ACCENT << "}";
     s << ".tool img.ico{width:16px;height:16px;vertical-align:-3px}";
-    s << ".tool.soon .ico{color:#c9d0da}";
+    s << ".tool.soon .ico{color:" << DISABLED_ICO << "}";
 
     // ---- centre: tabs + canvas -----------------------------------------
     s << "#centre{left:" << TOOLBOX_W << "px;top:" << content_y << "px;width:" << centre_w
@@ -909,7 +927,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << "#activitylabel{display:inline-block;font-size:11px;color:" << TEXT_MUTED
       << ";margin-right:8px;vertical-align:middle}";
     s << "#activitytrack{display:inline-block;width:128px;height:4px;border-radius:2px;"
-         "background-color:#e5e7eb;vertical-align:middle}";
+         "background-color:" << HAIRLINE << ";vertical-align:middle}";
     s << "#activitybar{width:32px;height:4px;border-radius:2px;background-color:" << ACCENT
       << ";animation:1.1s cubic-in-out infinite alternate sweep}";
     s << "#runlamp{position:absolute;right:250px;top:6px;color:#28c840;font-size:14px;"
@@ -923,9 +941,9 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << "scrollbarvertical slidertrack,scrollbarhorizontal slidertrack{"
          "background-color:" << CANVAS << "}";
     s << "scrollbarvertical sliderbar{width:10px;min-height:24px;border-radius:5px;"
-         "background-color:#c9d1d9}";
+         "background-color:" << SCROLL_THUMB << "}";
     s << "scrollbarhorizontal sliderbar{height:10px;min-width:24px;border-radius:5px;"
-         "background-color:#c9d1d9}";
+         "background-color:" << SCROLL_THUMB << "}";
     s << "scrollbarvertical sliderbar:hover,scrollbarhorizontal sliderbar:hover{"
          "background-color:" << TEXT_MUTED << "}";
     // No stepper arrows: undersized ones are the other way a scrollbar becomes
@@ -934,7 +952,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // Both layers share typography exactly. Any difference in family, size,
     // line-height or padding shows up as text drifting away from its colour.
     s << "#codehl{position:absolute;left:0;top:0;font-family:'" << mono
-      << "';font-size:13px;line-height:" << CODE_LINE_H << "px;padding:" << CODE_PAD_Y << "px "
+      << "';font-size:" << CODE_FONT_PX << "px;line-height:" << CODE_LINE_H << "px;padding:" << CODE_PAD_Y << "px "
       << CODE_PAD_X << "px;padding-top:0px;white-space:pre;color:" << TEXT << "}";
     // Relative, so a diagnostic's underline can be placed within its row.
     //
@@ -956,7 +974,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // is a positioned child of the line's div: the font is monospace, so a
     // column is a multiple of one glyph's width and the bar lands under
     // exactly the name the server meant.
-    s << "#codehl div.badline{background-color:#fff6f6}";
+    s << "#codehl div.badline{background-color:" << BADLINE << "}";
     // The row's content, shifted left when the line is scrolled sideways. The
     // row clips it, so the layer stays inside the view whatever the offset.
     // Positioned, so a diagnostic's bar measures its column from the same
@@ -968,7 +986,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".problem{font-size:12px;color:" << TEXT << ";padding:2px 0}";
     s << ".problem .pline{color:" << DANGER << ";margin-right:8px}";
     s << ".problem.ref .pline{color:" << ACCENT << "}";
-    s << ".problem.ref:hover{background-color:#eef2f8}";
+    s << ".problem.ref:hover{background-color:" << HOVER << "}";
     s << ".noproblems{font-size:12px;color:" << TEXT_MUTED << ";font-style:italic}";
     // The completion popup, under the caret. Positioned at body level, not
     // inside the code view: the view clips its children, and a popup for the
@@ -977,7 +995,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << ";border-radius:5px;padding:4px 0;z-index:80;min-width:280px;max-width:560px;"
          "font-size:12px;overflow:hidden;box-shadow:#00000024 0 4px 14px 0px}";
     s << ".citem{height:16px;padding:3px 10px;white-space:nowrap;overflow:hidden;cursor:pointer}";
-    s << ".citem.sel{background-color:#e8f0fe}";
+    s << ".citem.sel{background-color:" << TINT << "}";
     s << ".citem .clabel{font-family:'" << mono << "';color:" << TEXT << "}";
     s << ".citem .cdetail{color:" << TEXT_MUTED << ";margin-left:10px}";
     // A component's context menu: its events, the way Delphi's offers them.
@@ -1017,7 +1035,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     // Positioned, so it paints ABOVE the highlight layer. Left unpositioned it
     // sits below an absolutely-positioned sibling — taking the caret and the
     // selection with it, which is an editor you cannot see yourself typing in.
-    s << "#fullcode{position:absolute;left:0;top:0;font-family:'" << mono << "';line-height:" << CODE_LINE_H << "px;font-size:13px;padding:"
+    s << "#fullcode{position:absolute;left:0;top:0;font-family:'" << mono << "';line-height:" << CODE_LINE_H << "px;font-size:" << CODE_FONT_PX << "px;padding:"
       // Top padding is zero on BOTH layers: the vertical offset is applied to
       // each layer's `top` instead. Leaving it on one and not the other put the
       // two half a line apart — every glyph doubled.
@@ -1028,9 +1046,18 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "color:#00000000;border:0;caret-color:" << TEXT << ";cursor:text}";
     // RmlUi styles a text control's selection through a child `selection`
     // element, not through CSS properties on the control itself.
-    s << "#fullcode selection{background-color:#cfe3ff;color:" << TEXT << "}";
+    s << "#fullcode selection{background-color:" << SELECTION << ";color:" << TEXT << "}";
+    // The dot grid, kept as a string so the Show-the-grid setting is a real
+    // two-way switch. Turning it off is `decorator:none`; turning it back on
+    // needs this exact value again, and it is composed here from a tile path
+    // nothing else has.
+    g.grid_decorator = dot_tile.empty() ? "" : "image(\"" + dot_tile + "\" repeat)";
     s << "#canvasarea{left:0;top:" << TABBAR_H << "px;width:" << centre_w << "px;height:" << canvas_h
-      << "px;background-color:" << CANVAS_GRID << ";decorator:image(\"" << dot_tile << "\" repeat)}";
+      << "px;background-color:" << CANVAS_GRID << ";decorator:"
+      << (openepl::settings::boolean("designer.show_grid") && !g.grid_decorator.empty()
+              ? g.grid_decorator
+              : std::string("none"))
+      << "}";
 
     // The form preview, drawn as the window it will become: a Windows 11
     // frame — 8px corners, a hairline border, a soft drop shadow. The title
@@ -1041,7 +1068,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << ";background-color:#f3f3f3;"
          "box-shadow:#0000001a 0 10px 25px -5px, #0000000d 0 8px 10px -6px}";
     s << "#formtitle{position:relative;height:" << (FORM_TITLE_H - 1)
-      << "px;border-bottom:1px #e5e7eb;border-top-left-radius:7px;border-top-right-radius:7px;"
+      << "px;border-bottom:1px " << HAIRLINE << ";border-top-left-radius:7px;border-top-right-radius:7px;"
          "font-size:13px;font-weight:bold;white-space:nowrap;overflow:hidden}";
     s << "#formicon{position:absolute;left:14px;top:" << (FORM_TITLE_H / 2 - 8) << "px;width:16px;height:16px}";
     s << "#formtitletext{position:absolute;left:38px;top:" << (FORM_TITLE_H / 2 - 8) << "px}";
@@ -1112,7 +1139,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".badge{box-sizing:border-box;height:" << BADGE_H << "px;background-color:#ffffffe6;color:"
       << SELECT << ";font-size:11px;padding:2px 8px 0 7px;border:1px " << SELECT
       << ";border-radius:10px;white-space:nowrap;cursor:pointer;transform:translateX(-50%)}";
-    s << ".badge:hover{background-color:#ddf4ff}";
+    s << ".badge:hover{background-color:" << TINT << "}";
     // The link glyph is drawn, not typed: no face the IDE loads has one, and
     // a character the font lacks renders as nothing at all.
     // Selected by id as well as class: the canvas's own rule makes every div
@@ -1135,7 +1162,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
          "text-align:center;border:1px " << BORDER_SOFT << ";border-radius:6px;background-color:"
       << PANEL << "}";
     s << ".trayitem:hover{border:1px " << ACCENT << "}";
-    s << ".trayitem.sel{border:2px " << ACCENT << ";background-color:#eef3fd}";
+    s << ".trayitem.sel{border:2px " << ACCENT << ";background-color:" << TINT << "}";
     s << ".trayico{font-size:20px;color:" << ACCENT << ";height:24px}";
     s << ".traylabel{font-size:11px;color:" << TEXT << ";white-space:nowrap;overflow:hidden}";
     s << ".traytype{font-size:10px;color:" << TEXT_MUTED << "}";
@@ -1193,7 +1220,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << ".chip:hover{border:2px " << ACCENT << "}";
     s << ".fileitem{display:block;height:22px;padding:3px 6px 0 6px;font-size:11px;color:" << TEXT
       << ";border-radius:3px;white-space:nowrap;overflow:hidden}";
-    s << ".fileitem:hover{background-color:#eef2f8;color:" << ACCENT << "}";
+    s << ".fileitem:hover{background-color:" << HOVER << ";color:" << ACCENT << "}";
     s << "#editpop .hint{padding:4px}";
     s << "#wirebox{position:absolute;left:0;width:" << (INSPECT_W - 20) << "px;height:" << WIRE_H
       << "px;padding:8px 10px 0 10px;background-color:" << CHROME_ALT << ";border-top:1px "
@@ -1215,7 +1242,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << ";border-bottom:1px " << BORDER_SOFT << "}";
     s << "#code{font-family:'" << family
       << "';font-size:12px;padding:6px 0 0 0;height:" << (BOTTOM_H - 32) << "px;overflow:auto}";
-    s << ".ln{color:#9aa3b0}";
+    s << ".ln{color:" << GUTTER << "}";
     s << ".cl{display:block;white-space:nowrap}";
     s << ".ln{display:inline-block;width:34px;text-align:right;padding-right:10px}";
     
@@ -1241,7 +1268,7 @@ std::string build_chrome(const std::string& family, const std::string& mono,
       << "';font-size:12px;line-height:" << LOG_LINE_H
       << "px;padding:0 10px;background-color:transparent;color:#00000000;border:0;"
          "caret-color:" << TEXT_MUTED << ";cursor:text}";
-    s << "#log selection{background-color:#cfe3ff;color:" << TEXT << "}";
+    s << "#log selection{background-color:" << SELECTION << ";color:" << TEXT << "}";
 
     // ---- status bar -----------------------------------------------------
     s << ".split{position:absolute;background-color:#00000000}";
@@ -1253,6 +1280,20 @@ std::string build_chrome(const std::string& family, const std::string& mono,
     s << "#status .right{position:absolute;right:26px;top:5px;width:200px;text-align:right;white-space:nowrap}";
     s << "#status .dot{color:" << SUCCESS << "}";
 
+    return s.str();
+}
+
+std::string build_chrome(const std::string& family, const std::string& mono,
+                         const std::string& dot_tile) {
+    using namespace theme;
+    const int WIN_W = g.win_w, WIN_H = g.win_h;
+    const int content_y = TITLEBAR_H + MENUBAR_H + TOOLBAR_H;
+    const int content_h = WIN_H - content_y - STATUS_H;
+    const int centre_w  = WIN_W - TOOLBOX_W - INSPECT_W;
+    const int canvas_h  = content_h - TABBAR_H - BOTTOM_H;
+    (void)content_y; (void)canvas_h;
+    std::ostringstream s;
+    s << "<rml><head><style>" << build_styles(family, mono, dot_tile);
     s << "</style></head><body>";
 
     // ---- markup ---------------------------------------------------------
@@ -1373,8 +1414,14 @@ std::string build_chrome(const std::string& family, const std::string& mono,
 /// Snap to the canvas dot grid, so dragged components line up the way the grid
 /// implies they will. Holding nothing snaps; this is the behaviour users expect
 /// from a designer that draws a grid.
-constexpr int GRID = 10;
-int snap(int v) { return ((v + GRID / 2) / GRID) * GRID; }
+/// The designer grid, and the distance Shift+arrow nudges by. A setting, and
+/// clamped away from 0 by `settings::number` — this divides.
+int grid_size() { return openepl::settings::number("designer.grid_size"); }
+int snap(int v) {
+    if (!openepl::settings::boolean("designer.snap_to_grid")) return v;
+    const int g = grid_size();
+    return ((v + g / 2) / g) * g;
+}
 
 int prop_int(const Component& c, const char* name, int fallback) {
     if (const std::string* v = c.property(name)) {
@@ -1535,7 +1582,7 @@ void rebuild_canvas() {
     canvas->SetProperty("background-color", form_bg);
     if (Rml::Element* t = by_id("formtitle")) {
         const bool dark = dark_colour(form_bg);
-        const char* ink = dark ? "#ffffff" : theme::TEXT;
+        const std::string ink = dark ? std::string("#ffffff") : theme::TEXT;
         t->SetProperty("background-color", form_bg);
         t->SetProperty("color", ink);
         // The rule under the title bar parts it from the client area; on a
@@ -2848,9 +2895,23 @@ void build_binary(bool then_run) {
     save();
     g.log_lines.clear();
 
-    g.build_target = openepl::sys::temp_dir() + "/" + openepl::sys::program_name("openepl_studio_app");
-    const std::string cmd =
-        g.openepl_bin + " build " + g.model.path + " -o " + g.build_target + " 2>&1";
+    // Where the binary lands. Left unset it is a fixed name in the temporary
+    // directory — fine for Run, useless for shipping, which is the whole point
+    // of the tool. Given a directory, the binary is named after the module and
+    // stays where it was put.
+    const std::string out_dir = openepl::settings::text("build.output_dir");
+    if (out_dir.empty()) {
+        g.build_target =
+            openepl::sys::temp_dir() + "/" + openepl::sys::program_name("openepl_studio_app");
+    } else {
+        openepl::sys::make_dirs(out_dir);
+        const std::string stem = g.model.module_name.empty() ? std::string("app") : g.model.module_name;
+        g.build_target = out_dir + "/" + openepl::sys::program_name(stem);
+    }
+    const std::string release =
+        openepl::settings::boolean("build.release") ? " --release" : "";
+    const std::string cmd = g.openepl_bin + " build " + g.model.path + release + " -o " +
+                            g.build_target + " 2>&1";
 
     // Verbose by design: the console should let you see what the toolchain
     // actually did, not just whether it succeeded.
@@ -3431,6 +3492,167 @@ void show_about() {
     g.about->AddEventListener("keydown", &g_about_listener);
 }
 
+/* --- Settings -------------------------------------------------------------- */
+
+/// Rebuild the chrome's stylesheet against the palette in force, and hand it to
+/// the document.
+///
+/// `SetStyleSheetContainer` dirties the document's definitions and recurses, so
+/// every element re-resolves against the new sheet — this is what makes the
+/// theme switch live rather than restart-only. The dot tile is regenerated
+/// first: it is a file, and its colour is baked into the pixels.
+///
+/// The canvas is repainted afterwards because `rebuild_canvas` writes colours
+/// inline from the model, and those are not part of the sheet.
+void rebuild_styles() {
+    if (!g.doc) return;
+    // The cache path, spelled out rather than through cache_file(): that is
+    // defined further down, beside the startup code that first writes the tile.
+    const std::string cache = openepl::sys::cache_dir();
+    openepl::sys::make_dirs(cache);
+    const std::string tile_path = cache + "/openepl_dotgrid.tga";
+    g.dot_tile = write_dot_tile(tile_path, 10, theme::BORDER).empty() ? "" : "/" + tile_path;
+    g.doc->SetStyleSheetContainer(
+        Rml::Factory::InstanceStyleSheetString(build_styles(g.family, g.mono, g.dot_tile)));
+    g.context->Update();
+    relayout();
+    rebuild_canvas();
+    refresh_all();
+    if (g.view == "code") refresh_highlight();
+}
+
+void close_settings() {
+    if (!g.settings_doc) return;
+    g.settings_doc->Close();
+    g.settings_doc = nullptr;
+    if (g.doc) g.doc->Focus();
+}
+
+void open_settings(const std::string& category);
+
+/// Put a setting into effect now, for the settings that can be.
+///
+/// A row marked `restart` deliberately does nothing here: it said so on its
+/// own row, and doing half of it — a new font size with the old line height —
+/// would look like a bug rather than like a setting waiting for a relaunch.
+void apply_setting(const std::string& key) {
+    if (key == "appearance.theme") {
+        theme::set_palette(openepl::settings::text("appearance.theme") == "dark");
+        rebuild_styles();
+        // The dialog is its own document with its own baked stylesheet, so the
+        // IDE behind it going dark leaves it light. It has to be built again.
+        if (g.settings_doc) open_settings(g.settings_cat);
+    } else if (key == "designer.show_grid") {
+        if (Rml::Element* e = by_id("canvasarea")) {
+            e->SetProperty("decorator",
+                           openepl::settings::boolean("designer.show_grid") && !g.grid_decorator.empty()
+                               ? g.grid_decorator
+                               : std::string("none"));
+        }
+    }
+    openepl::settings::save();
+}
+
+/// Commit a text field. Called on blur and on Enter — never on `change`, which
+/// RmlUi fires per keystroke: a grid size would pass through 0 on the way from
+/// 10 to 20, and 0 reaches an integer division in `snap`.
+///
+/// A value the schema refuses is put back to what it was rather than kept, so
+/// the field never shows something that is not in force.
+void commit_field(Rml::Element* e) {
+    if (!e || !e->HasAttribute("oe-set-field")) return;
+    const std::string key = e->GetAttribute<Rml::String>("oe-set-field", "");
+    auto* in = dynamic_cast<Rml::ElementFormControl*>(e);
+    if (!in) return;
+    const std::string typed = in->GetValue();
+    if (typed == openepl::settings::text(key)) return;
+    if (openepl::settings::set(key, typed)) {
+        apply_setting(key);
+        set_status(key + " = " + typed);
+        open_settings(g.settings_cat);   // the modified marker and Reset appear
+    } else {
+        in->SetValue(openepl::settings::text(key));
+        const openepl::settings::Row* r = openepl::settings::find(key);
+        set_status(r && r->kind == openepl::settings::Kind::Int
+                       ? key + " must be between " + std::to_string(r->min) + " and " +
+                             std::to_string(r->max)
+                       : std::string("that is not a value ") + key + " accepts");
+    }
+}
+
+struct SettingsListener : Rml::EventListener {
+    void ProcessEvent(Rml::Event& ev) override {
+        const std::string type = ev.GetType();
+        if (type == "blur") { commit_field(ev.GetTargetElement()); return; }
+        if (type == "keydown") {
+            const int key = ev.GetParameter<int>("key_identifier", 0);
+            if (key == Rml::Input::KI_RETURN || key == Rml::Input::KI_NUMPADENTER) {
+                commit_field(g.context->GetFocusElement());
+                return;
+            }
+            // Escape commits nothing: a half-typed field is abandoned, which
+            // is what Escape means everywhere else.
+            if (key == Rml::Input::KI_ESCAPE) close_settings();
+            return;
+        }
+        for (Rml::Element* e = ev.GetTargetElement(); e; e = e->GetParentNode()) {
+            if (e->HasAttribute("oe-set-close")) { close_settings(); return; }
+            if (e->HasAttribute("oe-set-cat")) {
+                open_settings(e->GetAttribute<Rml::String>("oe-set-cat", ""));
+                return;
+            }
+            if (e->HasAttribute("oe-set-reset")) {
+                const std::string key = e->GetAttribute<Rml::String>("oe-set-reset", "");
+                openepl::settings::reset(key);
+                apply_setting(key);
+                set_status(key + " reset");
+                open_settings(g.settings_cat);
+                return;
+            }
+            if (e->HasAttribute("oe-set-key")) {
+                const std::string key = e->GetAttribute<Rml::String>("oe-set-key", "");
+                const std::string val = e->GetAttribute<Rml::String>("oe-set-val", "");
+                if (openepl::settings::set(key, val)) {
+                    apply_setting(key);
+                    set_status(key + " = " + val);
+                    open_settings(g.settings_cat);
+                }
+                return;
+            }
+            if (e->GetId() == "openfile") {
+                std::printf("settings: file %s\n", openepl::settings::path().c_str());
+                std::fflush(stdout);
+                return;
+            }
+            if (e->GetId() == "dlg") return;   // a click inside keeps it open
+        }
+        close_settings();                      // ...one outside does not
+    }
+} g_settings_listener;
+
+/// Open the dialog, or re-render it in place.
+///
+/// Re-rendering the whole document is what makes a chip light up and a Reset
+/// link appear the moment a value changes; it is safe here in a way it is not
+/// in the inspector, because every commit path runs after the field has
+/// already lost focus or taken Enter — never with the caret inside a control
+/// that is about to be destroyed.
+void open_settings(const std::string& category) {
+    g.settings_cat = category.empty() ? std::string("Appearance") : category;
+    const bool reopening = g.settings_doc != nullptr;
+    if (reopening) { g.settings_doc->Close(); g.settings_doc = nullptr; g.context->Update(); }
+    g.settings_doc = g.context->LoadDocumentFromMemory(
+        openepl::designer::settings_page::markup(g.family, g.win_w, g.win_h, g.settings_cat));
+    if (!g.settings_doc) return;
+    g.settings_doc->Show(Rml::ModalFlag::Modal, Rml::FocusFlag::Document);
+    g.settings_doc->AddEventListener("click", &g_settings_listener);
+    g.settings_doc->AddEventListener("keydown", &g_settings_listener);
+    // Blur bubbles only when asked for: it is not a bubbling event in RmlUi,
+    // so the listener is registered in the capture phase to see every field's.
+    g.settings_doc->AddEventListener("blur", &g_settings_listener, true);
+    if (!reopening) set_status("settings");
+}
+
 void show_tip(const std::string& markdown, int x, int y) {
     Rml::Element* tip = by_id("tip");
     if (!tip) return;
@@ -3820,7 +4042,9 @@ void accept_completion() {
 /// One level. Two spaces: it is what every example, template and generated
 /// sample in the tree is written with, and an editor that disagreed with the
 /// files it opens would re-indent them a line at a time.
-constexpr int INDENT = 2;
+/// What Tab inserts and what Enter copies after a block opener. A setting;
+/// `settings::number` keeps it at 1 or more, because `col % width` divides.
+int indent_width() { return openepl::settings::number("editor.indent_size"); }
 
 /// Put `text` in the editor with the caret at character offset `caret`.
 ///
@@ -3940,7 +4164,7 @@ void newline_with_indent() {
 
     const std::string cur = line_text(text, line);
     std::string indent = leading_space(cur);
-    if (opens_block(cur)) indent += std::string(INDENT, ' ');
+    if (opens_block(cur)) indent += std::string((size_t)indent_width(), ' ');
 
     // Only what is to the left of the caret decides the indent; splitting a
     // line in the middle keeps the tail, it does not re-indent it.
@@ -3970,9 +4194,10 @@ void indent_selection(bool out) {
     // The single-caret case: pad to the next stop, or pull one level off.
     if (from_b == to_b && !out) {
         const size_t at = byte_offset(text, line, col);
-        const int pad = INDENT - (col % INDENT);
-        text.insert(at, std::string((size_t)(pad ? pad : INDENT), ' '));
-        set_editor_text(text, at + (size_t)(pad ? pad : INDENT));
+        const int width = indent_width();
+        const int pad = width - (col % width);
+        text.insert(at, std::string((size_t)(pad ? pad : width), ' '));
+        set_editor_text(text, at + (size_t)(pad ? pad : width));
         return;
     }
 
@@ -4000,10 +4225,10 @@ void indent_selection(bool out) {
         if (ls > text.size()) break;
         if (out) {
             size_t n = 0;
-            while (n < (size_t)INDENT && ls + n < text.size() && text[ls + n] == ' ') n++;
+            while (n < (size_t)indent_width() && ls + n < text.size() && text[ls + n] == ' ') n++;
             text.erase(ls, n);
         } else {
-            text.insert(ls, std::string(INDENT, ' '));
+            text.insert(ls, std::string((size_t)indent_width(), ' '));
         }
         if (l == first) moved_first = ls;
     }
@@ -4011,8 +4236,9 @@ void indent_selection(bool out) {
     // The caret stays on its line, shifted by what that line gained or lost.
     const size_t ls = byte_offset(text, line, 0);
     const std::string now = line_text(text, line);
-    size_t want = (size_t)col + (size_t)(out ? -INDENT : INDENT);
-    if ((int)want < 0 || out) want = (size_t)std::max(0, col - INDENT);
+    const int width = indent_width();
+    size_t want = (size_t)col + (size_t)(out ? -width : width);
+    if ((int)want < 0 || out) want = (size_t)std::max(0, col - width);
     if (want > now.size()) want = now.size();
     set_editor_text(text, ls + want);
 }
@@ -4246,7 +4472,8 @@ struct Listener : Rml::EventListener {
                 if (e->GetId() == "codeview" || e->GetId() == "fullcode" ||
                     e->GetId() == "codehl") {
                     g.code_scroll +=
-                        (int)ev.GetParameter<float>("wheel_delta_y", 0.f) * theme::CODE_LINE_H * 3;
+                        (int)ev.GetParameter<float>("wheel_delta_y", 0.f) * theme::CODE_LINE_H *
+                        openepl::settings::number("editor.scroll_lines");
                     sync_highlight_scroll();
                     ev.StopPropagation();
                     return;
@@ -4260,7 +4487,8 @@ struct Listener : Rml::EventListener {
                     if (Rml::Element* ta = by_id("log")) {
                         ta->SetScrollTop(ta->GetScrollTop() +
                                          ev.GetParameter<float>("wheel_delta_y", 0.f) *
-                                             theme::LOG_LINE_H * 3);
+                                             theme::LOG_LINE_H *
+                                             openepl::settings::number("editor.scroll_lines"));
                         g.log_follow = false;
                         sync_log_scroll();
                     }
@@ -4379,6 +4607,8 @@ struct Listener : Rml::EventListener {
             const int key = ev.GetParameter<int>("key_identifier", 0);
             const bool ctrl = ev.GetParameter<bool>("ctrl_key", false);
             const bool shift = ev.GetParameter<bool>("shift_key", false);
+            // Ctrl+, — the shortcut every IDE surveyed uses for preferences.
+            if (ctrl && key == Rml::Input::KI_OEM_COMMA) { open_settings(g.settings_cat); return; }
             if (ctrl && key == Rml::Input::KI_Z) { shift ? redo() : undo(); return; }
             if (ctrl && key == Rml::Input::KI_Y) { redo(); return; }
             if (ctrl && key == Rml::Input::KI_C) { copy_selection(); return; }
@@ -4395,7 +4625,7 @@ struct Listener : Rml::EventListener {
             else if (key == Rml::Input::KI_UP) dy = -1;
             else if (key == Rml::Input::KI_DOWN) dy = 1;
             if (dx || dy) {
-                if (shift) { dx *= GRID; dy *= GRID; }
+                if (shift) { dx *= grid_size(); dy *= grid_size(); }
                 push_undo();
                 for (const auto& id : g.selection) {
                     if (id == g.model.form_name) continue;   // not on the canvas to nudge
@@ -4575,6 +4805,7 @@ struct Listener : Rml::EventListener {
                     else if (a == "view-designer") set_view("designer");
                     else if (a == "view-code") set_view("code");
                     else if (a == "about") show_about();
+                    else if (a == "settings") open_settings(g.settings_cat);
                     else if (a == "exit") {
                         Backend::RequestExit();
                     } else {
@@ -5008,6 +5239,35 @@ Rml::Element* script_target(const std::string& arg) {
     g.context->Update();
     Rml::Element* e = by_id(arg == "form" ? "formtitle" : arg.c_str());
     if (!e && g.about) e = g.about->GetElementById(arg);
+    // The Settings dialog, the same way. A modal document no verb can address
+    // is a page no test can check, which is where every UI bug has hidden.
+    if (!e && g.settings_doc) {
+        e = g.settings_doc->GetElementById(arg);
+        if (!e) {
+            // Its rows carry no ids — a control is named by the setting it
+            // edits, which is what a test wants to say anyway.
+            Rml::ElementList all;
+            g.settings_doc->GetElementsByTagName(all, "span");
+            Rml::ElementList inputs;
+            g.settings_doc->GetElementsByTagName(inputs, "input");
+            all.insert(all.end(), inputs.begin(), inputs.end());
+            Rml::ElementList divs;
+            g.settings_doc->GetElementsByTagName(divs, "div");
+            all.insert(all.end(), divs.begin(), divs.end());
+            for (Rml::Element* c : all) {
+                const std::string field = c->GetAttribute<Rml::String>("oe-set-field", "");
+                const std::string cat = c->GetAttribute<Rml::String>("oe-set-cat", "");
+                const std::string key = c->GetAttribute<Rml::String>("oe-set-key", "");
+                const std::string val = c->GetAttribute<Rml::String>("oe-set-val", "");
+                // `key=value` addresses one chip; a bare key addresses a field
+                // or a rail entry.
+                if (arg == field || arg == cat || (!key.empty() && arg == key + "=" + val)) {
+                    e = c;
+                    break;
+                }
+            }
+        }
+    }
     if (e) return e;
     for (const char* holder : {"canvas", "traylist"}) {
         Rml::Element* box = by_id(holder);
@@ -5211,6 +5471,40 @@ void run_script(const char* script) {
                     g.context->SetDimensions(Rml::Vector2i(nw, nh));
                     relayout();
                     rebuild_canvas();
+                }
+            } else if (verb == "settings") {
+                open_settings(arg.empty() ? g.settings_cat : arg);
+                g.context->Update();
+                std::printf("settings: open %s\n", g.settings_cat.c_str());
+            } else if (verb == "settingsclose") {
+                close_settings();
+                g.context->Update();
+                std::printf("settings: closed\n");
+            } else if (verb == "getsetting") {
+                // The value in force, read back through the same accessor the
+                // IDE uses — so the test checks what the IDE will do, not what
+                // the file happens to say.
+                std::printf("setting: %s = %s\n", arg.c_str(),
+                            openepl::settings::text(arg).c_str());
+            } else if (verb == "setsetting") {
+                const size_t eq = arg.find('=');
+                if (eq == std::string::npos) {
+                    std::printf("setting: %s needs key=value\n", arg.c_str());
+                } else {
+                    const std::string key = arg.substr(0, eq), val = arg.substr(eq + 1);
+                    const bool ok = openepl::settings::set(key, val);
+                    if (ok) apply_setting(key);
+                    std::printf("setting: %s = %s %s\n", key.c_str(),
+                                openepl::settings::text(key).c_str(), ok ? "ok" : "refused");
+                }
+            } else if (verb == "settingsdump") {
+                // Every row and its value, so a test can assert the page shows
+                // what the store holds.
+                for (const auto& r : openepl::settings::schema()) {
+                    if (r.hidden) continue;
+                    std::printf("row: %s|%s|%s|%s\n", r.category, r.key,
+                                openepl::settings::text(r.key).c_str(),
+                                openepl::settings::modified(r.key) ? "modified" : "default");
                 }
             } else if (verb == "about") {
                 show_about();
@@ -6147,7 +6441,8 @@ bool close_splash(Splash& sp, const std::string& family, Uint32 min_ms) {
 std::string run_welcome(const std::string& family) {
     auto dim = g.context->GetDimensions();
     const auto templates = openepl::welcome::load_templates(g.openepl_bin);
-    const auto recent = openepl::welcome::load_recent();
+    const auto recent =
+        openepl::welcome::load_recent((size_t)openepl::settings::number("startup.recent_limit"));
 
     Rml::ElementDocument* doc = g.context->LoadDocumentFromMemory(
         openepl::welcome::welcome_markup(family, dim.x, dim.y, templates, recent,
@@ -6513,8 +6808,50 @@ const openepl::ui::FontCandidate* windows_font_candidates(int* count) {
 }
 #endif
 
+/// Record the window geometry, if the user asked us to.
+///
+/// Guarded against scripted sessions for the same reason `remember_recent` is:
+/// a headless run resizes the window to whatever a test wanted, and that must
+/// not become the size a person's IDE opens at tomorrow.
+void remember_window_size() {
+    if (std::getenv("OPENEPL_DESIGNER_SCRIPT")) return;
+    if (!openepl::settings::boolean("appearance.remember_window")) return;
+    openepl::settings::set("window.width", std::to_string(g.win_w));
+    openepl::settings::set("window.height", std::to_string(g.win_h));
+    openepl::settings::save();
+}
+
+/// Apply the on-exit policy to unsaved work.
+///
+/// `discard` is offered because Studio saves on exit unconditionally, and the
+/// project's own rule — never open a tracked example in Studio, because the
+/// save lands in your next commit — exists only because of that. It says what
+/// it did either way: an afternoon's work vanishing silently would be a far
+/// worse failure than the one this setting fixes.
+void save_or_discard_on_exit() {
+    if (openepl::settings::text("startup.on_exit") == "discard") {
+        std::printf("designer: unsaved changes discarded (Settings ▸ Files and startup)\n");
+        return;
+    }
+    std::printf("designer: unsaved changes — saving before exit\n");
+    save();
+}
+
 int main(int argc, char** argv) {
+    // Settings before anything reads one. The palette in particular has to be
+    // in force before the first stylesheet is built: every colour in the chrome,
+    // the splash and the welcome screen is copied out of `theme::` as a string,
+    // so a swap after that point paints nothing already drawn.
+    openepl::settings::load();
+    theme::set_palette(openepl::settings::text("appearance.theme") == "dark");
+    theme::set_code_font_size(openepl::settings::number("editor.font_size"));
+
     g.openepl_bin = sibling_openepl();
+    // A toolchain named in the settings beats the sibling, and the command
+    // line beats both — the argument is the more deliberate act of the two.
+    if (const std::string chosen = openepl::settings::text("toolchain.openepl"); !chosen.empty()) {
+        g.openepl_bin = chosen;
+    }
     // Either argument may be omitted: with no project we show the welcome
     // screen, and the compiler path is optional. They are told apart by
     // extension rather than by position, so `openepl-designer <compiler>` works
@@ -6554,7 +6891,15 @@ int main(int argc, char** argv) {
          std::getenv("OPENEPL_DESIGNER_WELCOME_DUMP")))
         setenv("SDL_VIDEODRIVER", "offscreen", 1);
 #endif
-    if (!Backend::Initialize("OpenEPL Studio", INIT_W, INIT_H, true)) return 1;
+    // The size we were left at, when asked for. `Designer g` is constructed
+    // during static initialisation — before any settings file has been read —
+    // so g.win_w is seeded here rather than at its declaration.
+    if (openepl::settings::boolean("appearance.remember_window")) {
+        const int w = openepl::settings::number("window.width");
+        const int h = openepl::settings::number("window.height");
+        if (w > 0 && h > 0) { g.win_w = w; g.win_h = h; }
+    }
+    if (!Backend::Initialize("OpenEPL Studio", g.win_w, g.win_h, true)) return 1;
 
     // The window icon: what a task switcher and a dock show. SDL owns the
     // surface only until it copies it, so freeing straight after is correct.
@@ -6632,8 +6977,10 @@ int main(int argc, char** argv) {
     // parser leaves alone. Doubling the slash survives that normalisation.
     g.family = family;
     const std::string tile_path = cache_file("openepl_dotgrid.tga");
-    const std::string dot_tile = write_dot_tile(tile_path, 10).empty() ? "" : "/" + tile_path;
-    g.context = Rml::CreateContext("studio", Rml::Vector2i(INIT_W, INIT_H));
+    const std::string dot_tile =
+        write_dot_tile(tile_path, 10, theme::BORDER).empty() ? "" : "/" + tile_path;
+    g.dot_tile = dot_tile;
+    g.context = Rml::CreateContext("studio", Rml::Vector2i(g.win_w, g.win_h));
     // Off by default in RmlUi: without this every `cursor:` rule in the
     // stylesheet is inert, and a resize handle looks like anything else.
     g.context->EnableMouseCursor(true);
@@ -6652,12 +6999,22 @@ int main(int argc, char** argv) {
     // project yet, so the IDE chrome cannot meaningfully exist behind it.
     // The second splash is a transition between two screens, not a launch;
     // it gets no minimum.
-    Uint32 splash_min = 1200;
+    Uint32 splash_min = (Uint32)openepl::settings::number("appearance.splash_ms");
     auto quit = [] {
         Rml::Shutdown();
         Backend::Shutdown();
         return 0;
     };
+    // Reopening the last project skips the welcome screen entirely — asked for
+    // once, then never asked again. Guarded by an existence check, because a
+    // project that has been moved or deleted must land on the welcome screen
+    // rather than on an error.
+    if (path.empty() && openepl::settings::boolean("startup.reopen_last") &&
+        !std::getenv("OPENEPL_DESIGNER_SCRIPT")) {
+        const auto recent =
+            openepl::welcome::load_recent((size_t)openepl::settings::number("startup.recent_limit"));
+        if (!recent.empty()) path = openepl::welcome::resolve_open(g.openepl_bin, recent.front());
+    }
     if (path.empty()) {
         if (!close_splash(splash, family, splash_min)) return quit();
         path = run_welcome(family);
@@ -6674,7 +7031,8 @@ int main(int argc, char** argv) {
     // A scripted session is a test, not a person: it must not appear on the
     // welcome screen the person sees next.
     if (!std::getenv("OPENEPL_DESIGNER_SCRIPT") && !std::getenv("OPENEPL_DESIGNER_DUMP"))
-        openepl::welcome::remember_recent(path);
+        openepl::welcome::remember_recent(
+            path, (size_t)openepl::settings::number("startup.recent_limit"));
 
     // The language server, started on the project's directory so it finds the
     // runtime and the component library the same way the compiler does.
@@ -6694,6 +7052,7 @@ int main(int argc, char** argv) {
     }
     if (!close_splash(splash, family, splash_min)) return quit();
 
+    g.mono = mono;
     const std::string chrome = build_chrome(family, mono, dot_tile);
     if (std::getenv("OPENEPL_DESIGNER_DEBUG")) {
         std::fprintf(stderr, "designer: chrome %zu bytes\n", chrome.size());
@@ -6748,10 +7107,7 @@ int main(int argc, char** argv) {
         }
         g.context->Update();
         run_script(script);
-        if (g.dirty) {
-            std::printf("designer: unsaved changes — saving before exit\n");
-            save();
-        }
+        if (g.dirty) save_or_discard_on_exit();
         std::printf("designer: script complete\n");
         if (std::getenv("OPENEPL_DESIGNER_DUMP")) dump_frame();
         Rml::Shutdown();
@@ -6814,9 +7170,9 @@ int main(int argc, char** argv) {
     }
     stop_app();
     g.lsp.stop();
+    remember_window_size();
     if (g.dirty) {
-        std::printf("designer: unsaved changes — saving before exit\n");
-        save();
+        save_or_discard_on_exit();
     }
     Rml::Shutdown();
     Backend::Shutdown();

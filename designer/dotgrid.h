@@ -8,13 +8,24 @@
 #define OPENEPL_DESIGNER_DOTGRID_H
 
 #include <cstdio>
+#include <cstdlib>
 #include <sys/stat.h>
 #include <string>
 
 namespace openepl::designer {
 
 /// Write a `spacing`x`spacing` BGRA tile with one dot; returns the path.
-inline std::string write_dot_tile(const std::string& path, int spacing = 10) {
+///
+/// The dot's colour is passed in rather than fixed, because the palette is a
+/// setting: a grid drawn in the light border colour is a row of pale specks on
+/// a dark canvas, which is worse than no grid at all.
+inline std::string write_dot_tile(const std::string& path, int spacing = 10,
+                                  const std::string& rgb = "#d0d7de") {
+    auto hex2 = [&](size_t at) -> unsigned char {
+        if (rgb.size() < at + 2) return 0xd0;
+        return (unsigned char)std::strtol(rgb.substr(at, 2).c_str(), nullptr, 16);
+    };
+    const unsigned char R = hex2(1), G = hex2(3), B = hex2(5);
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return "";
     const unsigned char header[18] = {
@@ -24,7 +35,7 @@ inline std::string write_dot_tile(const std::string& path, int spacing = 10) {
         32, 0x20 /* top-left origin */
     };
     std::fwrite(header, 1, sizeof header, f);
-    // One dot per tile, 1.5px across, in the border colour (#d0d7de),
+    // One dot per tile, 1.5px across, in the palette's border colour,
     // centred on a pixel so it reads as a dot of that colour with a faint
     // rim rather than a pale square. Each pixel's alpha is the share of it
     // the disc covers — sampled, not guessed. Straight alpha: the renderer's
@@ -41,7 +52,7 @@ inline std::string write_dot_tile(const std::string& path, int spacing = 10) {
                 }
             }
             const double a = (double)inside / (n * n);
-            const unsigned char pix[4] = {0xde, 0xd7, 0xd0, (unsigned char)(0xff * a + 0.5)};
+            const unsigned char pix[4] = {B, G, R, (unsigned char)(0xff * a + 0.5)};
             std::fwrite(pix, 1, 4, f);
         }
     }
