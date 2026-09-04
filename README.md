@@ -97,7 +97,7 @@ sub main
   call print_text("Hello from OpenEPL.")
 
   let answer: int = 6 * 7
-  call print_text(concat("six times seven is ", int_to_text(answer)))
+  call print_text("six times seven is {answer}")
 end
 ```
 
@@ -121,12 +121,12 @@ sub main
 end
 
 sub on_tick
-  remaining = remaining - 1
+  remaining -= 1
   if remaining <= 0
     call print_text("Liftoff.")
     call quit()
   else
-    call print_text(concat(int_to_text(remaining), "..."))
+    call print_text("{remaining}...")
   end
 end
 ```
