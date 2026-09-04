@@ -81,9 +81,13 @@ Building a program there needs a toolchain on the machine, the same two
 | The link | mingw-w64's `gcc` and `g++` on `PATH` — MSYS2's `mingw-w64-x86_64-gcc` |
 | GUI programs | the mingw-w64 SDL2, SDL2_image and freetype packages (MSYS2: `mingw-w64-x86_64-SDL2`, `-SDL2_image`, `-freetype`) |
 
+**`SETUP-WINDOWS.md`, beside this file, walks through installing them** —
+including the "Add LLVM to the system PATH" box, which is not ticked by
+default and is what most first runs are missing.
+
 Without `clang`, Studio opens and shows the templates, but the toolbox is
 empty — it is filled from `openepl commands`, which compiles each library's
-metadata with clang — and Build says `invoke clang: program not found`. This is a first Windows build:
+metadata with clang — and Build says so, naming what to install. This is a first Windows build:
 it has been run under wine, not on Windows, and the IDE's window has not yet
 been seen drawn there. Accessibility is off on Windows, and `https://` is
 off in a Windows build.

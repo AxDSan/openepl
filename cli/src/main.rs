@@ -1256,7 +1256,7 @@ fn clang_link(
                     Ok(o.status.success())
                 }
                 Err(e) => {
-                    eprintln!("openepl: could not invoke {driver}: {e}");
+                    eprintln!("openepl: {}", crate::libload::spawn_error(driver, &e));
                     Err(1)
                 }
             }
@@ -1268,7 +1268,7 @@ fn clang_link(
                     Ok(false)
                 }
                 Err(e) => {
-                    eprintln!("openepl: could not invoke clang: {e}");
+                    eprintln!("openepl: {}", crate::libload::spawn_error(driver, &e));
                     Err(1)
                 }
             }
@@ -1501,7 +1501,7 @@ fn mingw_link(
             return Err(1);
         }
         Err(e) => {
-            eprintln!("openepl: could not invoke {linker}: {e}");
+            eprintln!("openepl: {}", crate::libload::spawn_error(linker, &e));
             return Err(1);
         }
     }
@@ -1866,7 +1866,7 @@ fn compile_objects(
                 return Err(1);
             }
             Err(e) => {
-                eprintln!("openepl: could not invoke {driver}: {e}");
+                eprintln!("openepl: {}", crate::libload::spawn_error(driver, &e));
                 return Err(1);
             }
         }

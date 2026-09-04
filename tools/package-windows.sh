@@ -133,6 +133,10 @@ fi
 
 mkdir -p "$OUT/docs"
 cp docs/editors.md "$OUT/docs/editors.md"
+# At the root, beside the README: it is what the compiler names when clang is
+# not on PATH, which is the first thing a new Windows user hits, and a file
+# they have to go looking for in a subdirectory is one they will not find.
+cp docs/SETUP-WINDOWS.md "$OUT/SETUP-WINDOWS.md"
 
 # GUI programs built ON the Windows machine link the same vendored UI stack the
 # cross build does: the Windows RmlUi archive and its headers.

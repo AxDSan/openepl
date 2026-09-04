@@ -442,6 +442,30 @@ fn filename(p: &Path) -> String {
         .to_string()
 }
 
+/// What to say when a toolchain program could not be started.
+///
+/// `NotFound` is the whole diagnosis, and on its own it prints as "program not
+/// found" — which names neither the program that is missing nor anything to do
+/// about it. Studio shows this same string in its PROBLEMS pane, where it was
+/// the first thing a new user on Windows saw, so this is the one place either
+/// of them gets to explain itself.
+pub fn spawn_error(prog: &str, e: &std::io::Error) -> String {
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return format!("invoke {prog}: {e}");
+    }
+    let install = if prog.contains("mingw32") {
+        "install mingw-w64 and put its bin directory on PATH"
+    } else {
+        "install LLVM (which provides clang) and put its bin directory on PATH"
+    };
+    let guide = if cfg!(windows) {
+        "\nsee SETUP-WINDOWS.md, beside this binary, for the toolchain OpenEPL needs"
+    } else {
+        ""
+    };
+    format!("{prog} is not on PATH — {install}{guide}")
+}
+
 /// All C/C++ sources directly in `dir`, sorted for determinism.
 fn c_sources(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
@@ -488,7 +512,7 @@ fn build_introspection_so(
     }
     cmd.arg("-o").arg(&so_path);
 
-    let status = cmd.status().map_err(|e| format!("invoke clang: {e}"))?;
+    let status = cmd.status().map_err(|e| spawn_error("clang", &e))?;
     if !status.success() {
         return Err(format!("building introspection library `{name}` failed"));
     }
