@@ -44,7 +44,9 @@ read -r -a PKG_LIBS <<< "$("$TRIPLE-pkg-config" --libs sdl2 SDL2_image freetype2
 # `main` sees SDL.h, which renames it SDL_main on Windows, so SDL2main's
 # WinMain is the entry and -mwindows keeps a console from opening behind the
 # IDE. The C++ runtime is linked in — two DLLs fewer to ship.
-LIBS=(-Lvendor/RmlUi/build-windows -lrmlui -lopengl32 -lgdi32 "${PKG_LIBS[@]}"
+# comdlg32 is GetOpenFileName, which is how Studio asks the platform for a
+# file rather than listing one directory itself (sys::pick_open_file).
+LIBS=(-Lvendor/RmlUi/build-windows -lrmlui -lopengl32 -lgdi32 -lcomdlg32 "${PKG_LIBS[@]}"
       -static-libgcc -static-libstdc++)
 
 mkdir -p "$OUT_DIR"

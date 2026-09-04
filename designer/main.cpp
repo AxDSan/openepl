@@ -587,6 +587,18 @@ void sync_log_scroll() {
     layer->SetInnerRML(html);
 }
 
+/// Keep the colour layer level with the control, sideways.
+///
+/// The caret scrolls the textarea by itself — Right past the edge, Home, End,
+/// a click beyond the last visible column — and raises no change event, so
+/// nothing else notices. Compared once a frame instead. `refresh_highlight`
+/// caches on the offset, so an editor that has not moved does no work.
+void follow_code_scroll() {
+    if (g.view != "code") return;
+    Rml::Element* ed = by_id("fullcode");
+    if (ed && (int)ed->GetScrollLeft() != g.code_scroll_x) refresh_highlight();
+}
+
 /// Scroll the console to the newest line. Must run after a layout pass, since
 /// the scroll height is not known until the new lines have been laid out.
 void follow_log() {
@@ -616,6 +628,7 @@ void refresh_highlight();
 void sync_highlight_scroll();
 std::string icon_img(const std::string& name, int px, const char* cls);
 void follow_log();
+void follow_code_scroll();
 void size_output_pane();
 void close_completion();
 void render_diagnostics();
@@ -3902,6 +3915,29 @@ void newline_with_indent() {
     int line = 0, col = 0;
     if (!ta || !caret_position(line, col)) return;
     std::string text = ta->GetValue();
+
+    // A selection is replaced, as it is in any editor and as the control this
+    // stands in for would have done. Taken out first, so the line the indent
+    // is copied from is the line the new one actually follows.
+    int sel_a = 0, sel_b = 0;
+    Rml::String selected;
+    ta->GetSelection(&sel_a, &sel_b, &selected);
+    if (sel_b > sel_a) {
+        const size_t from =
+            (size_t)Rml::StringUtilities::ConvertCharacterOffsetToByteOffset(text, sel_a);
+        const size_t to =
+            (size_t)Rml::StringUtilities::ConvertCharacterOffsetToByteOffset(text, sel_b);
+        if (to > from && to <= text.size()) {
+            text.erase(from, to - from);
+            line = 0;
+            col = 0;
+            for (size_t i = 0; i < from && i < text.size(); i++) {
+                if (text[i] == '\n') { line++; col = 0; }
+                else if (((unsigned char)text[i] & 0xC0) != 0x80) col++;
+            }
+        }
+    }
+
     const std::string cur = line_text(text, line);
     std::string indent = leading_space(cur);
     if (opens_block(cur)) indent += std::string(INDENT, ' ');
@@ -4932,6 +4968,7 @@ void dump_to(const char* path) {
         // colour layer was never painted — an empty pane the user never sees.
         size_output_pane();
         follow_log();
+        follow_code_scroll();
         sync_log_scroll();
         Backend::BeginFrame();
         g.context->Render();
@@ -5245,6 +5282,14 @@ void run_script(const char* script) {
                     g.dirty = true;
                 }
             }
+            else if (verb == "codescroll") {
+                // What the colour layer is offset by, so a test can see the
+                // two layers agree without looking at pixels.
+                g.context->Update();
+                follow_code_scroll();
+                std::printf("codescroll: x=%d\n", g.code_scroll_x);
+                std::fflush(stdout);
+            }
             else if (verb == "codetext") {
                 if (auto* ed = code_editor()) {
                     g.context->Update();   // offsets are stale until layout runs
@@ -5555,6 +5600,8 @@ void run_script(const char* script) {
                 else if (name == "escape") key = Rml::Input::KI_ESCAPE;
                 else if (name == "back") key = Rml::Input::KI_BACK;
                 else if (name == "space") key = Rml::Input::KI_SPACE;
+                else if (name == "home") key = Rml::Input::KI_HOME;
+                else if (name == "end") key = Rml::Input::KI_END;
                 g.context->ProcessKeyDown(key, mod);
                 if (key == Rml::Input::KI_RETURN) g.context->ProcessTextInput('\n');
                 if (key == Rml::Input::KI_SPACE) g.context->ProcessTextInput(' ');
@@ -6759,6 +6806,7 @@ int main(int argc, char** argv) {
         g.context->Update();
         size_output_pane();
         follow_log();
+        follow_code_scroll();
         sync_log_scroll();
         Backend::BeginFrame();
         g.context->Render();

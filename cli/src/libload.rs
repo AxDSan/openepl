@@ -459,7 +459,7 @@ pub fn spawn_error(prog: &str, e: &std::io::Error) -> String {
         "install LLVM (which provides clang) and put its bin directory on PATH"
     };
     let guide = if cfg!(windows) {
-        "\nsee SETUP-WINDOWS.md, beside this binary, for the toolchain OpenEPL needs"
+        " — see SETUP-WINDOWS.md at the root of this bundle, beside README.md"
     } else {
         ""
     };

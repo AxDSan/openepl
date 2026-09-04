@@ -422,6 +422,29 @@ static void test_sessions(const std::string& openepl, const std::string& designe
             session(designer, openepl, form, "view:code;goto:39,20;key:enter;bufline:40");
         check("indent: a mid-line split indents the tail, it does not open a block",
               has(mid, "buf 40:   button clicked!\")\n"));
+        // Return replaces a selection, as the control it stands in for did.
+        // Inserting at the caret and leaving the selection behind is the way
+        // this reimplementation could quietly differ from a real textarea.
+        const std::string sel =
+            session(designer, openepl, form,
+                    "view:code;goto:39,3;key:shift-end;key:enter;bufline:39;bufline:40");
+        check("indent: Return replaces the selection rather than keeping it",
+              has(sel, "buf 39:   \n") && has(sel, "buf 40:   \n"));
+    }
+    // The colour layer follows the control sideways when the CARET moves it,
+    // not only when text changes: End raises no change event, and the layer
+    // repainting only on change is how it drifts a screen out of line.
+    {
+        const std::string longline =
+            "  greeting.caption = some_long_command_name(another_argument_here_yes())";
+        const std::string out =
+            session(designer, openepl, form,
+                    "winsize:760x620;view:code;goto:39,1;typein:" + longline +
+                        ";goto:39,1;codescroll;key:end;codescroll");
+        // At column one nothing is scrolled; at the end of a line far wider
+        // than a 760px window, something must be.
+        check("editor: the caret moving to the end scrolls the layer sideways",
+              has(out, "codescroll: x=0") && !has(out, "codescroll: x=0\ncodescroll: x=0"));
     }
     // The RAD loop from the keyboard: `on ` offers the events, the handler
     // position offers a subroutine that does not exist yet, and accepting it

@@ -36,6 +36,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+// WIN32_LEAN_AND_MEAN leaves commdlg.h out, and with it OPENFILENAME,
+// GetOpenFileName and every OFN_ flag — which `pick_open_file` needs.
+#include <commdlg.h>
 #include <direct.h>
 #include <io.h>
 #else
