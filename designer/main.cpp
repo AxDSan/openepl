@@ -6328,6 +6328,39 @@ std::string run_welcome(const std::string& family) {
         if (chosen.empty()) continue;
 
         std::string dir;
+        // Ask the platform first. Its dialog is the one the user already knows
+        // — it types a path, remembers where they were and reaches the places
+        // a list of one directory cannot.
+        //
+        // Not in a scripted session: there is nobody to answer it, and a modal
+        // dialog in a test is a hang rather than a failure. Not when there is
+        // no dialog to show either — Studio's own browser is the answer on a
+        // machine with neither portal nor zenity, and it stays the fallback
+        // rather than becoming dead code.
+        if (chosen.rfind("browse:", 0) == 0 && !std::getenv("OPENEPL_DESIGNER_SCRIPT") &&
+            !std::getenv("OPENEPL_DESIGNER_WELCOME_PICK") &&
+            !std::getenv("OPENEPL_NO_NATIVE_DIALOG") && openepl::sys::has_native_file_dialog()) {
+            const std::string mode = chosen.substr(7);
+            const bool project = mode == "project";
+            const std::string picked = openepl::sys::pick_open_file(
+                project ? "Open Project" : "Open File", start_dir(),
+                project ? "OpenEPL project" : "OpenEPL source",
+                project ? "*.oeproj *.oir" : "*.oir");
+            if (!picked.empty()) {
+                // A project is named by its `project.oeproj`; the CLI says which
+                // `.oir` that means, exactly as the in-app browser asks it.
+                const std::string open =
+                    project ? openepl::welcome::resolve_open(g.openepl_bin, picked) : picked;
+                if (!open.empty()) {
+                    chosen = open;
+                    break;
+                }
+                log("that project has no module to open: " + picked, "err");
+            }
+            // Cancelled, or nothing usable: fall through to Studio's browser
+            // rather than dropping the user back on the welcome screen having
+            // apparently done nothing.
+        }
         if (chosen.rfind("browse:", 0) == 0) {
             browse_mode = chosen.substr(7);
             dir = start_dir();

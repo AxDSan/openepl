@@ -274,6 +274,110 @@ inline std::string program_name(const std::string& stem) {
 #endif
 }
 
+/// The platform's own Open dialog, or "" when there is not one to ask.
+///
+/// The empty answer is not a failure — it is "no native dialog here", and the
+/// caller falls back to Studio's own list. That path has to keep working:
+/// a machine with no portal and no zenity is exactly the minimal container
+/// and wine setup the project is tested on, and a dialog that cannot open is
+/// worse than a list that can.
+///
+/// A cancelled dialog is also "": the caller shows its own browser, which has
+/// a Back button. Telling the two apart would buy nothing.
+///
+/// `patterns` is a display name and a glob, e.g. {"OpenEPL project", "*.oir"}.
+inline std::string pick_open_file(const std::string& title, const std::string& start_dir,
+                                  const std::string& filter_name,
+                                  const std::string& filter_glob) {
+#ifdef _WIN32
+    // comdlg32, which every Windows since 95 has and wine implements.
+    std::string filter = filter_name;
+    filter.push_back('\0');
+    filter += filter_glob;
+    filter.push_back('\0');
+    filter += "All files";
+    filter.push_back('\0');
+    filter += "*.*";
+    filter.push_back('\0');
+    filter.push_back('\0');
+
+    char file[MAX_PATH] = {0};
+    const std::string dir = start_dir;
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof ofn;
+    ofn.hwndOwner = nullptr;
+    ofn.lpstrFilter = filter.c_str();
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof file;
+    ofn.lpstrTitle = title.c_str();
+    ofn.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
+    // No CHDIR: Studio resolves its own paths against the working directory,
+    // and a dialog that quietly moved it would break the next relative build.
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+    if (!GetOpenFileNameA(&ofn)) return "";
+    return slashes(file);
+#else
+    // zenity first, then kdialog: between them they cover GNOME and KDE, and
+    // both are a plain child process writing one path to stdout. Neither is a
+    // dependency — `command -v` decides, and nothing is installed to suit us.
+    const char* tools[] = {"zenity", "kdialog"};
+    for (const char* tool : tools) {
+        std::string probe = "command -v ";
+        probe += tool;
+        probe += " >/dev/null 2>&1";
+        if (std::system(probe.c_str()) != 0) continue;
+
+        auto shell_quote = [](const std::string& s) {
+            std::string q = "'";
+            for (char c : s) {
+                if (c == '\'') q += "'\\''";
+                else q += c;
+            }
+            return q + "'";
+        };
+        std::string cmd;
+        if (std::string(tool) == "zenity") {
+            cmd = "zenity --file-selection --title=" + shell_quote(title);
+            if (!start_dir.empty()) cmd += " --filename=" + shell_quote(start_dir + "/");
+            cmd += " --file-filter=" + shell_quote(filter_name + " | " + filter_glob);
+            cmd += " --file-filter=" + shell_quote("All files | *");
+        } else {
+            cmd = "kdialog --getopenfilename ";
+            cmd += shell_quote(start_dir.empty() ? "." : start_dir);
+            cmd += " " + shell_quote(filter_glob + "|" + filter_name);
+            cmd += " --title " + shell_quote(title);
+        }
+        cmd += " 2>/dev/null";
+
+        std::string out;
+        if (FILE* p = ::popen(cmd.c_str(), "r")) {
+            char buf[4096];
+            while (::fgets(buf, sizeof buf, p)) out += buf;
+            // A non-zero status is a cancelled dialog, which is not an error.
+            if (::pclose(p) != 0) return "";
+        }
+        while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+        return out;
+    }
+    (void)title;
+    (void)start_dir;
+    (void)filter_name;
+    (void)filter_glob;
+    return "";
+#endif
+}
+
+/// Whether `pick_open_file` has a dialog to show. Studio asks so it can label
+/// the tile honestly rather than opening nothing.
+inline bool has_native_file_dialog() {
+#ifdef _WIN32
+    return true;
+#else
+    return std::system("command -v zenity >/dev/null 2>&1") == 0 ||
+           std::system("command -v kdialog >/dev/null 2>&1") == 0;
+#endif
+}
+
 #ifdef _WIN32
 /// A child process with its output piped back, and optionally its input
 /// piped in — what fork + pipe + O_NONBLOCK give Studio on POSIX. The reads
