@@ -40,8 +40,8 @@ target console
 sub main
   call print_text("Hello from OpenEPL.")
 
-  let answer: int = 6 * 7
-  call print_text(concat("six times seven is ", int_to_text(answer)))
+  let answer = 6 * 7
+  call print_text("six times seven is {answer}")
 end
 ```
 

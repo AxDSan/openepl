@@ -24,7 +24,7 @@ form win
 end
 
 sub main
-  greeting.color = concat("#4444", "4")
+  greeting.color = "#4444" + "4"
   call print_text(last_error_text())
   call print_text(int_to_text(last_error_code()))
   greeting.color = "#4a86e8"

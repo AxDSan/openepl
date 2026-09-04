@@ -59,7 +59,7 @@ form win
 end
 
 sub say(line: text)
-  log.text = concat(log.text, concat(line, "\n"))
+  log.text &= "{line}\n"
 end
 
 sub on_toggle
@@ -72,11 +72,11 @@ sub on_toggle
 end
 
 sub on_send
-  if tcpclient_send("link", concat(entry.text, "\n"))
-    call say(concat("> ", entry.text))
+  if tcpclient_send("link", entry.text + "\n")
+    call say("> {entry.text}")
     entry.text = ""
   else
-    call say(concat("not sent: ", last_error_text()))
+    call say("not sent: {last_error_text()}")
   end
 end
 
@@ -91,10 +91,10 @@ sub on_disconnect
 end
 
 sub on_receive(data: text)
-  call say(concat("< ", data))
+  call say("< {data}")
 end
 
 sub on_error(message: text)
-  call say(concat("error: ", message))
+  call say("error: {message}")
   connect.text = "Connect"
 end

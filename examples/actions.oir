@@ -68,9 +68,9 @@ form win
 end
 
 sub on_save
-  saves = saves + 1
-  status.text = concat("saved ", int_to_text(saves))
-  call print_text(concat("save executed, count ", int_to_text(saves)))
+  increment saves
+  status.text = "saved {saves}"
+  call print_text("save executed, count {saves}")
 end
 
 sub on_lock

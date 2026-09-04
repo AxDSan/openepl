@@ -12,32 +12,24 @@ sub main
   # A seed makes the run repeatable: these five rolls are the same every time,
   # on every machine.
   call random_seed(1234)
-  var i: int = 0
-  while i < 5
+  repeat 5 times
     call print_int(random_between(1, 6))
-    i = i + 1
   end
 
   # Re-seeding with the same number starts the very same sequence over.
   call random_seed(1234)
-  call print_text(concat("first roll again: ", int_to_text(random_between(1, 6))))
+  call print_text("first roll again: {random_between(1, 6)}")
 
   # random_int(n) picks one of n things: 0 .. n-1.
   call random_seed(7)
-  let pick: int = random_int(3)
-  if pick >= 0 and pick <= 2
-    call print_text("random_int in range")
-  end
+  let pick = random_int(3)
+  call print_text("random_int in range") if 0 <= pick <= 2
 
   # A double in 0..1, and one in a range of your own.
-  let u: double = random_double()
-  if u >= 0.0 and u < 1.0
-    call print_text("random_double in range")
-  end
-  let t: double = random_double_between(10.0, 20.0)
-  if t >= 10.0 and t < 20.0
-    call print_text("random_double_between in range")
-  end
+  let u = random_double()
+  call print_text("random_double in range") if 0.0 <= u < 1.0
+  let t = random_double_between(10.0, 20.0)
+  call print_text("random_double_between in range") if 10.0 <= t < 20.0
 
   # Coins and chances. 0% never happens, 100% always does.
   if random_chance(100)
@@ -52,32 +44,26 @@ sub main
   # Heads over a hundred flips: neither all heads nor all tails.
   call random_seed(99)
   var heads: int = 0
-  var flip: int = 0
-  while flip < 100
-    if random_bool()
-      heads = heads + 1
-    end
-    flip = flip + 1
+  repeat 100 times
+    increment heads if random_bool()
   end
-  if heads > 20 and heads < 80
-    call print_text("coin looks fair")
-  end
+  call print_text("coin looks fair") if 20 < heads < 80
 
   # Hex digits, for a test id or a throwaway colour.
   call random_seed(2024)
-  let id: text = random_hex(8)
+  let id = random_hex(8)
   call print_int(length(id))
-  call print_text(concat("#", random_hex(6)))
+  call print_text("#{random_hex(6)}")
 
   # The one real error: an empty range. The command returns 0 AND leaves a
   # code behind, because 0 is also a perfectly good draw.
-  let bad: int = random_between(10, 1)
+  let bad = random_between(10, 1)
   call print_int(bad)
   call print_int(last_error_code())
   call print_text(last_error_text())
 
   # A good call clears the slot again.
-  let ok: int = random_between(5, 5)
+  let ok = random_between(5, 5)
   call print_int(ok)
   call print_int(last_error_code())
 end

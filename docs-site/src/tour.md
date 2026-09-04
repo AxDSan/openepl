@@ -18,8 +18,10 @@ sub main
 end
 ```
 
-A type is written after a colon and never inferred; a `let` cannot be
-reassigned, a `var` can. Nothing converts on its own — `int_to_text` is how a
+A type is written after a colon, or taken from the value when the value makes
+it plain (see [Shorthands](./sugar.md#a-binding-can-take-its-type-from-its-value));
+a `let` cannot be reassigned, a `var` can. Nothing converts on its own —
+`int_to_text` is how a
 number gets into a sentence, and leaving it out is a compile error rather than
 a `36` that quietly became `"36"` somewhere.
 
@@ -59,11 +61,11 @@ sub main
   var scores: int[] = [72, 91, 58]
   scores = append(scores, 85)
 
-  var total: int = 0
-  for i = 1 to count(scores)
-    total = total + scores[i]
+  var total = 0
+  for each s in scores
+    total += s
   end
-  call print_text("average: " + int_to_text(total / count(scores)))
+  call print_text("average: {total / count(scores)}")
 
   call sort(scores)
   call print_text("sorted: " + join(scores, ", "))
@@ -87,12 +89,10 @@ module tour
 target console
 
 sub average(xs: int[]): int
-  if count(xs) = 0
-    return 0
-  end
-  var total: int = 0
-  for i = 1 to count(xs)
-    total = total + xs[i]
+  return 0 if count(xs) = 0
+  var total = 0
+  for each x in xs
+    total += x
   end
   return total / count(xs)
 end
@@ -126,8 +126,8 @@ record student
 end
 
 sub best(xs: student[]): student
-  var top: student = xs[1]
-  for i = 2 to count(xs)
+  var top = xs[1]
+  for i in 2..count(xs)
     if xs[i].score > top.score
       top = xs[i]
     end
@@ -136,13 +136,10 @@ sub best(xs: student[]): student
 end
 
 sub main
-  var class: student[] = []
-  class = append(class, student(name: "Ada", score: 91))
-  class = append(class, student(name: "Grace", score: 85))
-  class = append(class, student(name: "Alan", score: 72))
+  let class = [student{name: "Ada", score: 91}, student{name: "Grace", score: 85}, student{name: "Alan", score: 72}]
 
-  let winner: student = best(class)
-  call print_text(winner.name + " scored " + int_to_text(winner.score))
+  let winner = best(class)
+  call print_text("{winner.name} scored {winner.score}")
 end
 ```
 
@@ -168,9 +165,8 @@ sub main
   call print_int(scores["Ada"])
   call print_int(dict_count(scores))
 
-  let names: text[] = dict_keys(scores)
-  for i = 1 to count(names)
-    call print_text(names[i] + ": " + int_to_text(scores[names[i]]))
+  for each name, score in scores
+    call print_text("{name}: {score}")
   end
 
   if dict_has(scores, "Byron")
@@ -181,8 +177,8 @@ sub main
 end
 ```
 
-`dict_keys` answers the keys in the order they were added, which is what makes
-walking a dictionary reproducible. Asking for a key that is not there answers
+`for each` walks a dictionary in the order its keys were added, which is what
+makes walking one reproducible. Asking for a key that is not there answers
 the value type's sentinel — `0` here — which is why `dict_has` exists: it is
 the only way to tell a missing entry from a stored `0`.
 
@@ -201,17 +197,17 @@ use file
 sub main
   let raw: text = file_read_text("scores.txt")
   if last_error_code() <> 0
-    call print_text("could not read scores.txt: " + last_error_text())
+    call print_text("could not read scores.txt: {last_error_text()}")
     return
   end
 
   let lines: text[] = split(trim(raw), "\n")
   var scores: int{} = {}
-  for i = 1 to count(lines)
-    let fields: text[] = split(lines[i], ",")
+  for each line in lines
+    let fields = split(line, ",")
     scores[fields[1]] = text_to_int(fields[2])
   end
-  call print_text(int_to_text(dict_count(scores)) + " scores read")
+  call print_text("{dict_count(scores)} scores read")
 end
 ```
 

@@ -29,41 +29,30 @@ sub on_request
   call route(net_request())
 end
 
+# One value tested against several routes: an `if` chain written once.
 sub route(req: int)
-  let path: text = net_req_path(req)
-  if path = "/"
-    call reply_home(req)
-  end
-  if path = "/hello"
-    call reply_hello(req)
-  end
-  if path = "/echo"
-    call net_req_reply(req, 200, net_req_body(req))
-  end
-  if path = "/quit"
+  let path = net_req_path(req)
+  match path
+  when "/": call reply_home(req)
+  when "/hello": call reply_hello(req)
+  when "/echo": call net_req_reply(req, 200, net_req_body(req))
+  when "/quit":
     call net_req_reply(req, 200, "stopping\n")
     call quit()
-  end
-  # Anything else: a handler that answers nothing still gets a 200 with an
-  # empty body, so this says what it means instead of relying on that.
-  if path <> "/" and path <> "/hello" and path <> "/echo" and path <> "/quit"
-    call net_req_reply(req, 404, concat("no route for ", path))
+  else: call net_req_reply(req, 404, "no route for {path}")
   end
 end
 
 sub reply_home(req: int)
-  let page: text = "<h1>OpenEPL</h1><p>Try <a href='/hello?name=Ada'>/hello?name=Ada</a>.</p>"
+  let page = "<h1>OpenEPL</h1><p>Try <a href='/hello?name=Ada'>/hello?name=Ada</a>.</p>"
   call net_req_reply_as(req, 200, "text/html; charset=utf-8", page)
 end
 
+# `if C then A else B` chooses a value, and a `{hole}` fills in the rest.
 sub reply_hello(req: int)
-  let who: text = net_req_query(req, "name")
-  if who = ""
-    let who2: text = "world"
-    call net_req_reply(req, 200, concat("hello, ", who2))
-  else
-    call net_req_reply(req, 200, concat(concat("hello, ", who), concat(" via ", net_req_method(req))))
-  end
+  let who = net_req_query(req, "name")
+  let greeting = if who = "" then "hello, world" else "hello, {who} via {net_req_method(req)}"
+  call net_req_reply(req, 200, greeting)
 end
 
 sub main

@@ -5,11 +5,13 @@
 module hello
 
 sub main
-  let title: text = "OpenEPL — arithmetic demo"
+  # A binding takes its type from its value, so an annotation only earns its
+  # place where the value cannot supply one.
+  let title = "OpenEPL — arithmetic demo"
   call print_text(title)
 
   # 6 * 7, and operator precedence: 2 + 3 * 4 == 14
-  let answer: int = 6 * 7
+  let answer = 6 * 7
   call print_int(answer)
   call print_int(2 + 3 * 4)
   call print_int(100 - 58)

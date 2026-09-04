@@ -88,18 +88,18 @@ sub main
 end
 
 sub on_select(row: int)
-  status.text = concat("Selected ", grid_cell("table", row, 1))
-  call print_text(concat("select ", int_to_text(row)))
+  status.text = "Selected " + grid_cell("table", row, 1)
+  call print_text("select {row}")
 end
 
 sub on_activate(row: int)
-  status.text = concat("Opened ", grid_cell("table", row, 1))
-  call print_text(concat("activate ", int_to_text(row)))
+  status.text = "Opened " + grid_cell("table", row, 1)
+  call print_text("activate {row}")
 end
 
 sub on_add
-  var n: int = people.count + 1
-  call datasource_add_row("people", concat(concat("Person ", int_to_text(n)), "\tNowhere\t0"))
+  var n = people.count + 1
+  call datasource_add_row("people", "Person {n}\tNowhere\t0")
   table.selected = n
 end
 

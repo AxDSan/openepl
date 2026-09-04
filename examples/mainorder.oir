@@ -8,5 +8,5 @@ form win
 end
 sub main
   greeting.text = "set from main"
-  call print_text(concat("main saw: ", greeting.text))
+  call print_text("main saw: {greeting.text}")
 end

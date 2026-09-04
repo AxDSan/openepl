@@ -9,7 +9,7 @@ use time
 
 sub main
   # --- a known moment: the first Apollo 11 moonwalk, 1969-07-21T02:56:15Z ---
-  let apollo: int64 = time_from_parts(1969, 7, 21, 2, 56, 15)
+  let apollo = time_from_parts(1969, 7, 21, 2, 56, 15)
   call print_int64(apollo)
   call print_text(time_format_iso(apollo))
   call print_int(time_month(apollo))
@@ -20,7 +20,7 @@ sub main
   call print_int(time_day_of_year(apollo))
 
   # The epoch itself. 1970-01-01 was a Thursday: weekday is ISO, Mon=1..Sun=7.
-  let epoch: int64 = int_to_int64(0)
+  let epoch = int_to_int64(0)
   call print_text(time_format_iso(epoch))
   call print_int(time_weekday(epoch))
 
@@ -30,7 +30,7 @@ sub main
   end
 
   # --- moving in time ---
-  let day_later: int64 = time_add_seconds(apollo, int_to_int64(86400))
+  let day_later = time_add_seconds(apollo, int_to_int64(86400))
   call print_text(time_format_iso(day_later))
   call print_int64(time_diff_seconds(day_later, apollo))
 
@@ -50,10 +50,10 @@ sub main
   # A bad string returns -1 AND sets the error slot. That matters because -1
   # is itself a real timestamp (1969-12-31T23:59:59Z), so the sentinel alone
   # cannot be trusted: the code is what distinguishes them.
-  let bad: int64 = time_parse_iso("21 July 1969")
+  let bad = time_parse_iso("21 July 1969")
   call print_int64(bad)
   if last_error_code() <> 0
-    call print_text(concat("rejected: ", last_error_text()))
+    call print_text("rejected: {last_error_text()}")
   end
 
   # 30 February does not exist.
@@ -62,24 +62,22 @@ sub main
 
   # Success clears the slot again, so the next check is not fooled by the old
   # failure — and -1 here is a genuine timestamp, not an error.
-  let last_sec: int64 = time_parse_iso("1969-12-31T23:59:59Z")
+  let last_sec = time_parse_iso("1969-12-31T23:59:59Z")
   call print_int64(last_sec)
   call print_int(last_error_code())
 
   # --- clocks ------------------------------------------------------------
   # The wall clock agrees with core's now(): the same instant, finer grained.
-  let secs: int64 = time_now_ms() / int_to_int64(1000)
-  let drift: int64 = time_diff_seconds(secs, now())
-  if drift >= int_to_int64(0) - int_to_int64(1) and drift <= int_to_int64(0)
+  let secs = time_now_ms() / int_to_int64(1000)
+  let drift = time_diff_seconds(secs, now())
+  if int_to_int64(0) - int_to_int64(1) <= drift <= int_to_int64(0)
     call print_text("now_ms agrees with now()")
   end
 
   # The monotonic clock has an arbitrary origin: only differences mean
   # anything. It never runs backwards.
-  let t0: int64 = time_monotonic_ms()
-  var spin: int = 0
-  while spin < 200000
-    spin = spin + 1
+  let t0 = time_monotonic_ms()
+  repeat 200_000 times
   end
   if time_diff_seconds(time_monotonic_ms(), t0) >= int_to_int64(0)
     call print_text("monotonic clock does not run backwards")

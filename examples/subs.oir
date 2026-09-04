@@ -20,30 +20,26 @@ end
 # Parameters are immutable, so working state is an ordinary local.
 sub factorial(n: int): int
   var result: int = 1
-  var i: int = 2
-  while i <= n
-    result = result * i
-    i = i + 1
+  for i in 2..n
+    result *= i
   end
   return result
 end
 
 # Recursion works: a subroutine can call itself, and the compiler needs no
-# forward declaration to let it.
+# forward declaration to let it. A one-line `if` states the base case.
 sub fib(n: int): int
-  if n < 2
-    return n
-  end
+  return n if n < 2
   return fib(n - 1) + fib(n - 2)
 end
 
-# Text in, text out — the return type is any slot type, not just numbers.
-sub shout(who: text): text
-  return concat(uppercase(who), "!")
+# A trailing parameter may carry a default, so `shout("ada")` fills in the `!`.
+sub shout(who: text, mark: text = "!"): text
+  return who.uppercase() + mark
 end
 
 sub is_even(n: int): bool
-  return mod_int(n, 2) = 0
+  return n % 2 = 0
 end
 
 # No return type: a subroutine that does something rather than computes
@@ -53,11 +49,8 @@ sub describe(n: int)
     call print_text("negative")
     return
   end
-  if is_even(n)
-    call print_text(concat(int_to_text(n), " is even"))
-  else
-    call print_text(concat(int_to_text(n), " is odd"))
-  end
+  let kind = if is_even(n) then "even" else "odd"
+  call print_text("{n} is {kind}")
 end
 
 sub main
@@ -71,6 +64,6 @@ sub main
   call describe(7)
 
   # A subroutine call is an expression, so it composes like any other.
-  let total: int = add(factorial(4), fib(10))
+  let total = add(factorial(4), fib(10))
   call print_int(total)
 end

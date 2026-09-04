@@ -11,13 +11,13 @@ module configlib
 use config
 
 sub main
-  let path: text = "/tmp/openepl-configlib.ini"
+  let path = "/tmp/openepl-configlib.ini"
 
   # --- write a settings file --------------------------------------------
   # config_create remembers the path; nothing touches the disk until save.
-  var h: int = config_create(path)
+  var h = config_create(path)
   if h = 0
-    call print_text(concat("cannot create: ", last_error_text()))
+    call print_text("cannot create: {last_error_text()}")
   else
     if config_set(h, "window", "title", "OpenEPL")
       call print_text("set window.title")
@@ -41,7 +41,7 @@ sub main
     if config_save(h)
       call print_text("saved")
     else
-      call print_text(concat("cannot save: ", last_error_text()))
+      call print_text("cannot save: {last_error_text()}")
     end
     if config_close(h)
       call print_text("closed")
@@ -70,24 +70,20 @@ sub main
   else
     call print_text("depth is not set")
   end
-  call print_text(concat("[", concat(config_get(h, "window", "nothing_here"), "]")))
+  call print_text("[" + config_get(h, "window", "nothing_here") + "]")
 
   # A missing FILE, on the other hand, is a failure: 0, and a reason.
   call print_int(config_open("/tmp/openepl-configlib-absent.ini"))
   call print_text(last_error_text())
 
   # --- walk it: a count plus an indexed accessor -------------------------
-  var s: int = 1
-  while s <= config_section_count(h)
-    let name: text = config_section_at(h, s)
-    call print_text(concat("[", concat(name, "]")))
-    var k: int = 1
-    while k <= config_key_count(h, name)
-      let key: text = config_key_at(h, name, k)
-      call print_text(concat("  ", concat(key, concat(" = ", config_get(h, name, key)))))
-      k = k + 1
+  for s in 1..config_section_count(h)
+    let name = config_section_at(h, s)
+    call print_text("[{name}]")
+    for k in 1..config_key_count(h, name)
+      let key = config_key_at(h, name, k)
+      call print_text("  {key} = {config_get(h, name, key)}")
     end
-    s = s + 1
   end
 
   # --- change one setting, leaving everything else where it was ----------
@@ -100,10 +96,10 @@ sub main
   # Removing something that was never there is a genuine "no", not a failure:
   # false with error code 0.
   if not config_remove(h, "editor", "font")
-    call print_text(concat("nothing to remove, code ", int_to_text(last_error_code())))
+    call print_text("nothing to remove, code {last_error_code()}")
   end
   if not config_save(h)
-    call print_text(concat("cannot save: ", last_error_text()))
+    call print_text("cannot save: {last_error_text()}")
   end
 
   h = config_open(path)

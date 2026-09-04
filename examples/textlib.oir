@@ -32,8 +32,8 @@ sub main
   call print_int(text_compare("pear", "peach"))
 
   # --- builders ---
-  call print_text(concat(concat("[", text_trim_start("  left  ")), "]"))
-  call print_text(concat(concat("[", text_trim_end("  right  ")), "]"))
+  call print_text("[" + text_trim_start("  left  ") + "]")
+  call print_text("[" + text_trim_end("  right  ") + "]")
   call print_text(text_pad_left("héllo", 8, "*"))
   call print_int(length(text_pad_left("héllo", 8, "*")))
   call print_text(text_pad_right("7", 4, "."))
@@ -49,29 +49,29 @@ sub main
 
   # --- splitting: a count plus an indexed accessor ---
   # A trailing separator makes a real (empty) final field.
-  let parts: int = text_split_count("a,,b,", ",")
+  let parts = text_split_count("a,,b,", ",")
   call print_int(parts)
   # Fields count from 1: "a", "", "b", "" — the trailing separator makes the
   # fourth one real.
-  call print_text(concat(concat("[", text_split_at("a,,b,", ",", 1)), "]"))
+  call print_text("[" + text_split_at("a,,b,", ",", 1) + "]")
   call print_text(text_split_at("a,,b,", ",", 3))
-  call print_text(concat(concat("[", text_split_at("a,,b,", ",", 4)), "]"))
+  call print_text("[" + text_split_at("a,,b,", ",", 4) + "]")
 
   # --- failure reporting ---
   # "" from a bad code point, with the reason left in the error slot.
-  let bad_code: int = 0 - 1
-  let bad: text = text_from_code(bad_code)
-  let code: int = last_error_code()
+  let bad_code = 0 - 1
+  let bad = text_from_code(bad_code)
+  let code = last_error_code()
   call print_int(code)
   call print_text(last_error_text())
 
   # A success clears the slot again, so the next check reads a true 0.
-  let good: int = text_split_count("a,b", ",")
-  let after: int = last_error_code()
+  let good = text_split_count("a,b", ",")
+  let after = last_error_code()
   call print_int(good)
   call print_int(after)
 
   # An out-of-range index is a failure, not an empty character.
-  let missing: text = text_char_at("hi", 9)
+  let missing = text_char_at("hi", 9)
   call print_int(last_error_code())
 end

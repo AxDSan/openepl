@@ -19,9 +19,7 @@ sub main
 end
 
 sub on_tick
-  ticks = ticks + 1
-  call print_text(concat("tick ", int_to_text(ticks)))
-  if ticks >= 3
-    call quit()
-  end
+  increment ticks
+  call print_text("tick {ticks}")
+  call quit() if ticks >= 3
 end

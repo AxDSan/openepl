@@ -7,38 +7,39 @@ sub main
   # spelled as a subscript.
   var ages: int{} = {"Ada": 36, "Alan": 41}
   ages["Grace"] = 45
-  call print_text(concat("people: ", int_to_text(dict_count(ages))))
+  call print_text("people: {dict_count(ages)}")
 
   # Reading back. A key that IS there clears the error slot.
-  call print_text(concat("Ada is ", int_to_text(ages["Ada"])))
+  let ada = ages["Ada"]
+  call print_text("Ada is {ada}")
 
   # `dict_get` and `dict_set` are the same two operations written out. The
   # subscript is sugar; either spelling reaches the same entry.
   call dict_set(ages, "Alan", 42)
-  call print_text(concat("Alan is now ", int_to_text(dict_get(ages, "Alan"))))
+  let alan = dict_get(ages, "Alan")
+  call print_text("Alan is now {alan}")
 
   # A key that is NOT there answers the sentinel for the value type — 0 here —
   # and leaves the reason in the error slot. `dict_has` is what tells that
   # apart from a stored 0, which is why it exists.
-  let missing: int = ages["Nobody"]
-  call print_text(concat("missing reads as ", int_to_text(missing)))
+  let missing = ages["Nobody"]
+  call print_text("missing reads as {missing}")
   if dict_has(ages, "Nobody")
     call print_text("...and it was stored")
   else
-    call print_text(concat("...because: ", last_error_text()))
+    call print_text("...because: {last_error_text()}")
   end
 
-  # The keys as a list, in the order they were added — which is what makes
-  # iterating a dictionary reproducible now that arrays exist.
-  let names: text[] = dict_keys(ages)
-  for i = 1 to count(names)
-    let who: text = names[i]
-    call print_text(concat(concat(who, " -> "), int_to_text(ages[who])))
+  # `for each` over a dictionary binds the key and its value together, in the
+  # order they were added — which is what makes iterating one reproducible now
+  # that arrays exist.
+  for each who, age in ages
+    call print_text("{who} -> {age}")
   end
 
   # Removing answers whether there was anything to remove.
   if dict_remove(ages, "Alan")
-    call print_text(concat("after removing Alan: ", int_to_text(dict_count(ages))))
+    call print_text("after removing Alan: {dict_count(ages)}")
   end
   if dict_remove(ages, "Alan")
     call print_text("removed twice?")

@@ -45,7 +45,9 @@ core runtime, and a console program can declare one.
 | `bytes` | a run of raw bytes |
 | a record | a group of named fields you declare yourself |
 
-Types are written after a colon and are not inferred:
+Types are written after a colon, or taken from the value when the value makes
+the type plain — see [A binding can take its type from its
+value](./sugar.md#a-binding-can-take-its-type-from-its-value):
 
 ```
 let count: int = 3

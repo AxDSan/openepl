@@ -14,27 +14,27 @@ use math
 # not represent most decimals exactly — `0.1 + 0.2 = 0.3` is false in every
 # language with IEEE-754 doubles, including this one.
 sub near(label: text, got: double, want: double)
-  var diff: double = abs_double(got - want)
+  let diff = abs_double(got - want)
   if diff < 0.000000001
-    call print_text(concat("ok   ", label))
+    call print_text("ok   {label}")
   else
-    call print_text(concat("FAIL ", concat(label, concat(": got ", double_to_text(got)))))
+    call print_text("FAIL {label}: got {got}")
   end
 end
 
 sub truth(label: text, got: bool)
   if got
-    call print_text(concat("ok   ", label))
+    call print_text("ok   {label}")
   else
-    call print_text(concat("FAIL ", label))
+    call print_text("FAIL {label}")
   end
 end
 
 sub same(label: text, got: int, want: int)
   if got = want
-    call print_text(concat("ok   ", label))
+    call print_text("ok   {label}")
   else
-    call print_text(concat("FAIL ", concat(label, concat(": got ", int_to_text(got)))))
+    call print_text("FAIL {label}: got {got}")
   end
 end
 
@@ -90,14 +90,14 @@ sub main
   call print_text("-- failure reporting --")
   # A double command with no answer returns NaN and sets the slot. NaN is not
   # equal to itself, so math_is_nan is the only way to test for it.
-  var bad: double = math_asin(2.0)
+  let bad = math_asin(2.0)
   if math_is_nan(bad) and last_error_code() <> 0
-    call print_text(concat("ok   asin(2) refused: ", last_error_text()))
+    call print_text("ok   asin(2) refused: {last_error_text()}")
   else
     call print_text("FAIL asin(2) should have failed")
   end
   if text_eq(int64_to_text(math_factorial(21)), "-1")
-    call print_text(concat("ok   21! refused: ", last_error_text()))
+    call print_text("ok   21! refused: {last_error_text()}")
   else
     call print_text("FAIL 21! should have overflowed")
   end

@@ -16,17 +16,17 @@ const WS_BORDER  = 0x0080_0000
 
 sub check(what: text, got: int, want: int)
   if got = want
-    call print_text("ok " + what)
+    call print_text("ok {what}")
   else
-    call print_text("FAIL " + what + ": got " + int_to_text(got) + ", wanted " + int_to_text(want))
+    call print_text("FAIL {what}: got {got}, wanted {want}")
   end
 end
 
 sub check64(what: text, got: int64, want: int64)
   if got = want
-    call print_text("ok " + what)
+    call print_text("ok {what}")
   else
-    call print_text("FAIL " + what + ": got " + int64_to_text(got) + ", wanted " + int64_to_text(want))
+    call print_text("FAIL {what}: got {got}, wanted {want}")
   end
 end
 

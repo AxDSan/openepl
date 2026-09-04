@@ -177,11 +177,11 @@ form win
 end
 
 sub on_colour
-  status.text = concat("colour #", int_to_text(colours.selected))
+  status.text = "colour #{colours.selected}"
 end
 
 sub on_city
-  status.text = concat("city #", int_to_text(cities.selected))
+  status.text = "city #{cities.selected}"
 end
 
 sub on_size
@@ -192,18 +192,18 @@ end
 # control gives back what the person did rather than what the form said.
 sub on_volume
   bar.value = volume.value
-  status.text = concat("volume ", int_to_text(volume.value))
+  status.text = "volume {volume.value}"
 end
 
 sub on_copies
-  status.text = concat("copies ", int_to_text(copies.value))
+  status.text = "copies {copies.value}"
 end
 
 sub on_report
-  call print_text(concat("colour  = ", int_to_text(colours.selected)))
-  call print_text(concat("city    = ", int_to_text(cities.selected)))
-  call print_text(concat("cities  = ", int_to_text(cities.count)))
-  call print_text(concat("volume  = ", int_to_text(volume.value)))
-  call print_text(concat("copies  = ", int_to_text(copies.value)))
-  call print_text(concat("notes   = ", notes.text))
+  call print_text("colour  = {colours.selected}")
+  call print_text("city    = {cities.selected}")
+  call print_text("cities  = {cities.count}")
+  call print_text("volume  = {volume.value}")
+  call print_text("copies  = {copies.value}")
+  call print_text("notes   = {notes.text}")
 end

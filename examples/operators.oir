@@ -10,7 +10,8 @@
 #             examples wrote `0 - 1` to mean minus one.
 #   a % b     remainder. `mod_int(a, b)` still exists and still works.
 #   a + b     on text, joining. `concat(concat("[", x), "]")` is now
-#             "[" + x + "]".
+#             "[" + x + "]" — and, better still, the string interpolation
+#             "[{x}]" that this same release added on top of it.
 #
 # `+` on two texts is exactly the `concat` command — same runtime call, same
 # result — so nothing about how text is stored has changed.
@@ -18,14 +19,14 @@ module operators
 
 # A negative literal is a literal: it may be as small as `int` goes.
 sub main
-  let freezing: int = -40
+  let freezing = -40
   call print_int(freezing)
   call print_int(-freezing)
 
   # Negation applies to any numeric expression, not just literals.
-  var owed: int = 250
+  var owed = 250
   call print_int(-owed)
-  let below: double = -1.5
+  let below = -1.5
   call print_double(-below)
 
   # Remainder, and the classic thing it is for.
@@ -35,7 +36,7 @@ sub main
   call print_text(parity(7))
 
   # Joining text. Read this line, then read the version underneath it.
-  let who: text = "Ada"
+  let who = "Ada"
   call print_text("Hello, " + who + " — you are " + int_to_text(36) + " today.")
   call print_text(concat(concat(concat(concat("Hello, ", who), " — you are "), int_to_text(36)), " today."))
 
@@ -46,8 +47,6 @@ sub main
 end
 
 sub parity(n: int): text
-  if n % 2 = 0
-    return int_to_text(n) + " is even"
-  end
-  return int_to_text(n) + " is odd"
+  return "{n} is even" if n % 2 = 0
+  return "{n} is odd"
 end

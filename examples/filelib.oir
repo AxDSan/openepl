@@ -10,15 +10,15 @@ use file
 # Every binary check below reports through here, the same shape arrays.oir uses.
 sub check(what: text, ok: bool)
   if ok
-    call print_text(what + ": ok")
+    call print_text("{what}: ok")
   else
-    call print_text(what + ": FAIL")
+    call print_text("{what}: FAIL")
   end
 end
 
 sub main
-  let dir: text = "filelib-scratch"
-  let note: text = concat(dir, "/note.txt")
+  let dir = "filelib-scratch"
+  let note = dir + "/note.txt"
 
   # --- paths are pure text: they answer before anything exists ----------
   call print_text(path_name(note))
@@ -46,12 +46,12 @@ sub main
   if file_append_text(note, "delta\n")
     call print_text("appended")
   end
-  var h: int = file_open(note, "read")
+  var h = file_open(note, "read")
   var n: int = 0
   while not file_at_end(h)
-    let line: text = file_read_line(h)
-    n = n + 1
-    call print_text(concat(concat(int_to_text(n), ": "), line))
+    let line = file_read_line(h)
+    increment n
+    call print_text("{n}: {line}")
   end
   if file_close(h)
     call print_text("closed")
@@ -59,31 +59,29 @@ sub main
 
   # A stale handle is a failure, not a crash.
   if not file_close(h)
-    call print_text(concat("second close: ", last_error_text()))
+    call print_text("second close: {last_error_text()}")
   end
 
   # --- copy, list, move, delete ------------------------------------------
-  let copy: text = path_join(dir, "copy.txt")
+  let copy = path_join(dir, "copy.txt")
   if file_copy(note, copy)
     call print_text("copied")
   end
 
-  let count: int = dir_entry_count(dir)
+  let count = dir_entry_count(dir)
   call print_int(count)
-  var i: int = 1
-  while i <= count
+  for i in 1..count
     call print_text(dir_entry(dir, i))
-    i = i + 1
   end
 
-  let moved: text = path_join(dir, "moved.txt")
+  let moved = path_join(dir, "moved.txt")
   if file_move(copy, moved) and not file_exists(copy)
     call print_text("moved")
   end
 
   # --- failure is a sentinel plus the error slot -------------------------
-  let missing: text = file_read_text(path_join(dir, "nope.txt"))
-  call print_text(concat("missing file -> [", concat(missing, "]")))
+  let missing = file_read_text(path_join(dir, "nope.txt"))
+  call print_text("missing file -> [{missing}]")
   if last_error_code() <> 0
     call print_text(last_error_text())
   end
@@ -96,7 +94,7 @@ sub main
   # --- bytes: the path that survives a NUL --------------------------------
   # A PNG is full of NUL bytes, and text stops at the first one.  This is that
   # difference made visible: the same three bytes, read both ways.
-  let blob: text = path_join(dir, "blob.bin")
+  let blob = path_join(dir, "blob.bin")
   var raw: bytes = bytes_new(3)
   raw[1] = 65
   raw[2] = 0
@@ -105,7 +103,7 @@ sub main
   call check("file_write_bytes", file_write_bytes(blob, raw))
   call check("size on disk is 3", file_size(blob) = int_to_int64(3))
 
-  let back: bytes = file_read_bytes(blob)
+  let back = file_read_bytes(blob)
   call check("read back 3 bytes", bytes_count(back) = 3)
   call check("byte 1 survived", back[1] = 65)
   call check("the NUL survived", back[2] = 0)
@@ -117,12 +115,12 @@ sub main
   call check("the text path stops at the NUL", length(file_read_text(blob)) = 1)
 
   call check("file_append_bytes", file_append_bytes(blob, raw))
-  let both: bytes = file_read_bytes(blob)
+  let both = file_read_bytes(blob)
   call check("appending doubled it", bytes_count(both) = 6)
   call check("the second copy is intact", both[4] = 65 and both[5] = 0 and both[6] = 66)
 
   # Failure is an empty byte-set plus the error slot, the way "" is for text.
-  let gone: bytes = file_read_bytes(path_join(dir, "no-such.bin"))
+  let gone = file_read_bytes(path_join(dir, "no-such.bin"))
   call check("a missing file reads empty", bytes_count(gone) = 0)
   call check("and says why", last_error_code() <> 0)
 

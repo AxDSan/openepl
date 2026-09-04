@@ -14,9 +14,9 @@ var log: text[] = []
 # repeated in both branches.
 sub check(what: text, ok: bool)
   if ok
-    call print_text(what + ": ok")
+    call print_text("{what}: ok")
   else
-    call print_text(what + ": FAIL")
+    call print_text("{what}: FAIL")
   end
 end
 
@@ -24,16 +24,17 @@ end
 # costs no more than passing a number.
 sub squares(n: int): int[]
   var out: int[] = []
-  for i = 1 to n
+  for i in 1..n
     out = append(out, i * i)
   end
   return out
 end
 
+# `for each` walks the elements, so the running total never spells an index.
 sub total(xs: int[]): int
   var sum: int = 0
-  for i = 1 to count(xs)
-    sum = sum + xs[i]
+  for each x in xs
+    sum += x
   end
   return sum
 end
@@ -83,13 +84,8 @@ sub main
   call check("join", join(fields, " ") = "alpha beta gamma")
 
   # A whole program's worth of work that had nowhere to live before: read
-  # lines, keep some, put them back together.
-  var kept: text[] = []
-  for i = 1 to count(fields)
-    if not text_eq(fields[i], "beta")
-      kept = append(kept, fields[i])
-    end
-  end
+  # lines, keep some, put them back together — one comprehension.
+  let kept: text[] = [f for each f in fields where not text_eq(f, "beta")]
   call check("filtering into a list", join(kept, ",") = "alpha,gamma")
 
   # --- an index that is out of range ------------------------------------

@@ -41,5 +41,5 @@ form win
 end
 
 sub on_ok
-  call print_text(concat("ok at ", int_to_text(ok_button.left)))
+  call print_text("ok at {ok_button.left}")
 end
