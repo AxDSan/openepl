@@ -1,6 +1,6 @@
 # The OpenEPL debugger
 
-**Status:** Phase 0 shipped in 0.10.1. Phase 1 done. Phases 2–8 planned.
+**Status:** Phase 0 shipped in 0.10.1. Phases 1 and 2 done. Phases 3–8 planned.
 
 OpenEPL ships its own debugger. Not a wrapper around gdb or lldb, and not a
 dependency on either being installed — the bundle's promise is "unpack and
@@ -53,7 +53,7 @@ Each ships alone and names the command that proves it.
 |---|---|---|
 | 0 | **Hoist the inline allocas** — done, 0.10.1 | a million command calls in a loop exits 0 |
 | 1 | **A line table — done** | `objdump --dwarf=decodedline` lists a row per statement, and gdb breaks on `loops.oir:24`, shows the source, and backtraces |
-| 2 | The symbol layer, no process at all — load ELF, index the line table both ways | the engine's line table agrees with objdump's |
+| 2 | **The symbol layer — done.** `openepl-debug`, a 4th workspace member | the engine's line table is identical to objdump's, row for row |
 | 3 | Unwinding via gimli's CFI evaluator, unit-tested on synthetic registers | `cargo test -p openepl-debug` |
 | 4 | Launch, int3 breakpoints, stepping, backtrace | `openepl debug --batch 'break x.oir:5; run; where; next'` |
 | 5 | Locals, rendered in OpenEPL's value model | `locals` prints `nums = [1, 2, 3]` (1-based), `p = Point { x: 1 }` |
@@ -96,6 +96,32 @@ Breakpoint 1, oe_user_main () at examples/loops.oir:24
 
 The Windows cross-build carries DWARF in PE too, unchanged — so Phase 2's
 symbol layer can read both from the start.
+
+## What Phase 2 actually did
+
+`debug/` is a new workspace member, `openepl-debug`. It loads a built program
+with `object`, reads the line program with `gimli`, and indexes it both ways:
+address → line, and line → the address a breakpoint goes at. It runs nothing;
+there is no `ptrace` in it. Seven transitive dependencies, all MIT-compatible.
+
+`openepl debug --dump-lines / --dump-subs / --resolve / --at` exercises it.
+
+Two things the first attempt got wrong, both found by comparing against an
+oracle rather than by reading the code:
+
+- **Other people's compile units.** Every binary built here links glibc's
+  `atexit.c`, *with its debug information*. Merging its rows into the table
+  attributed `atexit.c`'s line 45 to the user's source. Units are now filtered
+  by `DW_AT_producer`, which the backend writes — so the user-frame filter is
+  explicit, as the critique demanded, rather than a side effect of where
+  unwinding happens to stop.
+- **`LineTablesOnly` emits no `DW_TAG_subprogram` DIEs.** Function extents
+  come from the ELF symbol table instead, keyed on the `oe_user_` prefix. That
+  is enough for "which function is this address in", and it is stripped by
+  `--release` on exactly the same terms as the line table.
+
+`--resolve loops.oir:24` returns `0x400557` — the same address gdb picks for
+`break loops.oir:24`, arrived at independently.
 
 ## Decisions taken
 

@@ -14,6 +14,7 @@ USAGE:
   openepl build --target sharedlib    …a library, with its C header beside it
   [--header <path>]                 where the header goes (default <module>.h)
   openepl emit  <in.oir>              print generated LLVM IR
+  openepl debug <program>             read a built program's debug information
   openepl inspect <in.oir>            dump the form model (for the designer)
   openepl lsp                         language server over stdio (see docs/editors.md)
   openepl commands [--use <lib>]      list the commands and components available
@@ -50,6 +51,30 @@ as a program or as a library without editing it. See
 A build writes the binary and nothing else. The LLVM IR it hands `clang` is an
 intermediate and is removed once the link is done — `--emit-ir` keeps it beside
 the binary as `<out>.ll`, and `openepl emit` prints it without building at all.
+
+## Debug information
+
+A build carries a DWARF line table: which address in the built program came
+from which line of your source. It is what a debugger needs to stop on a line
+and to say where it stopped. It is on by default and absent from a
+`--release` build, which strips it along with everything else a shipped
+program does not need.
+
+`openepl debug` reads it back:
+
+```sh
+openepl debug --dump-lines app        # the line table, one row per line
+openepl debug --dump-subs app         # the subroutines and their extents
+openepl debug --resolve app app.oir:24  # where a breakpoint on line 24 goes
+openepl debug --at app 0x400557       # which line an address is in
+```
+
+A line that runs nothing — a blank line, a comment — resolves to the next
+line that does, which is what you meant. An address in the runtime or in the
+C library reports `line: none`, because it is not your code.
+
+This reads a program; it does not run one. Stepping and breakpoints are being
+built on top of it.
 
 ## Starting a project
 

@@ -1,9 +1,10 @@
 # OpenEPL Cargo workspace.
-# Phase 0 vertical slice: ir (IR + text parser) -> backend (IR -> LLVM IR text)
-# -> cli (openepl build/run).
+# ir (IR + text parser) -> backend (IR -> LLVM IR text) -> cli (openepl
+# build/run), with debug (reads the debug information a build emits) beside
+# them.
 [workspace]
 resolver = "2"
-members = ["ir", "backend", "cli"]
+members = ["ir", "backend", "cli", "debug"]
 
 [workspace.package]
 version = "0.10.1"
