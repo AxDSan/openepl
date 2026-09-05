@@ -167,6 +167,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         aggr_used: BTreeSet::new(),
         globals: HashMap::new(),
         allocas: Vec::new(),
+        locals: 0,
         handles: HashMap::new(),
         component_types: HashMap::new(),
         tmp: 0,
@@ -199,6 +200,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         lo.body.clear();
         lo.vars.clear();
         lo.allocas.clear();
+        lo.locals = 0;
         lo.label = 0;
         lo.ret_ty = sub.ret;
         // Parameters arrive in SSA registers; copy each into a stack slot so
@@ -256,6 +258,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         lo.body.clear();
         lo.vars.clear();
         lo.allocas.clear();
+        lo.locals = 0;
         for g in m.globals() {
             let v = lo.eval_hinted(&g.value, Some(g.ty))?;
             lo.store_global(&g.name, &v);
@@ -277,6 +280,7 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     lo.body.clear();
     lo.vars.clear();
     lo.allocas.clear();
+        lo.locals = 0;
     // Module variables are initialised before anything else can observe them.
     for g in m.globals() {
         let v = lo.eval_hinted(&g.value, Some(g.ty))?;
@@ -355,8 +359,14 @@ struct Lowerer<'a> {
     vars: HashMap<String, (String, Ty)>,
     /// Module-level variables: name -> type. Storage is an LLVM global.
     globals: HashMap<String, Ty>,
-    /// Allocas to emit at the top of the current function.
+    /// Allocas to emit at the top of the current function. Every stack slot
+    /// goes here, named locals and command-call scratch alike: an `alloca` in
+    /// a loop body is a fresh stack adjustment on every turn of the loop, and
+    /// nothing gives the space back until the function returns.
     allocas: Vec<String>,
+    /// How many *named* slots `allocas` holds. Their names cannot be derived
+    /// from the vector's length any more, because scratch slots share it.
+    locals: usize,
     /// Runtime command symbols actually referenced (drives declarations).
     used: BTreeSet<String>,
     /// UI-interface symbols referenced (declared separately; see finish()).
@@ -773,9 +783,21 @@ impl Lowerer<'_> {
 
     /// Reserve a stack slot, emitted at the top of the function.
     fn alloca(&mut self, ty: Ty) -> String {
-        let slot = format!("%v{}", self.allocas.len());
+        let slot = format!("%v{}", self.locals);
+        self.locals += 1;
         self.allocas
             .push(format!("  {slot} = alloca {}\n", llvm_ty(ty)));
+        slot
+    }
+
+    /// Reserve a scratch slot for a command call's slot ABI. It is named from
+    /// the temporary counter rather than the local one, because it belongs to
+    /// an expression rather than to anything the program named — but it is
+    /// emitted in `entry:` like every other slot, so a call inside a loop
+    /// reserves its space once rather than once per turn.
+    fn alloca_temp(&mut self, ty: &str) -> String {
+        let slot = self.fresh();
+        self.allocas.push(format!("  {slot} = alloca {ty}\n"));
         slot
     }
 
@@ -783,7 +805,8 @@ impl Lowerer<'_> {
     /// `[size x i8]` gives one whole object with byte-addressable fields, so a
     /// field GEP is a plain byte offset and the layout is ours, not LLVM's.
     fn alloca_bytes(&mut self, size: i64) -> String {
-        let slot = format!("%v{}", self.allocas.len());
+        let slot = format!("%v{}", self.locals);
+        self.locals += 1;
         self.allocas
             .push(format!("  {slot} = alloca [{size} x i8]\n"));
         slot
@@ -1541,8 +1564,7 @@ impl Lowerer<'_> {
         b: &Val,
         ret: Ty,
     ) -> Result<String, LowerError> {
-        let argv = self.fresh();
-        writeln!(self.body, "  {argv} = alloca [2 x %Slot]").unwrap();
+        let argv = self.alloca_temp("[2 x %Slot]");
         for (i, v) in [a, b].iter().enumerate() {
             let raw = self.emit_arg_i64(v);
             let slot = self.fresh();
@@ -1572,8 +1594,7 @@ impl Lowerer<'_> {
             "  {base} = getelementptr [2 x %Slot], ptr {argv}, i64 0, i64 0"
         )
         .unwrap();
-        let ret_slot = self.fresh();
-        writeln!(self.body, "  {ret_slot} = alloca %Slot").unwrap();
+        let ret_slot = self.alloca_temp("%Slot");
         self.used.insert(symbol.to_string());
         writeln!(
             self.body,
@@ -1594,8 +1615,7 @@ impl Lowerer<'_> {
     /// Call a one-argument slot-ABI runtime command and return its text result.
     fn call_symbol_1(&mut self, symbol: &str, arg: &Val) -> Result<String, LowerError> {
         let raw = self.emit_arg_i64(arg);
-        let argv = self.fresh();
-        writeln!(self.body, "  {argv} = alloca [1 x %Slot]").unwrap();
+        let argv = self.alloca_temp("[1 x %Slot]");
         let slot = self.fresh();
         writeln!(
             self.body,
@@ -1616,8 +1636,7 @@ impl Lowerer<'_> {
         )
         .unwrap();
         writeln!(self.body, "  store i64 {raw}, ptr {valp}").unwrap();
-        let ret = self.fresh();
-        writeln!(self.body, "  {ret} = alloca %Slot").unwrap();
+        let ret = self.alloca_temp("%Slot");
         self.used.insert(symbol.to_string());
         writeln!(
             self.body,
@@ -3732,14 +3751,18 @@ impl Lowerer<'_> {
         let ret_ty = resolve_ret(&sig, &arg_tys);
 
         let argc = arg_vals.len();
-        // Return slot (always allocated; ignored for void commands).
-        let ret_slot = self.fresh();
-        writeln!(self.body, "  {ret_slot} = alloca %Slot").unwrap();
+        // Return slot (always allocated; ignored for void commands). Reserved
+        // in the prologue, not here: this code runs wherever the call appears,
+        // and an `alloca` in a loop body reserves fresh space on every turn
+        // that nothing reclaims until the function returns. A loop calling a
+        // command used to exhaust the stack at around a quarter of a million
+        // iterations. The size is a constant per call site, so each site gets
+        // its own slot and no two calls share one.
+        let ret_slot = self.alloca_temp("%Slot");
 
         // argv array + per-argument stores.
         let argv_base = if argc > 0 {
-            let argv = self.fresh();
-            writeln!(self.body, "  {argv} = alloca [{argc} x %Slot]").unwrap();
+            let argv = self.alloca_temp(&format!("[{argc} x %Slot]"));
             for (i, v) in arg_vals.iter().enumerate() {
                 let raw = self.emit_arg_i64(v);
                 let slot = self.fresh();
@@ -4357,5 +4380,72 @@ mod tests {
         let ll = lower("module m\nsub main\n  call print_int(1)\nend\n").unwrap();
         assert!(ll.contains("declare void @oe_print_int(ptr, i32, ptr)"));
         assert!(!ll.contains("oe_sqrt"));
+    }
+
+    /// Every `alloca` belongs to the `entry:` block, and this is not a matter
+    /// of taste. LLVM turns an `alloca` in any other block into a *dynamic*
+    /// stack adjustment made where it stands, and nothing gives that space
+    /// back until the function returns — so a loop whose body reserves a slot
+    /// reserves another one on every turn. A loop calling a command used to
+    /// exhaust an 8 MiB stack at around a quarter of a million iterations and
+    /// die with a segmentation fault.
+    fn allocas_outside_entry(ll: &str) -> Vec<String> {
+        let mut block = "entry:".to_string();
+        let mut stray = Vec::new();
+        for line in ll.lines() {
+            if line.starts_with("define") {
+                block = "entry:".to_string();
+            } else if !line.starts_with(' ') && line.ends_with(':') {
+                block = line.to_string();
+            } else if line.contains(" = alloca ") && block != "entry:" {
+                stray.push(format!("{block} {}", line.trim()));
+            }
+        }
+        stray
+    }
+
+    #[test]
+    fn a_command_call_in_a_loop_reserves_its_slots_once() {
+        let ll = lower(
+            "module m\nsub main\n  for i in 1..10\n    call print_int(i)\n  end\nend\n",
+        )
+        .unwrap();
+        assert_eq!(allocas_outside_entry(&ll), Vec::<String>::new(), "{ll}");
+    }
+
+    /// The text commands reach the runtime through their own call path, so
+    /// they get their own case rather than trusting the one above to cover it.
+    #[test]
+    fn joining_text_in_a_loop_reserves_its_slots_once() {
+        let ll = lower(
+            "module m\nsub main\n  var s: text = \"\"\n  for i in 1..10\n    s = s + \"x\"\n  end\n  call print_text(s)\nend\n",
+        )
+        .unwrap();
+        assert_eq!(allocas_outside_entry(&ll), Vec::<String>::new(), "{ll}");
+    }
+
+    /// Branches are the other shape that used to strand an alloca outside
+    /// `entry:` — harmless on its own, fatal inside a loop.
+    #[test]
+    fn a_command_call_in_a_branch_reserves_its_slots_once() {
+        let ll = lower(
+            "module m\nsub main\n  if 1 = 1\n    call print_int(1)\n  end\nend\n",
+        )
+        .unwrap();
+        assert_eq!(allocas_outside_entry(&ll), Vec::<String>::new(), "{ll}");
+    }
+
+    /// Hoisting the scratch slots must not renumber the named ones: they are
+    /// `%v0`, `%v1`, … in declaration order, and share the prologue with
+    /// slots named from the temporary counter.
+    #[test]
+    fn hoisting_scratch_slots_leaves_named_locals_numbered_in_order() {
+        let ll = lower(
+            "module m\nsub main\n  var a: int = 1\n  call print_int(a)\n  var b: int = 2\n  call print_int(b)\nend\n",
+        )
+        .unwrap();
+        assert!(ll.contains("%v0 = alloca i32"), "{ll}");
+        assert!(ll.contains("%v1 = alloca i32"), "{ll}");
+        assert!(!ll.contains("%v2 = alloca"), "{ll}");
     }
 }

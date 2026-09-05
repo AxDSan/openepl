@@ -555,6 +555,53 @@ fn dividing_by_zero_reports_instead_of_crashing() {
     }
 }
 
+/// A loop that calls a command must not grow the stack.
+///
+/// The slot ABI gives every command call a return slot and an argv array on
+/// the stack. Those used to be reserved where the call stood, and an `alloca`
+/// outside a function's entry block is a *dynamic* stack adjustment that
+/// nothing reclaims until the function returns — so each turn of the loop took
+/// another bite. A million iterations is well past the quarter of a million
+/// that used to fault on an 8 MiB stack, and the command is one that prints
+/// nothing, so the test measures the stack rather than the pipe.
+#[test]
+fn a_loop_calling_a_command_does_not_grow_the_stack() {
+    let dir = std::env::temp_dir().join("openepl_stackgrow_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src_path = dir.join("grow.oir");
+    std::fs::write(
+        &src_path,
+        "module grow\n\
+         sub main\n\
+         \u{20}\u{20}var total: int = 0\n\
+         \u{20}\u{20}for i in 1..1000000\n\
+         \u{20}\u{20}\u{20}\u{20}total = total + abs_int(0 - i)\n\
+         \u{20}\u{20}end\n\
+         \u{20}\u{20}call print_int(total - total)\n\
+         end\n",
+    )
+    .unwrap();
+    let bin = dir.join("grow");
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args([
+            "build",
+            src_path.to_str().unwrap(),
+            "-o",
+            bin.to_str().unwrap(),
+        ])
+        .env("OPENEPL_RUNTIME_DIR", repo().join("runtime"))
+        .status()
+        .expect("run openepl");
+    assert!(status.success(), "build failed");
+    let out = Command::new(&bin).output().expect("run built binary");
+    assert!(
+        out.status.success(),
+        "a million command calls in a loop exhausted the stack: {:?}",
+        out.status
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "0");
+}
+
 /// **M0, the RAD metric.** A scripted designer session adds a button,
 /// sets its properties, wires a click handler, and saves — and the resulting
 /// `.oir` compiles to a native binary whose button actually works.
