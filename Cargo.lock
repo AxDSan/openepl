@@ -78,14 +78,14 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "openepl-backend"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "openepl-ir",
 ]
 
 [[package]]
 name = "openepl-cli"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "openepl-ir"
-version = "0.9.1"
+version = "0.10.0"
 
 [[package]]
 name = "proc-macro2"

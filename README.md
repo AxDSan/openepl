@@ -67,8 +67,8 @@ Download a release, unpack it anywhere, and run it — there is no installer and
 nothing to configure:
 
 ```sh
-tar xzf openepl-0.9.1-linux-x86_64.tar.gz
-cd openepl-0.9.1-linux-x86_64
+tar xzf openepl-0.10.0-linux-x86_64.tar.gz
+cd openepl-0.10.0-linux-x86_64
 bin/openepl-studio
 ```
 
@@ -177,7 +177,9 @@ foreign declaration. It is Windows-only, cross-built from Linux with
 ## Editing
 
 Studio's editor gives you syntax highlighting and live diagnostics as you
-type, backed by the same language server any other editor can use.
+type, backed by the same language server any other editor can use. Tab
+indents, Enter carries the indentation and opens a block after `sub`, `if` or
+`for`, and completion knows every command the toolchain reports.
 
 <div align="center">
 <img src="assets/screenshot-editor.png" alt="The code editor with syntax highlighting" width="860">
@@ -193,6 +195,24 @@ Point any LSP-capable editor at it — [`docs/editors.md`](docs/editors.md) has
 ready-made configuration for Neovim, VS Code, Helix and Zed, and
 [`editors/vscode/`](editors/vscode) is a working extension with syntax
 highlighting.
+
+## Making it yours
+
+**Tools ▸ Settings**, or `Ctrl+,`. A **dark theme** that repaints the whole
+IDE as you pick it — chrome, canvas, syntax colours and all — plus the editor
+font size and indent width, the designer's grid and snapping, where built
+binaries go, whether exiting saves your file, and which `openepl` binary
+Studio drives.
+
+<div align="center">
+<img src="assets/screenshot-settings.png" alt="The settings page, dark theme selected" width="700">
+</div>
+
+Nothing here is a control that remembers a value and changes nothing: every
+row is wired to the code it names. Settings live in
+`~/.local/share/openepl/settings` as the same `key: value` lines as everything
+else, and only what you changed is written — delete a line to get the default
+back.
 
 ## How it builds
 
