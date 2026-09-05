@@ -1,6 +1,6 @@
 # The OpenEPL debugger
 
-**Status:** Phase 0 shipped in 0.10.1. Phases 1–8 planned, not started.
+**Status:** Phase 0 shipped in 0.10.1. Phase 1 done. Phases 2–8 planned.
 
 OpenEPL ships its own debugger. Not a wrapper around gdb or lldb, and not a
 dependency on either being installed — the bundle's promise is "unpack and
@@ -52,7 +52,7 @@ Each ships alone and names the command that proves it.
 | # | What | Proven by |
 |---|---|---|
 | 0 | **Hoist the inline allocas** — done, 0.10.1 | a million command calls in a loop exits 0 |
-| 1 | A line table: `!DICompileUnit`/`!DISubprogram`/`!DILocation` | `objdump --dwarf=decodedline` lists a row per statement |
+| 1 | **A line table — done** | `objdump --dwarf=decodedline` lists a row per statement, and gdb breaks on `loops.oir:24`, shows the source, and backtraces |
 | 2 | The symbol layer, no process at all — load ELF, index the line table both ways | the engine's line table agrees with objdump's |
 | 3 | Unwinding via gimli's CFI evaluator, unit-tested on synthetic registers | `cargo test -p openepl-debug` |
 | 4 | Launch, int3 breakpoints, stepping, backtrace | `openepl debug --batch 'break x.oir:5; run; where; next'` |
@@ -64,6 +64,38 @@ Each ships alone and names the command that proves it.
 Phase 2 before Phase 4 is FpDebug's ordering lesson taken literally: they read
 debug info for a year before controlling a process, and their DWARF parsers
 are the least-churned code in their tree while stepping took 465 commits.
+
+## What Phase 1 actually did
+
+`backend/src/debug.rs` builds the metadata block; `Body` — a `fmt::Write`
+wrapper around what used to be a `String` — attaches `!dbg` to every
+instruction with **no change to the 198 places that write one**. Only user
+subroutines carry debug information; the synthesised functions (entry point,
+library initialiser, export wrappers, event thunks) deliberately carry none,
+which is what makes the verifier's "a call in a function with debug info must
+have a location" rule a non-event rather than the day-one blocker it was
+predicted to be.
+
+Two things had to be given locations that have no statement behind them: the
+prologue's `alloca`s and the closing `ret`. An instruction with no location
+makes a line-table row with **no line**, and a debugger stepping into one shows
+no source — so the prologue is attributed to the `sub` header and the tail to
+the last statement. This was caught by asserting no row has line 0, not by
+reading the IR.
+
+Stock gdb is used as an *oracle*, never as a dependency: if gdb cannot see our
+lines, nothing we write will either.
+
+```
+Breakpoint 1, oe_user_main () at examples/loops.oir:24
+24	  call print_text("-- fizzbuzz, counted --")
+#0  oe_user_main () at examples/loops.oir:24
+#1  0x0000000000400c36 in ECodeStart ()
+#2  0x000000000040168c in main ()
+```
+
+The Windows cross-build carries DWARF in PE too, unchanged — so Phase 2's
+symbol layer can read both from the start.
 
 ## Decisions taken
 

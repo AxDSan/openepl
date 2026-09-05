@@ -35,7 +35,7 @@ mod templates;
 
 use std::collections::HashMap;
 
-use openepl_backend::lower_module;
+use openepl_backend::lower_module_from;
 use openepl_ir::registry::Registry;
 use openepl_ir::validate::{validate_with, Hints};
 use openepl_ir::{parse_with, Module, ParseOptions, Target};
@@ -917,7 +917,18 @@ fn compile_with(
         }
         module = stripped;
     }
-    let ll = lower_module(&module, &plan.registry).map_err(|e| e.to_string())?;
+    // Debug information is on by default and off in a release build. On by
+    // default because a program you are still writing is one you may want to
+    // step through, and asking for a separate debug build is a mode switch
+    // nobody remembers to make; off in release because `--release` already
+    // means "strip what a user does not need", and this is the largest part
+    // of it.
+    let source = if release {
+        None
+    } else {
+        input.to_str()
+    };
+    let ll = lower_module_from(&module, &plan.registry, source).map_err(|e| e.to_string())?;
     Ok((ll, plan, target, module))
 }
 
@@ -1272,8 +1283,12 @@ fn clang_link(
             // still has its warnings to say.
             match cmd.output() {
                 Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
                     if o.status.success() {
-                        eprint!("{}", String::from_utf8_lossy(&o.stderr));
+                        eprint!("{stderr}");
+                    }
+                    if debug_info_discarded(&stderr) {
+                        return Err(report_discarded_debug_info());
                     }
                     Ok(o.status.success())
                 }
@@ -1283,11 +1298,17 @@ fn clang_link(
                 }
             }
         } else {
-            match cmd.status() {
-                Ok(s) if s.success() => Ok(true),
-                Ok(s) => {
-                    eprintln!("openepl: clang failed with status {s}");
-                    Ok(false)
+            match cmd.output() {
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    eprint!("{stderr}");
+                    if debug_info_discarded(&stderr) {
+                        return Err(report_discarded_debug_info());
+                    }
+                    if !o.status.success() {
+                        eprintln!("openepl: clang failed with status {}", o.status);
+                    }
+                    Ok(o.status.success())
                 }
                 Err(e) => {
                     eprintln!("openepl: {}", crate::libload::spawn_error(driver, &e));
@@ -1296,6 +1317,33 @@ fn clang_link(
             }
         }
     };
+
+    /// Whether clang threw the module's debug information away.
+    ///
+    /// It says so in a warning and then exits 0, having produced a binary with
+    /// no `.debug_*` sections at all — and `-w` and `-Wno-everything` do not
+    /// suppress the warning, which is what makes it usable as a check. Without
+    /// it, every mistake in the emitted metadata looks like a working build
+    /// and a debugger that sees nothing.
+    fn debug_info_discarded(stderr: &str) -> bool {
+        stderr.contains("ignoring invalid debug info")
+    }
+
+    /// Refuse the build rather than ship a binary that cannot be debugged.
+    /// This is a compiler bug when it happens, not anything a user did, so it
+    /// says so and asks to be told.
+    fn report_discarded_debug_info() -> i32 {
+        eprintln!(
+            "openepl: the debug information this build emitted was rejected by LLVM \
+             and thrown away, so the binary could not be stepped through."
+        );
+        eprintln!(
+            "openepl: this is a bug in the compiler, not in your program. Please \
+             report it, and pass `--emit-ir` to keep the .ll named above for \
+             the report. `--release` builds emit none and are unaffected."
+        );
+        1
+    }
 
     let ldflags = if release {
         release_ldflags(driver, &common, target.is_executable())

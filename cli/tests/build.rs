@@ -555,6 +555,77 @@ fn dividing_by_zero_reports_instead_of_crashing() {
     }
 }
 
+/// A build carries a DWARF line table, and a release build does not.
+///
+/// This is the assertion the whole debugger rests on: an address in the built
+/// program maps back to a line of the `.oir` the user wrote. It is checked
+/// through `objdump` rather than by reading the emitted IR, because IR that
+/// looks right and metadata LLVM accepts are different claims — LLVM discards
+/// debug information it dislikes with a warning and exit code 0.
+#[test]
+fn a_build_carries_a_line_table_and_a_release_build_does_not() {
+    let repo = repo();
+    let example = repo.join("examples").join("loops.oir");
+    let dir = std::env::temp_dir().join("openepl_linetable_test");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let decoded = |bin: &Path| -> String {
+        let out = Command::new("objdump")
+            .args(["--dwarf=decodedline", bin.to_str().unwrap()])
+            .output()
+            .expect("run objdump");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let debug_bin = dir.join("loops");
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args([
+            "build",
+            example.to_str().unwrap(),
+            "-o",
+            debug_bin.to_str().unwrap(),
+        ])
+        .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+        .status()
+        .expect("run openepl");
+    assert!(status.success(), "debug build failed");
+
+    let table = decoded(&debug_bin);
+    assert!(
+        table.contains("loops.oir"),
+        "no line table for the source: {table}"
+    );
+    // Every row for our source names a real line, never line 0 — a debugger
+    // reads 0 as "no line here" and steps straight past it.
+    let rows: Vec<&str> = table
+        .lines()
+        .filter(|l| l.trim_start().starts_with("loops.oir "))
+        .collect();
+    assert!(rows.len() > 5, "too few rows to be a real table: {table}");
+    for row in &rows {
+        let line = row.split_whitespace().nth(1).unwrap_or("0");
+        assert_ne!(line, "0", "a row with no line: {row}");
+    }
+
+    let release_bin = dir.join("loops-release");
+    let status = Command::new(env!("CARGO_BIN_EXE_openepl"))
+        .args([
+            "build",
+            example.to_str().unwrap(),
+            "--release",
+            "-o",
+            release_bin.to_str().unwrap(),
+        ])
+        .env("OPENEPL_RUNTIME_DIR", repo.join("runtime"))
+        .status()
+        .expect("run openepl");
+    assert!(status.success(), "release build failed");
+    assert!(
+        !decoded(&release_bin).contains("loops.oir"),
+        "a release build kept its line table"
+    );
+}
+
 /// A loop that calls a command must not grow the stack.
 ///
 /// The slot ABI gives every command call a return slot and an argv array on

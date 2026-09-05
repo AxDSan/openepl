@@ -16,6 +16,66 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
+mod debug;
+
+/// The instruction stream of the function being lowered.
+///
+/// It is a `fmt::Write` rather than a `String` so that a source location can
+/// be attached to every instruction without touching the two hundred places
+/// that write one. Whatever `loc` holds when a line is completed becomes that
+/// instruction's `!dbg`; leaving it `None` emits exactly what it always did.
+#[derive(Default)]
+struct Body {
+    text: String,
+    /// The part of a line written so far. A `writeln!` reaches `write_str` in
+    /// pieces — one per literal and one per argument — so a line is only whole
+    /// when its newline arrives.
+    pending: String,
+    /// The metadata node for the statement being lowered, or `None` in a
+    /// function that carries no debug information.
+    loc: Option<usize>,
+}
+
+impl Body {
+    fn clear(&mut self) {
+        self.text.clear();
+        self.pending.clear();
+        self.loc = None;
+    }
+    fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Write for Body {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for ch in s.chars() {
+            if ch != '\n' {
+                self.pending.push(ch);
+                continue;
+            }
+            // A completed line. Instructions are indented and labels are not,
+            // and metadata attaches to an instruction only.
+            if let Some(n) = self.loc {
+                if self.pending.starts_with("  ") && !self.pending.contains("!dbg") {
+                    self.pending.push_str(&format!(", !dbg !{n}"));
+                }
+            }
+            self.text.push_str(&self.pending);
+            self.text.push('\n');
+            self.pending.clear();
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+
 use openepl_ir::sema::resolve_ret;
 use openepl_ir::registry::{ComponentKind, DllSig};
 use openepl_ir::{
@@ -123,6 +183,19 @@ fn llvm_ty(t: Ty) -> &'static str {
 /// event handler can be bound by pointer. Handler names never appear as data —
 /// there is no name-based dispatch at runtime (G8).
 pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
+    lower_module_from(m, reg, None)
+}
+
+/// Lower, naming the source the module was parsed from.
+///
+/// The path is what a debugger is told to open when it stops on a line, so it
+/// is the path as the user wrote it rather than one canonicalised here.
+/// Passing `None` emits no debug information at all.
+pub fn lower_module_from(
+    m: &Module,
+    reg: &Registry,
+    source: Option<&str>,
+) -> Result<String, LowerError> {
     // User subroutines are callable names too. The validator has already proven
     // none of them collides with a library command, so registering them here
     // cannot change what any existing call means.
@@ -157,7 +230,8 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
     let mut lo = Lowerer {
         reg,
         strings: Vec::new(),
-        body: String::new(),
+        body: Body::default(),
+        debug: source.map(|p| debug::DebugInfo::new(p, concat!("OpenEPL ", env!("CARGO_PKG_VERSION")))),
         vars: HashMap::new(),
         used: BTreeSet::new(),
         ui_used: BTreeSet::new(),
@@ -205,6 +279,18 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         lo.ret_ty = sub.ret;
         // Parameters arrive in SSA registers; copy each into a stack slot so
         // the rest of lowering sees an ordinary local.
+        // The subprogram this function's instructions are scoped to. Declared
+        // before the body is lowered, because every location inside names it.
+        let symbol = user_symbol(&sub.name);
+        let scope = lo
+            .debug
+            .as_mut()
+            .map(|d| d.subprogram(&sub.name, &symbol, sub.line));
+        // The parameter copies belong to the `sub` line: they are the
+        // prologue, and a debugger stopping at the start of the function
+        // should show the header, not the first statement.
+        lo.set_loc(scope, sub.line.max(1), 1);
+        let prologue_loc = lo.body.loc;
         for (i, (name, ty)) in sub.params.iter().enumerate() {
             let slot = lo.alloca(*ty);
             writeln!(lo.body, "  store {} %p{i}, ptr {slot}", llvm_ty(*ty)).unwrap();
@@ -215,19 +301,41 @@ pub fn lower_module(m: &Module, reg: &Registry) -> Result<String, LowerError> {
         // `return` is carrying has been computed.
         let body = openepl_ir::expand_defer(&sub.body, sub.ret);
         for stmt in &body {
+            // A statement whose line was lost is attributed to the `sub`
+            // header rather than to line 0, which a debugger reads as "no
+            // line at all" and steps straight past.
+            let line = if stmt.line > 0 { stmt.line } else { sub.line };
+            lo.set_loc(scope, line.max(1), stmt.span.col.max(1));
             lo.stmt(stmt)?;
         }
         // A value-returning sub ends in `unreachable`: the validator has proven
         // every path returns, so falling off the end cannot happen.
-        let (ret_ty, tail) = match sub.ret {
-            None => ("void", "  ret void\n"),
-            Some(t) => (llvm_ty(t), "  unreachable\n"),
+        //
+        // Written through the instruction stream rather than appended as text,
+        // so it keeps the last statement's location. An instruction with no
+        // location makes a row in the line table with no line, and a debugger
+        // stepping into one shows no source at all — which is what stepping
+        // off the end of a subroutine would otherwise do.
+        let ret_ty = match sub.ret {
+            None => {
+                writeln!(lo.body, "  ret void").unwrap();
+                "void"
+            }
+            Some(t) => {
+                writeln!(lo.body, "  unreachable").unwrap();
+                llvm_ty(t)
+            }
+        };
+        // Everything after this point is the compiler's own code.
+        lo.body.loc = None;
+        let dbg = match scope {
+            Some(n) => format!(" !dbg !{n}"),
+            None => String::new(),
         };
         functions.push_str(&format!(
-            "define {ret_ty} @{}({}) {{\nentry:\n{}{}{tail}}}\n\n",
-            user_symbol(&sub.name),
+            "define {ret_ty} @{symbol}({}){dbg} {{\nentry:\n{}{}}}\n\n",
             param_decls(&sub.params, "p"),
-            lo.allocas.join(""),
+            lo.prologue(prologue_loc),
             lo.body,
         ));
     }
@@ -352,7 +460,10 @@ struct Val {
 struct Lowerer<'a> {
     reg: &'a Registry,
     strings: Vec<String>,
-    body: String,
+    body: Body,
+    /// Debug metadata, when the module is being lowered with a source path to
+    /// name. `None` leaves every instruction bare, exactly as before.
+    debug: Option<debug::DebugInfo>,
     /// Local variables: name -> (alloca pointer, type). Every local is
     /// alloca-backed, `let` and `var` alike — one lowering path, and `opt`'s
     /// mem2reg reconstructs SSA for free when optimisation is enabled.
@@ -779,6 +890,32 @@ impl Lowerer<'_> {
             self.stmt(s)?;
         }
         Ok(())
+    }
+
+    /// The prologue, with every slot attributed to the subroutine's header.
+    ///
+    /// The slots are reserved before any statement runs, so there is no
+    /// statement to attribute them to — but leaving them bare makes a row in
+    /// the line table with no line, covering the addresses a breakpoint on the
+    /// function's first line would land on.
+    fn prologue(&self, loc: Option<usize>) -> String {
+        match loc {
+            None => self.allocas.join(""),
+            Some(n) => self
+                .allocas
+                .iter()
+                .map(|l| format!("{}, !dbg !{n}\n", l.trim_end_matches('\n')))
+                .collect(),
+        }
+    }
+
+    /// Point the instruction stream at a source position. Every instruction
+    /// written after this carries it, until it is changed or cleared.
+    fn set_loc(&mut self, scope: Option<usize>, line: usize, column: usize) {
+        self.body.loc = match (scope, self.debug.as_mut()) {
+            (Some(sp), Some(d)) => Some(d.location(sp, line, column)),
+            _ => None,
+        };
     }
 
     /// Reserve a stack slot, emitted at the top of the function.
@@ -3992,12 +4129,17 @@ impl Lowerer<'_> {
             writeln!(out, "define i32 @ECodeStart() {{").unwrap();
             writeln!(out, "entry:").unwrap();
             out.push_str(&self.allocas.join(""));
-            out.push_str(&self.body);
+            out.push_str(self.body.as_str());
             match &self.exit_code {
                 Some(rc) => writeln!(out, "  ret i32 {rc}").unwrap(),
                 None => writeln!(out, "  ret i32 0").unwrap(),
             }
             writeln!(out, "}}").unwrap();
+        }
+        if let Some(d) = &self.debug {
+            if !d.is_empty() {
+                out.push_str(&d.render());
+            }
         }
         out
     }
@@ -4023,6 +4165,12 @@ mod tests {
     fn lower(src: &str) -> Result<String, LowerError> {
         let m = parse(src).unwrap();
         lower_module(&m, &Registry::core())
+    }
+
+    /// Lower as a build with debug information does.
+    fn lower_dbg(src: &str) -> String {
+        let m = parse(src).unwrap();
+        lower_module_from(&m, &Registry::core(), Some("examples/demo.oir")).unwrap()
     }
 
     /// `Registry::core()` plus a non-visual component whose `beep` event hands
@@ -4380,6 +4528,101 @@ mod tests {
         let ll = lower("module m\nsub main\n  call print_int(1)\nend\n").unwrap();
         assert!(ll.contains("declare void @oe_print_int(ptr, i32, ptr)"));
         assert!(!ll.contains("oe_sqrt"));
+    }
+
+    /// Without a source path nothing changes: this is what a `--release`
+    /// build lowers, and it must be byte-for-byte what it always was.
+    #[test]
+    fn no_source_path_means_no_debug_information() {
+        let ll = lower("module m\nsub main\n  call print_int(1)\nend\n").unwrap();
+        assert!(!ll.contains("!dbg"), "{ll}");
+        assert!(!ll.contains("!llvm.dbg.cu"), "{ll}");
+        assert!(!ll.contains("DICompileUnit"), "{ll}");
+    }
+
+    #[test]
+    fn a_module_with_a_source_path_carries_a_compile_unit() {
+        let ll = lower_dbg("module m\nsub main\n  call print_int(1)\nend\n");
+        assert!(ll.contains("!llvm.dbg.cu = !{!0}"), "{ll}");
+        assert!(ll.contains("emissionKind: LineTablesOnly"), "{ll}");
+        assert!(
+            ll.contains(r#"!DIFile(filename: "demo.oir", directory: "examples")"#),
+            "{ll}"
+        );
+        assert!(ll.contains(r#"!{i32 7, !"Dwarf Version", i32 5}"#), "{ll}");
+        assert!(
+            ll.contains(r#"!{i32 2, !"Debug Info Version", i32 3}"#),
+            "{ll}"
+        );
+    }
+
+    /// A subroutine is scoped to a subprogram named for the line the `sub`
+    /// keyword is on, and its `define` names that node.
+    #[test]
+    fn a_subroutine_becomes_a_subprogram_at_its_own_line() {
+        let ll = lower_dbg(
+            "module m\n\nsub greet\n  call print_int(1)\nend\n\nsub main\n  call greet()\nend\n",
+        );
+        assert!(
+            ll.contains(r#"!DISubprogram(name: "greet", linkageName: "oe_user_greet""#),
+            "{ll}"
+        );
+        assert!(ll.contains("scopeLine: 3,"), "{ll}");
+        assert!(ll.contains("define void @oe_user_greet() !dbg !6 {"), "{ll}");
+        // and `main`, three lines lower, gets its own subprogram
+        assert!(
+            ll.contains(r#"!DISubprogram(name: "main", linkageName: "oe_user_main""#),
+            "{ll}"
+        );
+        assert!(ll.contains("scopeLine: 7,"), "{ll}");
+    }
+
+    /// The whole point: each statement's instructions carry that statement's
+    /// line, so a debugger stepping one row of the table moves one statement.
+    #[test]
+    fn each_statement_gets_its_own_location() {
+        let ll = lower_dbg(
+            "module m\nsub main\n  call print_int(1)\n  call print_int(2)\n  call print_int(3)\nend\n",
+        );
+        for line in [3, 4, 5] {
+            assert!(
+                ll.contains(&format!("!DILocation(line: {line}, column: 3, scope: !6)")),
+                "no location for line {line} in {ll}"
+            );
+        }
+    }
+
+    /// `!dbg` attaches to instructions. A label is not one, and LLVM refuses a
+    /// module that puts metadata on it.
+    #[test]
+    fn a_label_never_carries_a_location() {
+        let ll = lower_dbg(
+            "module m\nsub main\n  if 1 = 1\n    call print_int(1)\n  end\nend\n",
+        );
+        for line in ll.lines() {
+            if line.ends_with(':') && !line.starts_with(' ') {
+                assert!(!line.contains("!dbg"), "label carried a location: {line}");
+            }
+        }
+        // and the instructions inside the branch did get one
+        assert!(ll.contains("call void @oe_print_int"), "{ll}");
+        assert!(ll.contains(", !dbg !"), "{ll}");
+    }
+
+    /// The functions the compiler synthesises carry no debug information, so
+    /// nothing inside them needs a location. A function that *has* debug info
+    /// must give every call one, and there is no line in anyone's source to
+    /// give the entry point's call to `main`.
+    #[test]
+    fn synthesised_functions_carry_no_debug_information() {
+        let ll = lower_dbg("module m\nsub main\n  call print_int(1)\nend\n");
+        let entry = ll
+            .split("define i32 @ECodeStart()")
+            .nth(1)
+            .expect("an entry point");
+        assert!(!entry.starts_with(" !dbg"), "{ll}");
+        let body = entry.split("\n}").next().unwrap();
+        assert!(!body.contains("!dbg"), "entry point carried locations: {body}");
     }
 
     /// Every `alloca` belongs to the `entry:` block, and this is not a matter
