@@ -88,6 +88,6 @@ projects. It builds and runs them once clang is on PATH.
 
 Studio's own build is not produced *on* Windows — the toolchain that makes it
 runs on Linux and cross-builds — so it is the shipped `.exe` that is tested,
-not a Windows-native build of it. See [Limitations](https://openepl.dev/limitations.html)
+not a Windows-native build of it. See [Limitations](https://axdsan.github.io/openepl/docs/limitations.html)
 for the current state of the Windows port, including what has and has not been
 looked at on a real display.

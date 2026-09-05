@@ -33,12 +33,12 @@ sub main
 end
 
 sub on_tick
-  remaining = remaining - 1
+  remaining -= 1
   if remaining <= 0
     call print_text("Liftoff.")
     call quit()
   else
-    call print_text(int_to_text(remaining) + "...")
+    call print_text("{remaining}...")
   end
 end
 ```
@@ -76,7 +76,7 @@ An event handler is an ordinary subroutine, and some events give it a value:
 | `checkbox`, `radiobutton`, `slider`, `spinner`, `editbox`, `memo`, `combobox`, `listbox` | `change` | nothing |
 | `action` | `execute` | nothing |
 | `httpserver` | `request` | nothing — the handler asks `net_request()` |
-| `form` | `load` | nothing — see [Limitations](./limitations.md): it is not dispatched yet |
+| `form` | `load` | nothing — it runs once, after `main` and before the first frame is drawn |
 
 A handler takes exactly what the event hands it, or nothing at all, and
 returns nothing. Both shapes are wired the same way, so a handler that has no
@@ -99,14 +99,12 @@ end
 var rounds: int = 0
 
 sub on_counted(n: int)
-  call print_text("counted tick " + int_to_text(n))
+  call print_text("counted tick {n}")
 end
 
 sub on_plain
-  rounds = rounds + 1
-  if rounds >= 3
-    call quit()
-  end
+  rounds += 1
+  call quit() if rounds >= 3
 end
 
 sub main
@@ -246,8 +244,8 @@ form win
 end
 
 sub on_save
-  saves = saves + 1
-  save_action.text = "Saved " + int_to_text(saves)
+  saves += 1
+  save_action.text = "Saved {saves}"
 end
 ```
 

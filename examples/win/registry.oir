@@ -6,7 +6,7 @@
 # with memory, and it is the one whose declarations are easiest to get subtly
 # wrong: an HKEY is pointer-width but the predefined roots are numbers, a
 # value's size is an in-out cell rather than an argument, and every one of the
-# thirteen entry points answers a LONG status rather than a BOOL.
+# twelve entry points answers a LONG status rather than a BOOL.
 #
 # Everything below happens under HKEY_CURRENT_USER\Software\OpenEPL\KitProof,
 # which this program creates and deletes again. RegCreateKeyExA makes the

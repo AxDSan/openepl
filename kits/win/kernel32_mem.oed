@@ -20,11 +20,17 @@
 # it with `mem_alloc(4)` or `mem_alloc(8)` and read it back with
 # `ptr_read_int` / `ptr_read_int64`.
 #
-# The language has no bitwise `or`, so flags are combined with `+` — which is
-# exact for the disjoint bit families below. The pairs a program reaches for
-# every time (GENERIC_READ_WRITE, MEM_COMMIT_RESERVE, FILE_SHARE_READ_WRITE)
-# ship pre-combined. Constants are decimal because the lexer has no hex
-# literal; the hex a header would show is in the comment beside each one.
+# Flags combine with `bor` and are tested with `band`, the way a C header
+# means them. The pairs a program reaches for every time
+# (GENERIC_READ_WRITE, MEM_COMMIT_RESERVE, FILE_SHARE_READ_WRITE) still ship
+# pre-combined, because naming the common case is worth a line. `+` is also
+# exact for the disjoint bit families below, and older programs that used it
+# keep working — but `bor` is what these are.
+#
+# Constants are decimal here for the same reason a diff is: they were written
+# before the lexer had hex literals. Hex with `_` grouping does compile now
+# (`0x1234_5678`), and the hex a header would show is in the comment beside
+# each one either way.
 #
 # A flag constant whose top bit is set is written as its signed 32-bit value
 # (GENERIC_READ is -2147483648, which is 0x80000000) so that it types as `int`

@@ -14,9 +14,10 @@ is tested under wine and runs; a windowed one is tested under wine as far as
 a machine without a display allows — it loads with its DLLs and reaches the
 UI library — and its drawn window has not been checked under wine or on a
 Windows machine. Accessibility is off in a Windows build: the a11y bridge
-has no AccessKit Windows adapter yet. Studio itself is Linux-only, nothing is
-built natively *on* Windows — the toolchain runs on Linux — and macOS and
-arm64 are not supported at all.
+has no AccessKit Windows adapter yet. Studio cross-builds for Windows too, and
+its drawn window has not been seen there either. Nothing is built natively *on*
+Windows — the toolchain runs on Linux — and macOS and arm64 are not supported
+at all.
 
 **The `win` kit is declarations, and it is Windows-only.** `use win` brings in
 the Win32 API — user32, gdi32, kernel32 and advapi32 — and a program that uses
@@ -68,6 +69,11 @@ not breakpoints, stepping or variable inspection.
   rather than making a type of its own — a parameter typed by one takes any
   `int` — and there is no interface and no way to attach a subroutine to a
   type.
+- **String interpolation has no format specifiers.** `"{x}"` inserts a value
+  the way `int_to_text` would; `"{x:03}"`, `"{x:.2f}"` or any other `:spec`
+  is a parse error — *format specs like `{x:03:...}` are not supported yet*.
+  Width, padding and decimal places are done by the `text` kit's own commands
+  around the value, not inside the braces.
 - `match` compares, it does not destructure: a `when` names values to test the
   subject against with `=`, and there is no binding a name out of the value and
   no matching on a record's shape.
@@ -142,9 +148,8 @@ fill one from a query.
 
 - The console shows the tail of the output rather than a full scrollback.
 - No project-wide search, no refactoring, no version-control integration.
-- Completion, hover and go-to-definition work in external editors through the
-  language server; inside Studio, the editor has highlighting and diagnostics
-  so far.
+- Rename and formatting are not implemented, in Studio or in an external
+  editor — the language server offers neither.
 
 ## What does work
 

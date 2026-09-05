@@ -56,6 +56,16 @@ openepl_dotgrid.tga
 /*
 !/*.*
 !/*/
+# ...but `!/*.*` re-includes every dotted name at the root, which brings back
+# the build products the rules above already excluded. A stray `main.ll` from
+# `openepl emit` is untracked-but-not-ignored without this, and fifteen of them
+# once accumulated at the root of a working tree.
+/*.ll
+/*.o
+/*.s
+# Workflow scratch scripts, which are session artefacts and not part of the
+# project. `!/*.*` would otherwise re-include them for the same reason.
+/.wf-*.js
 
 # Directory ignores, restated AFTER the root rule above so it cannot override
 # them. Git applies the last matching pattern, so order is load-bearing here.

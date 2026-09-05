@@ -42,7 +42,7 @@ sub main
 
   let thread: ptr = CreateThread(ptr_null(), 0, address of worker, inbox, 0, ptr_null())
   if ptr_is_null(thread)
-    call print_text("thread FAILED " + int_to_text(GetLastError()))
+    call print_text("thread FAILED {GetLastError()}")
     return
   end
   call say("thread", true)

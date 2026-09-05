@@ -30,8 +30,8 @@ sub main
     call print_text("line {n}")         # line 1 / line 2 / line 3
   end
 
-  # `for each` over a dictionary binds key and value. A dictionary has no
-  # guaranteed order, so the tour only sums the values — order cannot change 15.
+  # `for each` over a dictionary binds key and value, in the order the keys
+  # were added — so a walk of one is reproducible, here and everywhere.
   var prices = {"pen": 2, "cup": 5, "map": 8}
   var cost = 0
   for each item, price in prices

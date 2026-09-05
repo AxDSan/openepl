@@ -49,7 +49,7 @@ sub main
   call near("acos(1) is zero", math_acos(1.0), 0.0)
   call near("atan2(1, 1) is an eighth turn", math_atan2(1.0, 1.0), math_pi() / 4.0)
   # atan2 knows its quadrant; atan alone cannot.
-  call near("atan2 keeps the quadrant", math_atan2(-1.0, -1.0), 0.0 - 3.0 * math_pi() / 4.0)
+  call near("atan2 keeps the quadrant", math_atan2(-1.0, -1.0), -3.0 * math_pi() / 4.0)
 
   call print_text("-- hyperbolic --")
   call near("cosh(0)", math_cosh(0.0), 1.0)
@@ -62,7 +62,7 @@ sub main
   call near("hypot(3, 4)", math_hypot(3.0, 4.0), 5.0)
 
   call print_text("-- rounding --")
-  call near("trunc cuts toward zero", math_trunc(0.0 - 2.7), -2.0)
+  call near("trunc cuts toward zero", math_trunc(-2.7), -2.0)
   call near("round_to two places", math_round_to(3.14159, 2), 3.14)
   call near("fmod(7.5, 2)", math_fmod(7.5, 2.0), 1.5)
 
@@ -71,7 +71,7 @@ sub main
   call near("lerp halfway", math_lerp(10.0, 20.0, 0.5), 15.0)
   # Written as a + t*(b - a), so the end point comes back exactly.
   call near("lerp at 1 is exactly b", math_lerp(10.0, 20.0, 1.0), 20.0)
-  call same("sign of a negative", math_sign(0.0 - 4.5), -1)
+  call same("sign of a negative", math_sign(-4.5), -1)
   call same("clamp_int", math_clamp_int(50, 1, 10), 10)
 
   call print_text("-- angles --")

@@ -14,6 +14,6 @@ module msgbox
 use win
 
 sub main
-  let clicked: int = MessageBoxA(ptr_null(), "Built with OpenEPL.", "Hello", MB_OK + MB_ICONINFORMATION)
+  let clicked: int = MessageBoxA(ptr_null(), "Built with OpenEPL.", "Hello", MB_OK bor MB_ICONINFORMATION)
   call print_int(clicked)     # IDOK is 1
 end

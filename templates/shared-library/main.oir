@@ -15,7 +15,7 @@ sub add(a: int, b: int): int
 end
 
 sub greeting(name: text): text
-  greetings = greetings + 1
+  greetings += 1
   return "Hello, " + name + "!"
 end
 

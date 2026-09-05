@@ -1,7 +1,8 @@
 # Reading and writing JSON.
 #
 # A document is a handle; a place inside it is named by a dotted path —
-# "user.name", "items[2].id" — because OpenEPL has no record type.
+# "user.name", "items[2].id" — because a document's shape is not known until
+# it has been parsed, which is what tells one apart from a `record`.
 #
 #   openepl run examples/jsonlib.oir
 module jsonlib

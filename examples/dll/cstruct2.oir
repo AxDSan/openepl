@@ -122,10 +122,8 @@ sub main
   # --- a fixed inline array --------------------------------------------
   var b: Blob
   b.n = 9
-  var i: int = 1
-  while i <= 16
+  for i in 1..16
     b.bytes[i] = i * 3
-    i = i + 1
   end
   call print_int(b.bytes[1])          # 3
   call print_int(b.bytes[16])         # 48

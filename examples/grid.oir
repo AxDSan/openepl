@@ -84,7 +84,8 @@ end
 # Rows added before the window opens are on screen from the first frame.
 sub main
   call datasource_add_row("people", "Dennis\tNew York\t70")
-  call print_text(concat("rows: ", int_to_text(grid_row_count("table"))))
+  let rows = grid_row_count("table")
+  call print_text("rows: {rows}")
 end
 
 sub on_select(row: int)

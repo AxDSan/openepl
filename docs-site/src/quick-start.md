@@ -65,10 +65,10 @@ openepl run examples/loopdemo.oir
 ```
 
 ```text
-3...
-2...
-1...
-Liftoff.
+main returned; the timer keeps the program alive
+tick 1
+tick 2
+tick 3
 ```
 
 `main` printed one line and returned — and the program kept running, because

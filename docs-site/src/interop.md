@@ -899,7 +899,7 @@ const GREETING = "ready"
 sub main
   var left: int = RETRIES
   while left > 0
-    left = left - 1
+    left -= 1
   end
   call print_text(GREETING)
 end

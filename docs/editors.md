@@ -61,10 +61,14 @@ end
 at the end of the file, with the parameter list the event declares. That is
 the whole loop: place a component, wire an event, write the body.
 
-The server locates the OpenEPL runtime by walking up from the editor's workspace
-root looking for `runtime/openepl_core.h`. If it can't find one it stays up and
-serves parse errors, reporting the degradation as a diagnostic on line 1 rather
-than going silent.
+The server locates the OpenEPL runtime three ways, in order: by walking up from
+the editor's workspace root looking for `runtime/openepl_core.h`; failing that,
+from `OPENEPL_RUNTIME_DIR`, which an installed toolchain sets; failing that, by
+walking up from the `openepl` binary itself — which is how a relocatable bundle
+finds its own runtime when your project lives somewhere else entirely, as
+anything made from a template does. If none of the three finds one it stays up
+and serves parse errors, reporting the degradation as a diagnostic on line 1
+rather than going silent.
 
 ## Neovim
 

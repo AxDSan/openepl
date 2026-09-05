@@ -13,8 +13,9 @@
 #     colour = red + green * 256 + blue * 65536
 # with each channel 0..255 — that is exactly what C's `RGB(r,g,b)` expands to.
 # Unpack the other way with `red = colour % 256`, `green = (colour / 256) % 256`,
-# `blue = (colour / 65536) % 256`. Constants are written in decimal because the
-# language has no hex literal; the hex a header would show is in the comment.
+# `blue = (colour / 65536) % 256`. Constants are written in decimal here because they
+# predate the lexer's hex literals; `0x00FF_FF00` compiles now, and the hex a
+# header would show is in the comment either way.
 #
 # BITMAPFILEHEADER is deliberately absent. It is `#pragma pack(2)` — 14 bytes,
 # not the 16 that natural alignment gives — so no c-record can have its layout.

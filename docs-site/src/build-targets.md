@@ -85,8 +85,8 @@ sub add(a: int, b: int): int
 end
 
 sub greeting(name: text): text
-  greetings = greetings + 1
-  return "Hello, " + name + "!"
+  greetings += 1
+  return "Hello, {name}!"
 end
 ```
 
@@ -354,7 +354,8 @@ or on Windows.
 The limits, stated plainly:
 
 - **Nothing is built natively on Windows yet.** This is a cross build from
-  Linux; there is no Windows build of the toolchain or of Studio.
+  Linux: the toolchain and Studio are both cross-built for Windows by
+  `tools/package-windows.sh`, and neither has been run on a Windows machine.
 - **A windowed program for Windows has been run under wine, not on Windows.**
   See above for what that proves.
 - **`https://` is off in a Windows build.** The vendored mbedTLS was built

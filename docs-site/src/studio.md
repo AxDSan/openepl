@@ -2,8 +2,12 @@
 
 `openepl-studio` with no arguments opens the welcome screen; with a `.oir`
 file, a `project.oeproj`, or a directory holding one, it opens that project.
-The welcome screen shows the toolchain's version, the templates, an *Open
-Project…* and *Open File…* browser, and the projects opened most recently.
+The welcome screen shows the toolchain's version, the templates, *Open
+Project…* and *Open File…*, and the projects opened most recently. Those two
+ask the platform for its own file dialog — `GetOpenFileName` on Windows,
+zenity or kdialog on Linux — and fall back to Studio's own in-app browser on a
+machine that has none, when one is cancelled, or when `OPENEPL_NO_NATIVE_DIALOG`
+is set.
 Opening a project opens its `main:` file; Studio never reads the project file
 itself — `openepl project` does.
 
@@ -163,6 +167,40 @@ started from. Start it where you keep your work:
 cd ~/projects && openepl-studio
 ```
 
+## Settings
+
+**Tools ▸ Settings…**, or `Ctrl+,`. Every control applies the moment you use
+it and the file is written straight away — there is no OK or Cancel to
+forget. A row that cannot take effect until Studio restarts says so on the
+row; a row you have changed shows a dot and a **Reset** beside its name.
+
+| Category | What it holds |
+| --- | --- |
+| Appearance | Theme (light or dark), whether the window size is remembered, how long the splash screen is shown |
+| Editor | Font size, indent width, lines per wheel notch, which tab a project opens on |
+| Designer | Show the grid, snap to it, its size |
+| Build | Where built binaries go, and whether to build optimised and stripped |
+| Files and startup | Whether exiting saves or discards, reopening the last project, how many recent projects are kept |
+| Toolchain | The `openepl` binary to use |
+
+Two of these are worth knowing about:
+
+**Where built binaries go.** Left empty, Run and Build Binary compile to a
+fixed name in your temporary directory — fine for running, no use for
+keeping. Set it to a directory and the binary is named after the module and
+stays there, which is how you get something to hand to someone.
+
+**On exit.** Studio saves your file when it exits, always. Set this to
+`discard` and it does not — useful when you have opened something you did not
+mean to edit. It says which it did, either way, because losing an
+afternoon's work silently would be worse than the problem the setting solves.
+
+The file is `key: value` lines in your data directory —
+`~/.local/share/openepl/settings`, or `%APPDATA%\openepl\settings` on
+Windows, and under `XDG_DATA_HOME` when that is set. Only values you have
+changed are written, so deleting a line puts that setting back to its
+default, and a key from a newer Studio is preserved rather than dropped.
+
 ## Studio on Windows
 
 Studio cross-builds for Windows x86-64 from Linux, the same way a windowed
@@ -182,8 +220,9 @@ What is different there, said here rather than discovered:
 - **Studio runs `openepl.exe` beside itself.** The toolbox, the welcome
   screen's templates and version, `inspect`, the language server and the
   build all go through it. The compiler cross-builds for
-  `x86_64-pc-windows-gnu` with two `cfg(windows)` shims still to land in
-  `cli/src` (a symlink and the `dlopen` of a library's metadata), and
+  `x86_64-pc-windows-gnu` over two `cfg(windows)` shims in `cli/src` — a
+  directory link in place of a symlink, and `LoadLibrary`/`GetProcAddress` in
+  place of the `dlopen` of a library's metadata — and
   `tools/package-windows.sh` ships it when that build succeeds and says
   plainly when it does not. Without it the welcome screen lists no templates
   and the toolbox is empty.
@@ -194,9 +233,10 @@ What is different there, said here rather than discovered:
   MSYS2's `mingw-w64-x86_64-gcc` — installed. Without clang, `openepl.exe
   version`, `templates`, `kits`, `project` and `inspect` work, but
   `commands` does not — it compiles each library's metadata with clang —
-  so the toolbox is empty, and `build` says `invoke clang: program not
-  found`. That is the state as verified under wine; no Windows machine has
-  run it.
+  so the toolbox is empty, and `build` says `clang is not on PATH — install
+  LLVM (which provides clang) and put its bin directory on PATH — see
+  SETUP-WINDOWS.md at the root of this bundle, beside README.md`. That is the
+  state as verified under wine; no Windows machine has run it.
 - **Per-user files** go where Windows keeps them: the recent-projects list
   under `%APPDATA%\openepl\`, the cache under `%LOCALAPPDATA%\openepl\cache\`,
   and a built program under `%TEMP%`. `XDG_DATA_HOME` and `XDG_CACHE_HOME`

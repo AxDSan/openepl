@@ -6,7 +6,7 @@
 # a `text[]` — a property value is a literal, so a list has to arrive as one
 # value — and it is what a subroutine appends to as well:
 #
-#   colours.items = concat(colours.items, "\nPurple")
+#   colours.items &= "\nPurple"
 #
 # Positions count from 1, so `selected = 2` is the second entry and 0 is
 # "nothing chosen".

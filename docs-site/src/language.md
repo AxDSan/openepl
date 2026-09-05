@@ -60,7 +60,7 @@ There is no implicit conversion between them. Convert explicitly:
 
 ```
 let n: int = 42
-call print_text(concat("answer: ", int_to_text(n)))
+call print_text("answer: " + int_to_text(n))
 ```
 
 ### Writing text
@@ -160,8 +160,8 @@ form main_window
 end
 
 sub on_tap
-  hits = hits + 1
-  tap.text = concat("tapped ", int_to_text(hits))
+  hits += 1
+  tap.text = "tapped {hits}"
 end
 ```
 
@@ -206,7 +206,7 @@ You call a subroutine exactly as you call a command: as a statement with
 module greeting
 
 sub shout(who: text): text
-  return concat(uppercase(who), "!")
+  return uppercase(who) + "!"
 end
 
 sub main
@@ -294,7 +294,7 @@ use file
 sub main
   let notes: text = file_read_text("notes.txt")
   if last_error_code() <> 0
-    call print_text(concat("could not read notes.txt: ", last_error_text()))
+    call print_text("could not read notes.txt: {last_error_text()}")
     return
   end
   call print_text(notes)

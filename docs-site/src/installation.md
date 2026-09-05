@@ -20,6 +20,7 @@ the folder wherever you like.
 | --- | --- |
 | Building any program | `clang`, `ar` |
 | Windowed programs and the IDE | `pkg-config`, SDL2, SDL2_image, FreeType, OpenGL |
+| Building for Windows (`--os windows`) | the mingw-w64 cross compiler — `mingw64-gcc` on Fedora, `gcc-mingw-w64-x86-64` on Debian and Ubuntu |
 
 The runtime ships as source and is compiled into each program you build. That
 is what lets the linker drop every command your program never calls.
@@ -75,4 +76,8 @@ tools/verify-bundle.sh dist/openepl-*.tar.gz    # prove it works unpacked elsewh
 
 ## Platform support
 
-Linux on x86-64. Windows, macOS and arm64 are not supported yet.
+Linux on x86-64, and Windows x86-64 as a cross build from it: `openepl build
+--os windows` produces a `.exe`, a DLL or a static library, and needs the mingw-w64 cross
+compiler above. Studio cross-builds for Windows too, and nothing is built
+natively *on* Windows; macOS and arm64 are not supported yet. See [Build
+targets](./build-targets.md) and [Limitations](./limitations.md).

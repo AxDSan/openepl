@@ -39,16 +39,13 @@ const LEFT  = 0xDEAD_BEEF
 const RIGHT = 4
 
 sub name_of(slot: int): text
-  if slot = 1
-    return "and"
-  else if slot = 2
-    return "or"
-  else if slot = 3
-    return "xor"
-  else if slot = 4
-    return "shl"
+  match slot
+  when 1: return "and"
+  when 2: return "or"
+  when 3: return "xor"
+  when 4: return "shl"
+  else: return "ushr"
   end
-  return "ushr"
 end
 
 sub symbol_of(slot: int): text
@@ -57,23 +54,20 @@ end
 
 # The same five operations, computed here rather than in C.
 sub native(slot: int, a: int, b: int): int
-  if slot = 1
-    return a band b
-  else if slot = 2
-    return a bor b
-  else if slot = 3
-    return a bxor b
-  else if slot = 4
-    return a shl b
+  match slot
+  when 1: return a band b
+  when 2: return a bor b
+  when 3: return a bxor b
+  when 4: return a shl b
+  else: return a ushr b
   end
-  return a ushr b
 end
 
 sub say(what: text, from_c: int, from_openepl: int)
   if from_c = from_openepl
-    call print_text("ok " + what + " = " + int_to_text(from_c))
+    call print_text("ok {what} = {from_c}")
   else
-    call print_text("FAIL " + what + ": C said " + int_to_text(from_c) + ", OpenEPL said " + int_to_text(from_openepl))
+    call print_text("FAIL {what}: C said {from_c}, OpenEPL said {from_openepl}")
   end
 end
 
@@ -86,19 +80,19 @@ sub main
 
   # Five addresses into five slots. Nothing here is a declared symbol.
   var vt: Table
-  for slot = 1 to 5
+  for slot in 1..5
     vt.fn[slot] = dlsym(lib, symbol_of(slot))
     if ptr_is_null(vt.fn[slot])
-      call print_text("FAIL missing " + symbol_of(slot))
+      call print_text("FAIL missing {symbol_of(slot)}")
       return
     end
   end
 
   # Everything except the left shift. A bit is tested, not a number compared.
   let request: int = WANT_AND bor WANT_OR bor WANT_XOR bor WANT_USHR
-  for want = 1 to 5
+  for want in 1..5
     if request band (1 shl (want - 1)) = 0
-      call print_text("skipped " + name_of(want))
+      call print_text("skipped {name_of(want)}")
       continue
     end
     call say(name_of(want), call through vt.fn[want](LEFT, RIGHT): int, native(want, LEFT, RIGHT))

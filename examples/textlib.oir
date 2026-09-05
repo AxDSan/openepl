@@ -59,7 +59,7 @@ sub main
 
   # --- failure reporting ---
   # "" from a bad code point, with the reason left in the error slot.
-  let bad_code = 0 - 1
+  let bad_code = -1
   let bad = text_from_code(bad_code)
   let code = last_error_code()
   call print_int(code)

@@ -166,7 +166,11 @@ pub fn apply_edits(text: &str, edits: &[(String, String)]) -> String {
         };
         match key.as_deref().and_then(|k| edits.iter().find(|(ek, _)| ek == k)) {
             Some((k, v)) => {
-                written.push(SETTABLE.iter().find(|s| *s == k).copied().unwrap_or(""));
+                // The key itself, not its entry in SETTABLE: a key that is
+                // not on that list would record "" and then be appended a
+                // second time by the loop below, leaving the file with the
+                // line twice.
+                written.push(k.as_str());
                 out.push(format!("{k}: {v}"));
             }
             None => out.push(line.to_string()),
@@ -343,6 +347,15 @@ mod tests {
         assert!(out.contains("author: someone"), "{out}");
         assert!(!out.contains("target: console"), "{out}");
         assert_eq!(out.lines().count(), text.lines().count());
+    }
+
+    #[test]
+    fn an_edited_field_is_never_written_twice() {
+        // `apply_edits` is public and does not itself police the key list, so
+        // a key outside SETTABLE must still be rewritten in place rather than
+        // rewritten *and* appended.
+        let out = apply_edits("author: old\n", &[("author".into(), "new".into())]);
+        assert_eq!(out, "author: new\n");
     }
 
     #[test]

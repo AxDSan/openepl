@@ -70,7 +70,7 @@ sub main
   # The wall clock agrees with core's now(): the same instant, finer grained.
   let secs = time_now_ms() / int_to_int64(1000)
   let drift = time_diff_seconds(secs, now())
-  if int_to_int64(0) - int_to_int64(1) <= drift <= int_to_int64(0)
+  if int_to_int64(-1) <= drift <= int_to_int64(0)
     call print_text("now_ms agrees with now()")
   end
 

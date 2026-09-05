@@ -51,7 +51,7 @@ sub wndproc(hwnd: ptr, msg: int, wparam: int64, lparam: int64): int64 system
     let dc: ptr = BeginPaint(hwnd, ps)
     call TextOutA(dc, 10, 10, "Built with OpenEPL.", 19)
     call EndPaint(hwnd, ps)
-    paints = paints + 1
+    paints += 1
     call print_text("paint")
     return int_to_int64(0)
   end
@@ -59,7 +59,7 @@ sub wndproc(hwnd: ptr, msg: int, wparam: int64, lparam: int64): int64 system
   if msg = WM_DESTROY
     # The window is going away. PostQuitMessage puts WM_QUIT in the queue,
     # which is what ends the pump in `main`.
-    destroys = destroys + 1
+    destroys += 1
     call print_text("destroy")
     call PostQuitMessage(0)
     return int_to_int64(0)
@@ -79,7 +79,7 @@ sub main
   # every field not set below is a documented "none".
   var wc: WNDCLASSEXA
   wc.cb_size = int64_to_int(size of WNDCLASSEXA)   # how the API versions the struct
-  wc.style = CS_HREDRAW + CS_VREDRAW               # disjoint bits, so + is |
+  wc.style = CS_HREDRAW bor CS_VREDRAW             # redraw on either resize
   wc.wnd_proc = address of wndproc
   wc.instance = instance
   wc.cursor = LoadCursorA(ptr_null(), ptr_from_int(int_to_int64(IDC_ARROW)))
@@ -88,7 +88,7 @@ sub main
 
   let atom: int = RegisterClassExA(wc)
   if atom = 0
-    call print_text("register FAILED " + int_to_text(GetLastError()))
+    call print_text("register FAILED {GetLastError()}")
     return
   end
   call print_text("registered")
@@ -98,7 +98,7 @@ sub main
   # instance, and the LPVOID handed to WM_CREATE.
   let hwnd: ptr = CreateWindowExA(0, CLASS_NAME, "OpenEPL", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 360, 220, ptr_null(), ptr_null(), instance, ptr_null())
   if ptr_is_null(hwnd)
-    call print_text("create FAILED " + int_to_text(GetLastError()))
+    call print_text("create FAILED {GetLastError()}")
     return
   end
   call print_text("created")
@@ -111,7 +111,7 @@ sub main
   var msg: MSG
   var frames: int = 0
   while frames < FRAME_BUDGET
-    frames = frames + 1
+    frames += 1
     if PeekMessageA(msg, ptr_null(), 0, 0, PM_REMOVE)
       if msg.message = WM_QUIT
         break
@@ -127,7 +127,7 @@ sub main
 
   call UnregisterClassA(CLASS_NAME, instance)
 
-  call print_text("paints " + int_to_text(paints))
-  call print_text("destroys " + int_to_text(destroys))
-  call print_text("frames " + int_to_text(frames))
+  call print_text("paints {paints}")
+  call print_text("destroys {destroys}")
+  call print_text("frames {frames}")
 end

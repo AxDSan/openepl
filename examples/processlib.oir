@@ -59,11 +59,10 @@ sub main
   while count < 10
     let line = process_read_line(lines)
     if process_at_end(lines)
-      count = 10
-    else
-      call print_text("line: [{line}]")
-      increment count
+      break
     end
+    call print_text("line: [{line}]")
+    increment count
   end
   call print_text("end of output")
   if process_close(lines)

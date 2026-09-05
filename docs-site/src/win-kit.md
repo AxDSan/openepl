@@ -67,9 +67,11 @@ openepl build app.oir --os windows -o app.exe
 
 ## The two examples
 
-`examples/win/` holds six programs. None of them contains a `dll`, a `record`
-or a `const` line: if the kit were short of anything they need, they would not
-build. Two are worth reading first.
+`examples/win/` holds six programs. None of them contains a `dll` or a `record`
+line: if the kit were short of a declaration they need, they would not build.
+(They do declare a few of their own `const`s — a window class name, a frame
+budget — which is a program naming its own values, not a gap in the kit.) Two
+are worth reading first.
 
 ### A window
 
@@ -107,7 +109,7 @@ what the API wants of every field a program does not set:
 ```text
 var wc: WNDCLASSEXA
 wc.cb_size = int64_to_int(size of WNDCLASSEXA)
-wc.style = CS_HREDRAW + CS_VREDRAW
+wc.style = CS_HREDRAW bor CS_VREDRAW             # redraw on either resize
 wc.wnd_proc = address of wndproc
 wc.instance = GetModuleHandleNull(ptr_null())
 wc.cursor = LoadCursorA(ptr_null(), ptr_from_int(int_to_int64(IDC_ARROW)))
@@ -130,7 +132,8 @@ it, and then reads that value back *through kernel32* rather than off the
 pointer:
 
 ```text
-let process: ptr = OpenProcess(PROCESS_VM_READ + PROCESS_QUERY_INFORMATION, false, GetCurrentProcessId())
+let access: int = PROCESS_VM_READ bor PROCESS_VM_WRITE bor PROCESS_QUERY_INFORMATION
+let process: ptr = OpenProcess(access, false, pid)
 let read_ok: bool = ReadProcessMemory(process, page, into, 4, moved)
 ```
 

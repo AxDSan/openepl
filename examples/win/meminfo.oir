@@ -20,11 +20,11 @@
 module meminfo
 use win
 
-# 0x12345678, written in decimal because the language has no hex literal.
-const SENTINEL = 305419896
-# 0x0BADF00D — the second one, so a write that lands can be told from a read
-# that happened to see the first.
-const SECOND = 195948557
+# A recognisable pattern to write into the page and read back out again.
+const SENTINEL = 0x1234_5678
+# The second one, so a write that lands can be told from a read that happened
+# to see the first.
+const SECOND = 0x0BAD_F00D
 
 sub say(label: text, ok: bool)
   if ok
@@ -37,16 +37,16 @@ end
 sub main
   # --- the process ------------------------------------------------------
   # GetCurrentProcessId answers a DWORD; OpenProcess turns it into a handle
-  # with the rights asked for. PROCESS_VM_READ (16) and PROCESS_VM_WRITE (32)
-  # and PROCESS_QUERY_INFORMATION (1024) are disjoint bits, so `+` adds them
-  # the way C's `|` would — the language has no bitwise operator.
+  # with the rights asked for. PROCESS_VM_READ, PROCESS_VM_WRITE and
+  # PROCESS_QUERY_INFORMATION are single bits of an access mask, so `bor`
+  # combines them — the same `|` the C headers write.
   let pid: int = GetCurrentProcessId()
   call say("pid", pid > 0)
 
-  let access: int = PROCESS_VM_READ + PROCESS_VM_WRITE + PROCESS_QUERY_INFORMATION
+  let access: int = PROCESS_VM_READ bor PROCESS_VM_WRITE bor PROCESS_QUERY_INFORMATION
   let process: ptr = OpenProcess(access, false, pid)
   if ptr_is_null(process)
-    call print_text("open FAILED " + int_to_text(GetLastError()))
+    call print_text("open FAILED {GetLastError()}")
     return
   end
   call say("open", true)
@@ -56,7 +56,7 @@ sub main
   # below is one page with a protection this program chose.
   let page: ptr = VirtualAlloc(ptr_null(), 4096, MEM_COMMIT_RESERVE, PAGE_READWRITE)
   if ptr_is_null(page)
-    call print_text("alloc FAILED " + int_to_text(GetLastError()))
+    call print_text("alloc FAILED {GetLastError()}")
     return
   end
   call say("alloc", true)
@@ -77,7 +77,7 @@ sub main
   call say("read count", ptr_read_int64(moved, 0) = int_to_int64(4))
   let got: int = ptr_read_int(into, 0)
   call say("read value", got = SENTINEL)
-  call print_text("value " + int_to_text(got))
+  call print_text("value {got}")
 
   # --- and write through it, the other direction ------------------------
   call ptr_write_int(into, 0, SECOND)
@@ -97,7 +97,7 @@ sub main
   call say("query state", region.State = MEM_COMMIT)
   call say("query protect", region.Protect = PAGE_READWRITE)
   call say("query base", ptr_to_int(region.BaseAddress) = ptr_to_int(page))
-  call print_text("region " + int64_to_text(region.RegionSize))
+  call print_text("region {region.RegionSize}")
 
   # --- the machine ------------------------------------------------------
   # One more struct the callee fills, and the number every allocation above

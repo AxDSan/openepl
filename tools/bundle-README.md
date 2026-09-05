@@ -72,18 +72,22 @@ ends with a line saying so when it did not), and the same `templates\`,
 `runtime\`, `libs\` and `docs\`. Unzip it anywhere and run
 `bin\openepl-studio.exe`.
 
-Building a program there needs a toolchain on the machine, the same two
-`openepl build --os windows` uses on Linux:
+Building a program there needs a toolchain on the machine:
 
 | For | You need on the Windows machine |
 | --- | --- |
 | Any build | LLVM's `clang` on `PATH` — https://releases.llvm.org/ |
-| The link | mingw-w64's `gcc` and `g++` on `PATH` — MSYS2's `mingw-w64-x86_64-gcc` |
-| GUI programs | the mingw-w64 SDL2, SDL2_image and freetype packages (MSYS2: `mingw-w64-x86_64-SDL2`, `-SDL2_image`, `-freetype`) |
+| GUI programs | SDL2, SDL2_image and freetype, built for the mingw ABI (MSYS2: `mingw-w64-x86_64-SDL2`, `-SDL2_image`, `-freetype`) |
 
-**`SETUP-WINDOWS.md`, beside this file, walks through installing them** —
-including the "Add LLVM to the system PATH" box, which is not ticked by
-default and is what most first runs are missing.
+Those MSYS2 package names begin with `mingw-w64-` because they are the mingw
+ABI *builds of those libraries*, which is what a program built here links
+against. The mingw-w64 **cross-compiler** is a different thing, and it is
+needed on the *Linux* machine running `openepl build --os windows` — not on
+the Windows one.
+
+**The Windows bundle carries `SETUP-WINDOWS.md` at its root, and it walks
+through installing them** — including the "Add LLVM to the system PATH" box,
+which is not ticked by default and is what most first runs are missing.
 
 Without `clang`, Studio opens and shows the templates, but the toolbox is
 empty — it is filled from `openepl commands`, which compiles each library's

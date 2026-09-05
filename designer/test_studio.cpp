@@ -314,10 +314,10 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("hover on a command shows its signature", has(out, "tip=block") && has(out, "print_text(text)"));
     }
     {
-        const std::string out = session(designer, openepl, grid, "gotodef:103,20;refs:95,7");
-        check("F12 on a local jumps to its declaration", has(out, "definition: caret 101,7"));
+        const std::string out = session(designer, openepl, grid, "gotodef:104,20;refs:96,7");
+        check("F12 on a local jumps to its declaration", has(out, "definition: caret 102,7"));
         check("Shift+F12 lists the wiring line and the declaration",
-              has(out, "references: 2") && has(out, "line 49:18") && has(out, "line 95:5"));
+              has(out, "references: 2") && has(out, "line 49:18") && has(out, "line 96:5"));
     }
 
     // The designer writes only what the descriptor declares. Through a CLI
@@ -487,9 +487,9 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         session(designer, openepl, form, "add:button;click:button1;key:delete", &path);
         check("Delete on the canvas removes the selection", !has(slurp(path), "button1"));
         const std::string out =
-            session(designer, openepl, grid, "view:code;goto:103,20;focus;key:f12;waitdef");
+            session(designer, openepl, grid, "view:code;goto:104,20;focus;key:f12;waitdef");
         check("F12 pressed in the editor jumps to the declaration",
-              has(out, "definition: caret 101,7"));
+              has(out, "definition: caret 102,7"));
     }
 
     // Help > About: every way out closes it, a click inside does not, and a
@@ -781,12 +781,95 @@ static void test_sessions(const std::string& openepl, const std::string& designe
     }
 }
 
+/// The settings page. Every check drives it the way a person would — through
+/// the dialog's own controls — rather than calling the store directly, because
+/// the store was never the part that broke.
+///
+/// Each session gets its own XDG_DATA_HOME so a test never reads or writes the
+/// settings file a person sees, and so one test's value cannot leak into the
+/// next one's assertions.
+static void test_settings(const std::string& openepl, const std::string& designer) {
+    std::printf("settings\n");
+    static int n = 0;
+    auto run = [&](const std::string& script) {
+        // A COPY of the fixture, never the tracked file: Studio saves on exit,
+        // and a test that ran would land in the next commit.
+        const std::string home = "/tmp/openepl_settings_test_" + std::to_string(++n);
+        const std::string copy = home + ".oir";
+        { std::ofstream f(copy, std::ios::trunc); f << slurp("examples/form.oir"); }
+        std::string cmd = "rm -rf " + home + " && mkdir -p " + home + " && XDG_DATA_HOME=" + home +
+                          " OPENEPL_DESIGNER_SCRIPT='" + script + "' " + designer + " " + copy +
+                          " " + openepl + " 2>/dev/null";
+        std::string out;
+        if (FILE* p = popen(cmd.c_str(), "r")) {
+            char buf[4096];
+            while (fgets(buf, sizeof buf, p)) out += buf;
+            pclose(p);
+        }
+        return out;
+    };
+
+    const std::string open = run("settings:Appearance;settingsdump:1");
+    check("settings: the page opens on a category",
+          has(open, "settings: open Appearance"));
+    check("settings: every category's rows are listed",
+          has(open, "row: Appearance|appearance.theme|light|default") &&
+              has(open, "row: Editor|editor.indent_size|2|default") &&
+              has(open, "row: Build|build.output_dir||default"));
+    // The window geometry is state, not a preference, and must not appear.
+    check("settings: remembered geometry is not shown as a row", !has(open, "row: |window.width"));
+
+    // A chip is pressed the way a person presses it: by finding the control
+    // that carries the value, not by calling the setter.
+    const std::string dark = run("settings:Appearance;click:appearance.theme=dark;getsetting:appearance.theme");
+    check("settings: pressing a chip changes the setting",
+          has(dark, "setting: appearance.theme = dark"));
+
+    // A value out of range must be refused rather than clamped silently:
+    // grid_size reaches an integer division, and 0 there is a crash.
+    const std::string bounds =
+        run("setsetting:designer.grid_size=0;getsetting:designer.grid_size;"
+            "setsetting:designer.grid_size=20;getsetting:designer.grid_size");
+    check("settings: a value below the row's floor is refused",
+          has(bounds, "designer.grid_size = 10 refused"));
+    check("settings: a value in range is taken", has(bounds, "designer.grid_size = 20 ok"));
+    const std::string bogus = run("setsetting:appearance.theme=chartreuse;getsetting:appearance.theme");
+    check("settings: a choice outside its choices is refused",
+          has(bogus, "appearance.theme = light refused"));
+
+    // Written on change, and read back by the next start — the whole point.
+    const std::string home = "/tmp/openepl_settings_persist";
+    const std::string copy = home + ".oir";
+    { std::ofstream f(copy, std::ios::trunc); f << slurp("examples/form.oir"); }
+    std::string cmd = "rm -rf " + home + " && mkdir -p " + home + " && XDG_DATA_HOME=" + home +
+                      " OPENEPL_DESIGNER_SCRIPT='settings:Appearance;click:appearance.theme=dark' " +
+                      designer + " " + copy + " " + openepl + " >/dev/null 2>&1; XDG_DATA_HOME=" +
+                      home + " OPENEPL_DESIGNER_SCRIPT='getsetting:appearance.theme' " + designer +
+                      " " + copy + " " + openepl + " 2>/dev/null";
+    std::string second;
+    if (FILE* p = popen(cmd.c_str(), "r")) {
+        char buf[4096];
+        while (fgets(buf, sizeof buf, p)) second += buf;
+        pclose(p);
+    }
+    check("settings: a change survives a restart", has(second, "setting: appearance.theme = dark"));
+
+    // The indent width is the editor setting most likely to be silently
+    // ignored: it is read in four places, and three of them are arithmetic.
+    const std::string indent =
+        run("setsetting:editor.indent_size=4;view:code;goto:8,1;key:tab;bufline:8");
+    check("settings: the indent width reaches the editor", has(indent, "buf 8:     use ui"));
+    const std::string two = run("view:code;goto:8,1;key:tab;bufline:8");
+    check("settings: the default indent is still two", has(two, "buf 8:   use ui"));
+}
+
 int main(int argc, char** argv) {
     const std::string openepl = argc > 1 ? argv[1] : "./target/debug/openepl";
     const std::string designer = argc > 2 ? argv[2] : "designer/openepl-designer";
     test_catalog();
     if (::access(designer.c_str(), X_OK) == 0) {
         test_sessions(openepl, designer);
+        test_settings(openepl, designer);
     } else {
         std::printf("sessions: %s not built, skipped\n", designer.c_str());
     }

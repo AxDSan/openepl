@@ -136,8 +136,8 @@ the shorthands, in one program
   # A list built by a loop, written where the list is wanted.
   let doubled: int[] = [v * 2 for each v in [1, 2, 3]]
   call print_text(join([int_to_text(d) for each d in doubled], ", "))   # 2, 4, 6
-  # A dictionary has no guaranteed order, so the picked keys are sorted before
-  # they are printed — the filter is what the line is showing.
+  # The keys come out in the order they went in; the sort keeps the line
+  # stable whatever the filter picks — the filter is what it is showing.
   var grown: text[] = [k for each k, v in ages where v >= 40]
   call sort(grown)
   call print_text(join(grown, ", "))              # grace
