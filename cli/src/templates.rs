@@ -297,6 +297,20 @@ pub fn cmd_new(repo_root: &Path, args: &[String]) -> i32 {
         return 1;
     }
 
+    // What a build leaves behind, ignored from the first commit rather than
+    // after someone commits a binary. Written here rather than shipped in each
+    // template because every template wants exactly the same three lines, and
+    // four copies of a file is four chances for one to fall behind. A template
+    // that ships its own is left alone.
+    let ignore = dest.join(".gitignore");
+    if !ignore.exists() {
+        let text = "# Studio's throwaway build, made by Run\n.openepl/\n\n# Where Build puts your program\nbuild/\n";
+        if let Err(e) = std::fs::write(&ignore, text) {
+            eprintln!("openepl: cannot write {}: {e}", ignore.display());
+            return 1;
+        }
+    }
+
     // Printed in the same line-based shape as the listing, so Studio can read
     // where to open without guessing. `project:` is an ADDED line: a reader
     // that only knows `open:` still sees exactly what it saw before.

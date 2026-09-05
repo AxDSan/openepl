@@ -88,7 +88,7 @@ inline const std::vector<Row>& schema() {
          "Also the distance an arrow key nudges with Shift.", {}},
 
         {"build.output_dir", "Build", "Put built binaries in", Kind::Path, "", 0, 0, false,
-         "Empty builds to a temporary file, which is not yours to keep.", {}},
+         "Where Build puts your program. Empty means the project's build/. Run always uses .openepl/run/ inside the project.", {}},
         {"build.release", "Build", "Build optimised and stripped", Kind::Bool, "false", 0, 0,
          false, "Passes --release. Slower to build, smaller to ship.", {}},
 

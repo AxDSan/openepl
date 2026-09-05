@@ -268,6 +268,27 @@ inline std::string file_uri(const std::string& abs) {
 #endif
 }
 
+/// Delete a file, saying whether it was there to delete. Missing is not an
+/// error: the callers are cleaning up, and "already gone" is the goal state.
+inline bool remove_file(const std::string& path) {
+#ifdef _WIN32
+    return DeleteFileA(path.c_str()) != 0;
+#else
+    return ::remove(path.c_str()) == 0;
+#endif
+}
+
+/// Delete a directory, and only when it is empty. The emptiness check is the
+/// operating system's, not ours: a directory holding something a user put
+/// there refuses to go, which is the guard the callers want.
+inline bool remove_dir(const std::string& path) {
+#ifdef _WIN32
+    return RemoveDirectoryA(path.c_str()) != 0;
+#else
+    return ::rmdir(path.c_str()) == 0;
+#endif
+}
+
 /// A program built by Studio: what to call the file so the platform runs it.
 inline std::string program_name(const std::string& stem) {
 #ifdef _WIN32

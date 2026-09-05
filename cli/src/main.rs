@@ -140,6 +140,7 @@ fn usage() {
          openepl build <in.oir> [-o <out>]   compile to a native binary\n  \
          openepl run   <in.oir> [-o <out>]   compile and run\n  \
          openepl build|run --release         …optimised, hardened and stripped\n  \
+         openepl build --emit-ir             …keeping the .ll it handed clang\n  \
          openepl build --os windows          …for Windows x86-64 (needs mingw-w64)\n  \
          openepl build --target sharedlib    …a library, with its C header beside it\n  \
            [--header <path>]                 where the header goes (default <module>.h)\n  \
@@ -184,6 +185,11 @@ struct Io {
     target: Option<Target>,
     /// Optimise, harden and strip the built program.
     release: bool,
+    /// Keep the `.ll` the build handed clang. Off by default: it is an
+    /// intermediate, and leaving one beside every binary litters a project
+    /// directory with files nobody asked for. `openepl emit` prints the IR
+    /// for anyone who wants to read it.
+    emit_ir: bool,
     /// The operating system the output is for.
     os: Os,
     /// Where a library build writes its C header; `None` is `<module>.h`
@@ -287,6 +293,7 @@ fn parse_io_args(rest: &[String]) -> Result<Io, String> {
     let mut output: Option<PathBuf> = None;
     let mut target: Option<Target> = None;
     let mut release = false;
+    let mut emit_ir = false;
     let mut os = Os::host();
     let mut header: Option<PathBuf> = None;
     let mut i = 0;
@@ -305,6 +312,7 @@ fn parse_io_args(rest: &[String]) -> Result<Io, String> {
                 })?);
             }
             "--release" => release = true,
+            "--emit-ir" => emit_ir = true,
             "--header" => {
                 i += 1;
                 let v = rest.get(i).ok_or("`--header` needs a path")?;
@@ -332,6 +340,7 @@ fn parse_io_args(rest: &[String]) -> Result<Io, String> {
         output,
         target,
         release,
+        emit_ir,
         os,
         header,
         project_output: None,
@@ -761,12 +770,23 @@ fn cmd_build(rest: &[String], then_run: bool) -> i32 {
     }
 
     let repo_root = find_repo_root().expect("runtime located during compile()");
-    if let Err(code) = clang_link(
+    let linked = clang_link(
         &ll_path, &repo_root, &plan, &out_bin, target, io.os, io.release,
-    ) {
+    );
+    // The `.ll` was clang's input, not an output anyone asked for. It goes
+    // whether the link succeeded or not — a failed build should not leave a
+    // file behind either. Failure to remove it is not worth a message: the
+    // build's own result is the news.
+    if !io.emit_ir {
+        let _ = std::fs::remove_file(&ll_path);
+    }
+    if let Err(code) = linked {
         return code;
     }
     eprintln!("openepl: wrote {}", out_bin.display());
+    if io.emit_ir {
+        eprintln!("openepl: wrote {}", ll_path.display());
+    }
 
     // A library is only usable with its prototypes, so they come out of the
     // same IR the artifact did. Written after the link, so a failed build

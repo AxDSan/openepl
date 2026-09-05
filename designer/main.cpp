@@ -2889,23 +2889,56 @@ void set_activity(const char* what) {
         e->SetProperty("display", g.running_app > 0 ? "inline" : "none");
 }
 
+/// The directory holding the open project. A loose `.oir` opened on its own
+/// has no project around it, so its own directory is the project.
+std::string project_dir() {
+    const size_t slash = g.model.path.find_last_of('/');
+    return slash == std::string::npos ? std::string(".") : g.model.path.substr(0, slash);
+}
+
+/// Where Run's throwaway binary lives. Kept in a dotted subdirectory so a
+/// project listing does not fill with build output, and so one line in
+/// `.gitignore` covers everything Studio ever writes into a project.
+std::string run_dir() { return project_dir() + "/.openepl/run"; }
+
+/// Remove what Run left behind. Called when a real build succeeds: from then
+/// on the binary in the output directory is the answer to "where is my
+/// program", and a stale throwaway beside it is a second, wrong answer.
+void clear_run_artifacts() {
+    const std::string stem =
+        g.model.module_name.empty() ? std::string("app") : g.model.module_name;
+    const std::string path = run_dir() + "/" + openepl::sys::program_name(stem);
+    if (openepl::sys::remove_file(path)) log("  removed the run build " + path, "muted");
+    // And the directories, when nothing else is in them. `rmdir` on a
+    // non-empty directory fails, which is exactly the guard wanted: a user who
+    // put something of their own in there keeps it.
+    openepl::sys::remove_dir(run_dir());
+    openepl::sys::remove_dir(project_dir() + "/.openepl");
+}
+
 /// Start a build. Returns immediately; poll_build() reports progress.
 void build_binary(bool then_run) {
     if (g.build_pid > 0) { set_status("a build is already running"); return; }
     save();
     g.log_lines.clear();
 
-    // Where the binary lands. Left unset it is a fixed name in the temporary
-    // directory — fine for Run, useless for shipping, which is the whole point
-    // of the tool. Given a directory, the binary is named after the module and
-    // stays where it was put.
-    const std::string out_dir = openepl::settings::text("build.output_dir");
-    if (out_dir.empty()) {
-        g.build_target =
-            openepl::sys::temp_dir() + "/" + openepl::sys::program_name("openepl_studio_app");
+    // Where the binary lands, and it is two different questions.
+    //
+    // Run wants a throwaway, and it belongs *inside the project* rather than
+    // in the system's temporary directory: a shared /tmp name collides between
+    // two Studios and between two projects, and a binary that lives beside the
+    // source that produced it is one a user can find, inspect and delete.
+    // Build wants a keepsake, and it is what clears the throwaway away.
+    const std::string stem =
+        g.model.module_name.empty() ? std::string("app") : g.model.module_name;
+    if (then_run) {
+        const std::string dir = run_dir();
+        openepl::sys::make_dirs(dir);
+        g.build_target = dir + "/" + openepl::sys::program_name(stem);
     } else {
+        std::string out_dir = openepl::settings::text("build.output_dir");
+        if (out_dir.empty()) out_dir = project_dir() + "/build";
         openepl::sys::make_dirs(out_dir);
-        const std::string stem = g.model.module_name.empty() ? std::string("app") : g.model.module_name;
         g.build_target = out_dir + "/" + openepl::sys::program_name(stem);
     }
     const std::string release =
@@ -3040,6 +3073,7 @@ void poll_build() {
         g.build_then_run = false;
         run_app(g.build_target);
     } else {
+        clear_run_artifacts();
         set_activity(nullptr);
     }
 }

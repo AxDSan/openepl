@@ -49,8 +49,13 @@ static bool has(const std::string& hay, const std::string& needle) {
 static std::string session(const std::string& designer, const std::string& openepl,
                            const std::string& fixture, const std::string& script,
                            std::string* saved_path = nullptr) {
+    // Each session gets its own directory, never a shared one: Studio now
+    // writes build output *inside the project*, so two sessions sharing a
+    // directory would share a build target and race for it.
     static int n = 0;
-    const std::string copy = "/tmp/openepl_studio_test_" + std::to_string(++n) + ".oir";
+    const std::string dir = "/tmp/openepl_studio_test_" + std::to_string(++n);
+    ::mkdir(dir.c_str(), 0755);
+    const std::string copy = dir + "/main.oir";
     { std::ofstream f(copy, std::ios::trunc); f << slurp(fixture); }
     if (saved_path) *saved_path = copy;
     const std::string cmd = "OPENEPL_DESIGNER_SCRIPT='" + script + "' " + designer + " " + copy +
@@ -359,7 +364,8 @@ static void test_sessions(const std::string& openepl, const std::string& designe
         check("build log: a drag selects whole lines",
               has(out, "logselect:") && has(out, "|  stage 2/4") && has(out, "(--gc-sections)"));
         check("build log: typing into it changes nothing", has(out, "edited=no"));
-        check("build log: the result keeps its class", has(out, "LOG [ok] OK  /tmp/openepl_studio_app"));
+        check("build log: the result keeps its class",
+              has(out, "LOG [ok] OK  /tmp/openepl_studio_test_") && has(out, "/build/hello_form"));
     }
 
     // Completion. Typing opens the popup, typing on narrows it, Enter takes
@@ -513,11 +519,11 @@ static void test_sessions(const std::string& openepl, const std::string& designe
     // caret is in — the name the language server's index knows.
     {
         const std::string out = session(designer, openepl, form, "tabs;view:code;goto:39,3;tabs;goto:36,1;tabs");
-        check("tabs: both name the file", has(out, "tabs: Designer [openepl_studio_test_") &&
-                                          has(out, "] | Code [openepl_studio_test_"));
+        check("tabs: both name the file", has(out, "tabs: Designer [main.oir]") &&
+                                          has(out, "] | Code [main.oir]"));
         check("tabs: the caret in a sub names it on the Code tab", has(out, "| Code [on_ok_click]"));
         check("tabs: outside every sub the Code tab names the file again",
-              out.rfind("| Code [openepl_studio_test_") > out.find("| Code [on_ok_click]"));
+              out.rfind("| Code [main.oir]") > out.find("| Code [on_ok_click]"));
     }
 
     // The preview's title bar is decoration: the client area starts under it
@@ -863,6 +869,44 @@ static void test_settings(const std::string& openepl, const std::string& designe
     check("settings: the default indent is still two", has(two, "buf 8:   use ui"));
 }
 
+/// Where Run and Build put their binaries, and that Build clears Run's away.
+///
+/// This is the property a user sees: pressing Run must not leave an
+/// executable in the system's temporary directory under a name shared by
+/// every project, and pressing Build must leave exactly one binary behind —
+/// theirs, in the output directory — with the throwaway gone.
+static void test_build_artifacts(const std::string& openepl, const std::string& designer) {
+    std::printf("build artifacts\n");
+
+    static int n = 0;
+    const std::string dir = "/tmp/openepl_artifact_test_" + std::to_string(++n);
+    ::system(("rm -rf " + dir).c_str());
+    ::mkdir(dir.c_str(), 0755);
+    const std::string src = dir + "/main.oir";
+    { std::ofstream f(src, std::ios::trunc); f << slurp("examples/hello.oir"); }
+
+    const std::string exists = "test -e ";
+    auto present = [&](const std::string& p) { return ::system((exists + p).c_str()) == 0; };
+
+    // Run alone: the binary is inside the project, not in /tmp.
+    const std::string cmd = "XDG_DATA_HOME=" + dir + "/xdg OPENEPL_DESIGNER_SCRIPT='run' " +
+                            designer + " " + src + " " + openepl + " >/dev/null 2>&1";
+    ::system(cmd.c_str());
+    check("run: the binary lands inside the project", present(dir + "/.openepl/run/hello"));
+    // Then Build: its own binary appears, and Run's is cleared away.
+    const std::string cmd2 = "XDG_DATA_HOME=" + dir + "/xdg OPENEPL_DESIGNER_SCRIPT='build' " +
+                             designer + " " + src + " " + openepl + " >/dev/null 2>&1";
+    ::system(cmd2.c_str());
+    check("build: the binary lands in the project's build directory", present(dir + "/build/hello"));
+    check("build: the run build is cleared away", !present(dir + "/.openepl/run/hello"));
+    check("build: the emptied run directory goes too", !present(dir + "/.openepl"));
+
+    // And the intermediate IR is not left beside either of them.
+    check("build: no .ll is left beside the binary", !present(dir + "/build/hello.ll"));
+
+    ::system(("rm -rf " + dir).c_str());
+}
+
 int main(int argc, char** argv) {
     const std::string openepl = argc > 1 ? argv[1] : "./target/debug/openepl";
     const std::string designer = argc > 2 ? argv[2] : "designer/openepl-designer";
@@ -870,6 +914,7 @@ int main(int argc, char** argv) {
     if (::access(designer.c_str(), X_OK) == 0) {
         test_sessions(openepl, designer);
         test_settings(openepl, designer);
+        test_build_artifacts(openepl, designer);
     } else {
         std::printf("sessions: %s not built, skipped\n", designer.c_str());
     }

@@ -9,6 +9,7 @@ USAGE:
   openepl build <in.oir> [-o <out>]   compile to a native binary
   openepl run   <in.oir> [-o <out>]   compile and run
   openepl build|run --release         …optimised, hardened and stripped
+  openepl build --emit-ir             …keeping the .ll it handed clang
   openepl build --os windows          …for Windows x86-64 (needs mingw-w64)
   openepl build --target sharedlib    …a library, with its C header beside it
   [--header <path>]                 where the header goes (default <module>.h)
@@ -45,6 +46,10 @@ openepl run app.oir
 `--target` overrides whatever the module declares, so one source can be built
 as a program or as a library without editing it. See
 [Build targets](./build-targets.md).
+
+A build writes the binary and nothing else. The LLVM IR it hands `clang` is an
+intermediate and is removed once the link is done — `--emit-ir` keeps it beside
+the binary as `<out>.ll`, and `openepl emit` prints it without building at all.
 
 ## Starting a project
 
